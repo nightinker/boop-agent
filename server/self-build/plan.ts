@@ -143,6 +143,8 @@ export function restartScript(input: {
   const ports = (input.ports ?? [3456, 5173, 4040]).join(" ");
   return `#!/bin/bash
 set -u
+# open passes this to the app it launches; Boop would start as plain Node and exit.
+unset ELECTRON_RUN_AS_NODE BOOP_NODE_CMD
 NEW=${q(input.newAppPath)}
 APP=${q(input.appPath)}
 BACKUP=${q(input.backupDir)}

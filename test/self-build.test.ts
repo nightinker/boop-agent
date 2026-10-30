@@ -166,4 +166,18 @@ describe("restart helper process matching", () => {
     expect(script).toContain('pgrep -f "^$APP/Contents/"');
     expect(script).not.toContain('pgrep -f "$APP/Contents/"');
   });
+
+  it("clears the Electron-as-Node flag before relaunching Boop", () => {
+    const script = restartScript({
+      buildId: "b",
+      newAppPath: "/n/Boop.app",
+      appPath: "/Applications/Boop.app",
+      backupDir: "/b",
+      resultPath: "/r",
+      healthUrl: "h",
+    });
+    const unsetAt = script.indexOf("unset ELECTRON_RUN_AS_NODE");
+    expect(unsetAt).toBeGreaterThan(-1);
+    expect(unsetAt).toBeLessThan(script.indexOf('open -a "$APP"'));
+  });
 });
