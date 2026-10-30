@@ -279,7 +279,7 @@ async function recallPreferenceLines(): Promise<string[]> {
 // conversation that doesn't match the `sms:+1NNNNNNNNNN` ID Sendblue uses
 // for inbound messages from the same person — proactive notices end up in
 // a parallel Convex conversation invisible to the user-driven thread.
-function normalizeProactivePhone(raw: string): string | null {
+export function normalizeProactivePhone(raw: string): string | null {
   const trimmed = raw.trim();
   if (!trimmed) return null;
   if (trimmed.startsWith("+")) return trimmed;
@@ -348,15 +348,17 @@ export async function ensureProactiveWatcher(publicUrl: string): Promise<void> {
     console.warn("[proactive] COMPOSIO_API_KEY not set; skipping watcher setup");
     return;
   }
-  if (!process.env.BOOP_USER_PHONE) {
-    console.warn(
-      "[proactive] BOOP_USER_PHONE not set; webhook will register but notices won't dispatch",
-    );
-  }
   try {
     await ensureWebhookSubscription(publicUrl);
   } catch (err) {
     console.error("[proactive] webhook subscription setup failed", err);
+    return;
+  }
+  // Without a phone the notices can't be sent, so don't classify every email
+  // for nothing. (Triggers never registered before the 2FA user_id fix, so
+  // this keeps Gmail as quiet as it has always been until a phone is set.)
+  if (!process.env.BOOP_USER_PHONE) {
+    console.warn("[proactive] BOOP_USER_PHONE not set; not watching Gmail");
     return;
   }
   const gmailConnections = (await listConnectedToolkits()).filter(

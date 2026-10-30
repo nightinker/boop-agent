@@ -15,6 +15,7 @@ import { runCurator, startCuratorLoop } from "./skills/curator.js";
 import { cancelAgent, retryAgent } from "./execution-agent.js";
 import { createComposioRouter } from "./composio-routes.js";
 import { ensureProactiveWatcher } from "./proactive-email.js";
+import { ensureSlackWatcher, sendSlackDigest, startSlackDigestLoop } from "./proactive-slack.js";
 import { preloadLocalModel } from "./embeddings.js";
 import { createMemoryRouter } from "./memory-routes.js";
 import { createBrowserRouter } from "./browser-routes.js";
@@ -47,6 +48,7 @@ async function main() {
   startHeartbeatLoop();
   startConsolidationLoop();
   startCuratorLoop();
+  startSlackDigestLoop();
   startImageCleanup();
   // No-op when a paid embedding key is set; otherwise downloads/loads the
   // local BGE-large model in the background so the first user-facing
@@ -62,6 +64,7 @@ async function main() {
     ensureProactiveWatcher(stableUrl).catch((err) =>
       console.error("[proactive] startup failed", err),
     );
+    ensureSlackWatcher(stableUrl).catch((err) => console.error("[slack-watch] startup failed", err));
   }
 
   const app = express();
@@ -122,6 +125,14 @@ async function main() {
     }
     try {
       res.json({ account: await switchCswapAccount(accountNumber) });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  app.post("/slack/digest", async (_req, res) => {
+    try {
+      res.json(await sendSlackDigest({ force: true }));
     } catch (err) {
       res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
     }
