@@ -121,6 +121,12 @@ export function readyMessage(input: {
  * Runs outside Boop, because the app can't replace itself while running:
  * quit Boop, swap in the new bundle, relaunch, and put the previous build
  * back if the new one doesn't answer its health check.
+ *
+ * Quitting has to be thorough. A plain SIGTERM leaves the Electron main
+ * process alive (it only stops the server), and macOS `open` then just
+ * re-activates that old instance instead of launching the new bundle. So:
+ * quit by bundle id, then make sure no process from the bundle and nothing on
+ * Boop's ports survives, force-killing what does.
  */
 export function restartScript(input: {
   buildId: string;
@@ -129,8 +135,12 @@ export function restartScript(input: {
   backupDir: string;
   resultPath: string;
   healthUrl: string;
+  logPath?: string;
+  bundleId?: string;
+  ports?: number[];
 }): string {
   const q = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`;
+  const ports = (input.ports ?? [3456, 5173, 4040]).join(" ");
   return `#!/bin/bash
 set -u
 NEW=${q(input.newAppPath)}
@@ -139,16 +149,39 @@ BACKUP=${q(input.backupDir)}
 RESULT=${q(input.resultPath)}
 HEALTH=${q(input.healthUrl)}
 BUILD=${q(input.buildId)}
+LOG=${q(input.logPath ?? `${input.resultPath}.log`)}
+BUNDLE_ID=${q(input.bundleId ?? "com.raroque.boop")}
+PORTS="${ports}"
+
+log() { printf '%s %s\\n' "$(date +%H:%M:%S)" "$*" >> "$LOG"; }
 
 write_result() {
+  log "result: $1"
   printf '{"buildId":"%s","status":"%s","at":"%s"}\\n' "$BUILD" "$1" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$RESULT"
 }
 
-wait_for_exit() {
-  for _ in $(seq 1 60); do
-    pgrep -f "$APP/Contents/MacOS/Boop$" >/dev/null || return 0
+boop_pids() {
+  pgrep -f "^$APP/Contents/" 2>/dev/null
+  for port in $PORTS; do lsof -ti "tcp:$port" -sTCP:LISTEN 2>/dev/null; done
+}
+
+stop_boop() {
+  log "quitting $BUNDLE_ID"
+  osascript -e "tell application id \\"$BUNDLE_ID\\" to quit" >/dev/null 2>&1
+  for _ in $(seq 1 30); do
+    [ -z "$(boop_pids)" ] && { log "stopped cleanly"; return 0; }
     sleep 1
   done
+  log "still running, sending TERM: $(boop_pids | sort -u | tr '\\n' ' ')"
+  boop_pids | sort -u | xargs kill -TERM 2>/dev/null
+  sleep 5
+  if [ -n "$(boop_pids)" ]; then
+    log "sending KILL: $(boop_pids | sort -u | tr '\\n' ' ')"
+    boop_pids | sort -u | xargs kill -KILL 2>/dev/null
+    sleep 2
+  fi
+  [ -z "$(boop_pids)" ] && { log "stopped"; return 0; }
+  log "could not stop: $(boop_pids | sort -u | tr '\\n' ' ')"
   return 1
 }
 
@@ -160,23 +193,25 @@ wait_for_health() {
   return 1
 }
 
+log "restart for build $BUILD"
 sleep 3
-pkill -TERM -f "$APP/Contents/MacOS/Boop$"
-wait_for_exit || pkill -KILL -f "$APP/Contents/MacOS/Boop$"
+stop_boop || { write_result failed; exit 1; }
 
 mkdir -p "$BACKUP"
 rm -rf "$BACKUP/Boop.app"
-mv "$APP" "$BACKUP/Boop.app" || { write_result failed; open -a "$BACKUP/Boop.app"; exit 1; }
+mv "$APP" "$BACKUP/Boop.app" || { log "backup failed"; open -a "$APP"; write_result failed; exit 1; }
 if ! ditto "$NEW" "$APP"; then
+  log "copy failed, restoring"
   rm -rf "$APP"; mv "$BACKUP/Boop.app" "$APP"; open -a "$APP"; write_result rolled_back; exit 1
 fi
+log "launching new build"
 open -a "$APP"
 
 if wait_for_health; then
   write_result shipped
 else
-  pkill -TERM -f "$APP/Contents/MacOS/Boop$"
-  wait_for_exit || pkill -KILL -f "$APP/Contents/MacOS/Boop$"
+  log "new build never answered, rolling back"
+  stop_boop
   rm -rf "$APP"
   mv "$BACKUP/Boop.app" "$APP"
   open -a "$APP"

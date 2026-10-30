@@ -417,6 +417,8 @@ async function shipBuild(input: {
       backupDir: join(dir, "previous"),
       resultPath: join(dir, "pending-result.json"),
       healthUrl: `http://localhost:${process.env.PORT ?? 3456}/health`,
+      logPath: join(dir, `restart-${buildId}.log`),
+      ports: [Number(process.env.PORT ?? 3456), 5173, 4040],
     }),
   );
   await chmod(script, 0o755);
