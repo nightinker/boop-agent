@@ -34,6 +34,7 @@ import {
   setUserTimezone,
 } from "./timezone-config.js";
 import { formatUptime, serverUptimeSeconds } from "./uptime.js";
+import { convexSkillStore, createListSkillsTool } from "./skills/tools.js";
 
 const NAMESPACE = "boop-self";
 
@@ -90,6 +91,7 @@ export function createSelfTools(): RuntimeTool[] {
       {},
       async () => runtimeText(formatUptime(serverUptimeSeconds())),
     ),
+    createListSkillsTool(convexSkillStore("user"), NAMESPACE),
     defineRuntimeTool(
       NAMESPACE,
       "set_timezone",
