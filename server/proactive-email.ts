@@ -16,7 +16,7 @@ import { ensureWebhookSubscription } from "./composio-webhook.js";
 import { describeUserNow } from "./timezone-config.js";
 
 const TRIGGER_SLUG = "GMAIL_NEW_GMAIL_MESSAGE";
-const CLASSIFIER_MODEL = process.env.BOOP_CLASSIFIER_MODEL ?? "claude-haiku-4-5-20251001";
+const CLASSIFIER_MODEL = process.env.BOOP_CLASSIFIER_MODEL ?? "claude-haiku-5-5";
 const CODEX_CLASSIFIER_MODEL = process.env.BOOP_CODEX_CLASSIFIER_MODEL;
 
 // First event per connection since process boot is treated as warmup —

@@ -98,7 +98,7 @@ interface Challenge {
   severity: "low" | "medium" | "high";
 }
 
-const ADVERSARY_MODEL = process.env.BOOP_ADVERSARY_MODEL ?? "claude-haiku-4-5";
+const ADVERSARY_MODEL = process.env.BOOP_ADVERSARY_MODEL ?? "claude-haiku-5-5";
 const CODEX_ADVERSARY_MODEL = process.env.BOOP_CODEX_ADVERSARY_MODEL;
 
 interface Decision {
