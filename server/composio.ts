@@ -372,13 +372,47 @@ async function getIdentityFor(
   return identity;
 }
 
+// Composio pages connected accounts (10 per page by default), so a single
+// list() call silently drops every connection past the first page.
+const CONNECTED_ACCOUNTS_PAGE_LIMIT = 100;
+
+export async function collectAllPages<T>(
+  fetchPage: (cursor?: string) => Promise<{ items: T[]; nextCursor?: string | null }>,
+): Promise<T[]> {
+  const out: T[] = [];
+  const seenCursors = new Set<string>();
+  let cursor: string | undefined;
+
+  while (true) {
+    const page = await fetchPage(cursor);
+    out.push(...page.items);
+
+    const nextCursor = page.nextCursor ?? undefined;
+    if (!nextCursor) break;
+    if (seenCursors.has(nextCursor)) {
+      throw new Error("Composio returned a repeated pagination cursor");
+    }
+    seenCursors.add(nextCursor);
+    cursor = nextCursor;
+  }
+
+  return out;
+}
+
 export async function listConnectedToolkits(): Promise<ConnectedToolkit[]> {
   const composio = getComposio();
   if (!composio) return [];
   try {
-    const resp = await composio.connectedAccounts.list({ userIds: [boopUserId()] });
+    const items = await collectAllPages(async (cursor) => {
+      const page = await composio.connectedAccounts.list({
+        userIds: [boopUserId()],
+        limit: CONNECTED_ACCOUNTS_PAGE_LIMIT,
+        ...(cursor ? { cursor } : {}),
+      });
+      return { items: page.items, nextCursor: page.nextCursor };
+    });
     const enriched = await Promise.all(
-      resp.items.map(async (it) => {
+      items.map(async (it) => {
         const seed = extractAccountIdentity(
           (it as { state?: unknown }).state,
           (it as { data?: unknown }).data,
