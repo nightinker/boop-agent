@@ -6,8 +6,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { api } from "../../convex/_generated/api.js";
 import { convex } from "../convex-client.js";
-import { broadcast } from "../broadcast.js";
-import { sendImessage } from "../sendblue.js";
+import { notifyConversation } from "../notify.js";
 import { getRuntimeConfig, type RuntimeConfig } from "../runtime-config.js";
 import { runAgentRuntime } from "../runtimes/index.js";
 import {
@@ -139,14 +138,8 @@ async function codingRuntime(): Promise<RuntimeConfig> {
   };
 }
 
-async function notify(conversationId: string, text: string): Promise<void> {
-  try {
-    if (conversationId.startsWith("sms:")) await sendImessage(conversationId.slice(4), text);
-    await convex.mutation(api.messages.send, { conversationId, role: "assistant", content: text });
-    broadcast("self_build", { conversationId, text });
-  } catch (err) {
-    console.error("[self-build] notify failed", err);
-  }
+function notify(conversationId: string, text: string): Promise<void> {
+  return notifyConversation(conversationId, text, "self_build");
 }
 
 async function setStatus(

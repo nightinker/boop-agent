@@ -6,8 +6,10 @@ const originV = v.union(
   v.literal("review"),
   v.literal("correction"),
   v.literal("user"),
+  v.literal("learn"),
+  v.literal("curator"),
 );
-type Origin = "execution" | "review" | "correction" | "user";
+type Origin = "execution" | "review" | "correction" | "user" | "learn" | "curator";
 
 async function findSkill(ctx: MutationCtx, name: string) {
   return await ctx.db
@@ -76,6 +78,7 @@ async function applyUpdate(
     description,
     body: args.body,
     status: "active",
+    stale: false,
     patchCount: skill.patchCount + 1,
     updatedAt: now,
   });
@@ -160,7 +163,11 @@ export const recordView = mutation({
   handler: async (ctx, args) => {
     const skill = await findSkill(ctx, args.name);
     if (!skill) return;
-    await ctx.db.patch(skill._id, { viewCount: skill.viewCount + 1, lastUsedAt: Date.now() });
+    await ctx.db.patch(skill._id, {
+      viewCount: skill.viewCount + 1,
+      lastUsedAt: Date.now(),
+      stale: false,
+    });
   },
 });
 
@@ -274,6 +281,62 @@ export const resolvePending = mutation({
     await ctx.db.patch(change._id, {
       status: args.approve ? "approved" : "rejected",
       resolvedAt: Date.now(),
+    });
+  },
+});
+
+/**
+ * Applies the curator's decisions. Archiving keeps the body and history
+ * (restore brings it back); nothing is ever deleted.
+ */
+export const applyCuration = mutation({
+  args: {
+    markStale: v.array(v.string()),
+    archive: v.array(v.string()),
+    reason: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const now = Date.now();
+    for (const name of args.markStale) {
+      const skill = await findSkill(ctx, name);
+      if (skill && skill.status === "active" && !skill.pinned) {
+        await ctx.db.patch(skill._id, { stale: true });
+      }
+    }
+    for (const name of args.archive) {
+      const skill = await findSkill(ctx, name);
+      if (!skill || skill.status !== "active" || skill.pinned) continue;
+      await ctx.db.patch(skill._id, { status: "archived", stale: false, updatedAt: now });
+      await ctx.db.insert("skillRevisions", {
+        name: skill.name,
+        action: "archive",
+        description: skill.description,
+        body: skill.body,
+        reason: args.reason,
+        origin: "curator",
+        createdAt: now,
+      });
+    }
+  },
+});
+
+/** Archive one skill on behalf of an agent (the curator's merge pass). */
+export const archiveByAgent = mutation({
+  args: { name: v.string(), reason: v.string(), origin: originV },
+  handler: async (ctx, args) => {
+    const skill = await findSkill(ctx, args.name);
+    if (!skill) throw new Error(`No skill named "${args.name}"`);
+    if (skill.pinned) throw new Error(`"${args.name}" is pinned`);
+    const now = Date.now();
+    await ctx.db.patch(skill._id, { status: "archived", stale: false, updatedAt: now });
+    await ctx.db.insert("skillRevisions", {
+      name: skill.name,
+      action: "archive",
+      description: skill.description,
+      body: skill.body,
+      reason: args.reason,
+      origin: args.origin,
+      createdAt: now,
     });
   },
 });

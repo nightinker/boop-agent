@@ -14,13 +14,107 @@ import {
 
 const SETTING_REVIEW = "skills_review_enabled";
 const SETTING_APPROVAL = "skills_write_approval";
+const SETTING_CURATOR = "skills_curator_enabled";
+const SETTING_CONSOLIDATE = "skills_consolidate";
+const SETTING_CURATOR_SUMMARY = "skills_curator_last_summary";
 
 const ORIGIN_LABELS: Record<string, string> = {
   execution: "while working",
   review: "background review",
   correction: "from your feedback",
   user: "you",
+  learn: "learned on request",
+  curator: "tidy-up",
 };
+
+interface CuratorSummary {
+  at: number;
+  markedStale: string[];
+  archived: string[];
+  merged: string[];
+  skipped?: string;
+}
+
+function CuratorRow({ isDark }: { isDark: boolean }) {
+  const enabled = useQuery(api.settings.get, { key: SETTING_CURATOR });
+  const consolidate = useQuery(api.settings.get, { key: SETTING_CONSOLIDATE });
+  const summaryRaw = useQuery(api.settings.get, { key: SETTING_CURATOR_SUMMARY });
+  const setSetting = useMutation(api.settings.set);
+  const [running, setRunning] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const summary = useMemo(() => {
+    try {
+      return summaryRaw ? (JSON.parse(summaryRaw) as CuratorSummary) : null;
+    } catch {
+      return null;
+    }
+  }, [summaryRaw]);
+
+  async function runNow() {
+    setRunning(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/skills/curate", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const body = (await res.json()) as { error?: string };
+      if (!res.ok) throw new Error(body.error ?? `Tidy-up failed (${res.status})`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  const result = summary
+    ? summary.markedStale.length + summary.archived.length + summary.merged.length === 0
+      ? "nothing to change"
+      : [
+          summary.markedStale.length && `${summary.markedStale.length} marked stale`,
+          summary.archived.length && `${summary.archived.length} archived`,
+          summary.merged.length && `${summary.merged.length} merged`,
+        ]
+          .filter(Boolean)
+          .join(", ")
+    : null;
+
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <Toggle
+        label="Tidy up unused skills"
+        hint="Daily: skills unused for 14 days are marked stale, after 30 days archived. Pinned skills are never touched; nothing is deleted."
+        on={enabled !== "false"}
+        onChange={(next) => setSetting({ key: SETTING_CURATOR, value: next ? "true" : "false" })}
+        isDark={isDark}
+      />
+      <Toggle
+        label="Merge overlapping skills"
+        hint="Weekly: a review folds overlapping skills into one and archives the rest. Uses some of your Claude usage."
+        on={consolidate === "true"}
+        onChange={(next) => setSetting({ key: SETTING_CONSOLIDATE, value: next ? "true" : "false" })}
+        isDark={isDark}
+      />
+      <button
+        type="button"
+        onClick={runNow}
+        disabled={running}
+        className={`rounded-xl border px-2.5 py-1.5 text-xs disabled:opacity-50 ${
+          isDark ? "border-white/10 bg-white/5 text-zinc-300 hover:bg-white/10" : "border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50"
+        }`}
+      >
+        {running ? "Tidying…" : "Tidy up now"}
+      </button>
+      {summary && (
+        <span className={`text-[11px] ${mutedTextClass(isDark)}`}>
+          Last tidy-up {timeAgo(summary.at)}: {result}
+        </span>
+      )}
+      {error && <span className="text-[11px] text-rose-400">{error}</span>}
+    </div>
+  );
+}
 
 function plural(count: number, word: string): string {
   return `${count} ${word}${count === 1 ? "" : "s"}`;
@@ -322,6 +416,7 @@ function SkillDetail({ name, onBack, isDark }: { name: string; onBack: () => voi
           <div className={`mt-2 flex flex-wrap gap-3 text-[11px] mono ${muted}`}>
             <span>{skill.status === "archived" ? "archived" : "active"}</span>
             {skill.pinned && <span>pinned</span>}
+            {skill.stale && <span className="text-amber-500">stale</span>}
             <span>by {skill.createdBy === "user" ? "you" : "Boop"}</span>
             <span>{plural(skill.viewCount, "use")}</span>
             <span>{plural(skill.patchCount, "edit")}</span>
@@ -457,6 +552,8 @@ export function SkillsPanel({ isDark }: { isDark: boolean }) {
         />
       </div>
 
+      <CuratorRow isDark={isDark} />
+
       <PendingChanges isDark={isDark} />
 
       {creating ? (
@@ -540,6 +637,16 @@ export function SkillsPanel({ isDark }: { isDark: boolean }) {
                       {skill.name}
                     </span>
                     {skill.pinned && <HeaderPill isDark={isDark}>pinned</HeaderPill>}
+                    {skill.stale && (
+                      <span
+                        title="Not used for 14+ days. It's archived after 30 unless Boop uses it again."
+                        className={`rounded-md px-1.5 py-0.5 text-[10px] ${
+                          isDark ? "bg-amber-500/15 text-amber-300" : "bg-amber-100 text-amber-800"
+                        }`}
+                      >
+                        stale
+                      </span>
+                    )}
                     <span className={`ml-auto text-[11px] mono ${muted}`}>
                       {plural(skill.viewCount, "use")} · {plural(skill.patchCount, "edit")} · used{" "}
                       {timeAgo(skill.lastUsedAt)}
