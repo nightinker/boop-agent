@@ -4,12 +4,16 @@ vi.mock("../server/broadcast.js", () => ({ broadcast: vi.fn() }));
 
 import {
   applyPatch,
+  firstLineDescription,
   formatSkillIndex,
+  NO_DESCRIPTION,
+  summarizeSkillsForListing,
   lintSkill,
   validateDescription,
   validateSkillName,
 } from "../server/skills/format.js";
 import {
+  createListSkillsTool,
   createSkillTools,
   newSkillToolsState,
   type SkillStore,
@@ -147,6 +151,61 @@ describe("skill tools", () => {
   it("reports a missing skill on view", async () => {
     const result = await tool(createSkillTools(memoryStore()), "skill_view").handle({ name: "nope" });
     expect(result.success).toBe(false);
+  });
+});
+
+describe("list_skills (dispatcher)", () => {
+  it("returns every saved skill as {name, description}", async () => {
+    const listSkills = createListSkillsTool(memoryStore([invoices]));
+    expect(listSkills.name).toBe("list_skills");
+    expect(listSkills.namespace).toBe("boop-skills");
+    const result = await listSkills.handle({});
+    expect(result.success).not.toBe(false);
+    expect(JSON.parse(result.text)).toEqual({
+      skills: [{ name: "send-weekly-invoices", description: "Draft and send the weekly client invoices" }],
+    });
+  });
+
+  it("returns an empty list when no skills are saved", async () => {
+    const result = await createListSkillsTool(memoryStore()).handle({});
+    expect(JSON.parse(result.text)).toEqual({ skills: [] });
+  });
+
+  it("treats a missing skills store result as none", async () => {
+    const listSkills = createListSkillsTool({ list: async () => undefined as never });
+    expect(JSON.parse((await listSkills.handle({})).text)).toEqual({ skills: [] });
+  });
+
+  it("uses only the first line of multi-line descriptions and a placeholder for blank ones", async () => {
+    const listSkills = createListSkillsTool({
+      list: async () => [
+        { name: "multi", description: "\n  First line here  \nSecond line\r\nThird" },
+        { name: "blank", description: "   " },
+      ],
+    });
+    expect(JSON.parse((await listSkills.handle({})).text)).toEqual({
+      skills: [
+        { name: "multi", description: "First line here" },
+        { name: "blank", description: NO_DESCRIPTION },
+      ],
+    });
+  });
+
+  it("reports a store failure instead of claiming there are no skills", async () => {
+    const listSkills = createListSkillsTool({
+      list: async () => {
+        throw new Error("offline");
+      },
+    });
+    const result = await listSkills.handle({});
+    expect(result.success).toBe(false);
+    expect(result.text).toMatch(/offline/);
+  });
+
+  it("summarizes defensively", () => {
+    expect(firstLineDescription(undefined)).toBe(NO_DESCRIPTION);
+    expect(summarizeSkillsForListing(null)).toEqual([]);
+    expect(summarizeSkillsForListing([{ name: "", description: "x" }])).toEqual([]);
   });
 });
 

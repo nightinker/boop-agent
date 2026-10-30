@@ -8,6 +8,7 @@ import {
   applyPatch,
   formatSkillIndex,
   lintSkill,
+  summarizeSkillsForListing,
   validateDescription,
   validateSkillName,
   type SkillSummary,
@@ -99,6 +100,29 @@ export function convexSkillStore(origin: SkillOrigin, agentId?: string): SkillSt
       await convex.mutation(api.skills.recordView, { name });
     },
   };
+}
+
+/**
+ * The dispatcher's read-only view of the skills: every saved skill as
+ * {name, description}, with the description cut to its first line. Cheap and
+ * synchronous from the user's point of view (one Convex query, no sub-agent).
+ */
+export function createListSkillsTool(store: Pick<SkillStore, "list">): RuntimeTool {
+  return defineRuntimeTool(
+    SKILLS_NAMESPACE,
+    "list_skills",
+    "List every saved skill as JSON {skills: [{name, description}]}, where description is the skill's one-line description. Use when the user asks what skills Boop has. An empty list means no skills are saved yet.",
+    {},
+    async () => {
+      try {
+        const skills = summarizeSkillsForListing(await store.list());
+        return { text: JSON.stringify({ skills }) };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return { text: `Could not load the saved skills: ${message}`, success: false };
+      }
+    },
+  );
 }
 
 export interface SkillToolsState {

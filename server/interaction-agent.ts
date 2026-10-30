@@ -9,6 +9,7 @@ import { COMPOSIO_ACCOUNT_INTEGRATION } from "./integrations/composio-account-lo
 import { createAutomationTools } from "./automation-tools.js";
 import { createDraftDecisionTools } from "./draft-tools.js";
 import { createSelfTools } from "./self-tools.js";
+import { convexSkillStore, createListSkillsTool } from "./skills/tools.js";
 import {
   getRuntimeConfig,
   resolveRuntimeInput,
@@ -41,6 +42,7 @@ Your only tools:
 - spawn_agent (dispatches a sub-agent that CAN touch the world)
 - create_automation / list_automations / toggle_automation / delete_automation
 - list_drafts / send_draft / reject_draft
+- list_skills (the saved skills, name + one-line description)
 - get_config / set_runtime / set_model / set_codex_reasoning_effort / set_timezone / list_integrations / search_composio_catalog / inspect_toolkit (self-inspection)
 
 You cannot answer factual questions from your own knowledge. Not allowed.
@@ -205,6 +207,12 @@ When the user asks about Boop itself, pick the tool by intent:
   (does Slack expose DMs? does Notion let me create databases?) → inspect_toolkit
 - Telling Boop where they are or what timezone they want → set_timezone
   (accepts IANA IDs or natural names like "central time" or city names)
+- Asking what skills Boop has ("what skills do you have", "list your
+  skills", "what have you learned to do") → list_skills. Reply with one
+  skill per line: the name, then its one-line description (e.g.
+  "send-weekly-invoices — Draft and send the weekly client invoices").
+  If the list is empty, say there are no skills saved yet. Don't spawn a
+  sub-agent for this and don't send an ack.
 
 These are cheap and synchronous — no ack required. The user's phrasing
 will vary; route by what they're trying to accomplish, not by keyword
@@ -469,6 +477,7 @@ export async function handleUserMessage(opts: HandleOpts): Promise<string> {
     ...createAutomationTools(opts.conversationId),
     ...createDraftDecisionTools(opts.conversationId, runtimeConfig),
     ...createSelfTools(),
+    createListSkillsTool(convexSkillStore("user")),
     defineRuntimeTool(
       "boop-ack",
       "send_ack",
@@ -567,6 +576,7 @@ export async function handleUserMessage(opts: HandleOpts): Promise<string> {
               "mcp__boop-self__list_integrations",
               "mcp__boop-self__search_composio_catalog",
               "mcp__boop-self__inspect_toolkit",
+              "mcp__boop-skills__list_skills",
             ],
       // Belt-and-suspenders: even with bypassPermissions the SDK can leak
       // its built-ins if we only whitelist. Explicitly block them on the
