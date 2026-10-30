@@ -37,7 +37,17 @@ describe("cswap account list", () => {
         schemaVersion: 1,
         activeAccountNumber: 2,
         accounts: [
-          { number: 1, email: "a@example.test", organizationName: "A", active: false, usageStatus: "ok" },
+          {
+            number: 1,
+            email: "a@example.test",
+            organizationName: "A",
+            active: false,
+            usageStatus: "ok",
+            usage: {
+              fiveHour: { pct: 4.4, countdown: "3h 24m" },
+              sevenDay: { pct: 61.6, countdown: "6d 7h" },
+            },
+          },
           { number: 2, email: "b@example.test", organizationName: null, active: true, usageStatus: "relogin_required" },
         ],
       }),
@@ -47,8 +57,27 @@ describe("cswap account list", () => {
       available: true,
       activeAccountNumber: 2,
       accounts: [
-        { number: 1, email: "a@example.test", organizationName: "A", active: false, needsRelogin: false },
-        { number: 2, email: "b@example.test", organizationName: null, active: true, needsRelogin: true },
+        {
+          number: 1,
+          email: "a@example.test",
+          organizationName: "A",
+          active: false,
+          needsRelogin: false,
+          status: "ok",
+          usage: {
+            fiveHour: { percent: 4, resetsIn: "3h 24m" },
+            weekly: { percent: 62, resetsIn: "6d 7h" },
+          },
+        },
+        {
+          number: 2,
+          email: "b@example.test",
+          organizationName: null,
+          active: true,
+          needsRelogin: true,
+          status: "relogin_required",
+          usage: null,
+        },
       ],
     });
   });

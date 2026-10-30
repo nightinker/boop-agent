@@ -5,6 +5,7 @@ import { createMemoryTools } from "./memory/tools.js";
 import { extractAndStore } from "./memory/extract.js";
 import { spawnExecutionAgent } from "./execution-agent.js";
 import { listEnabledIntegrations } from "./integrations/registry.js";
+import { COMPOSIO_ACCOUNT_INTEGRATION } from "./integrations/composio-account-loader.js";
 import { createAutomationTools } from "./automation-tools.js";
 import { createDraftDecisionTools } from "./draft-tools.js";
 import { createSelfTools } from "./self-tools.js";
@@ -316,9 +317,24 @@ export function resolveSpawnIntegrations(
   return requested;
 }
 
+/**
+ * Most integration names say what they are ("gmail", "slack"). The personal
+ * Composio integration bundles many services under one name, so the dispatcher
+ * also needs its description to know when to pick it.
+ */
+export function describeIntegrationsForPrompt(
+  integrations: Array<{ name: string; description: string }>,
+): string {
+  return integrations
+    .map((i) => (i.name === COMPOSIO_ACCOUNT_INTEGRATION ? `${i.name} (${i.description})` : i.name))
+    .join(", ");
+}
+
 export async function handleUserMessage(opts: HandleOpts): Promise<string> {
   const turnId = randomId("turn");
-  const integrations = (await listEnabledIntegrations()).map((i) => i.name);
+  const enabledIntegrations = await listEnabledIntegrations();
+  const integrations = enabledIntegrations.map((i) => i.name);
+  const integrationSummary = describeIntegrationsForPrompt(enabledIntegrations);
 
   const inboundRole = opts.kind === "proactive" ? "system" : "user";
   const inboundImageStorageIds = (opts.images ?? []).map((i) => i.storageId);
@@ -352,7 +368,7 @@ export async function handleUserMessage(opts: HandleOpts): Promise<string> {
 
   const systemPrompt = INTERACTION_SYSTEM.replace(
     "{{INTEGRATIONS}}",
-    integrations.join(", ") || "(no integrations configured yet)",
+    integrationSummary || "(no integrations configured yet)",
   );
 
   const userText = opts.mediaError
