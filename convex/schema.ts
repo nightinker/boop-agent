@@ -286,4 +286,27 @@ export default defineSchema({
     agentId: v.optional(v.string()),
     createdAt: v.number(),
   }).index("by_name", ["name", "createdAt"]),
+
+  // Agent skill edits waiting for the user, when "approve skill changes" is on.
+  skillPendingChanges: defineTable({
+    name: v.string(),
+    action: v.union(v.literal("create"), v.literal("patch"), v.literal("rewrite")),
+    description: v.string(),
+    body: v.string(),
+    previousBody: v.optional(v.string()),
+    previousDescription: v.optional(v.string()),
+    reason: v.optional(v.string()),
+    origin: v.union(
+      v.literal("execution"),
+      v.literal("review"),
+      v.literal("correction"),
+      v.literal("user"),
+    ),
+    agentId: v.optional(v.string()),
+    // One agent run's edits to a skill stack into a single pending change.
+    batchId: v.optional(v.string()),
+    status: v.union(v.literal("pending"), v.literal("approved"), v.literal("rejected")),
+    createdAt: v.number(),
+    resolvedAt: v.optional(v.number()),
+  }).index("by_status", ["status", "createdAt"]),
 });
