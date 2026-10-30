@@ -8,6 +8,10 @@ Format:
 
 ---
 
+## Unreleased — Uptime self-inspection
+
+- Added: `uptime` self-inspection tool (`boop-self`) reporting how long the Boop server process has been running in a compact format ("Up <1m", "Up 45m", "Up 3h 12m", "Up 2d 4h 5m"). The dispatcher answers uptime questions directly with it — no spawn, no ack.
+
 ## Unreleased — Optional local Apple data
 
 - Added: optional Mac-only, read-only local Apple data connectors for iMessage/SMS history, Apple Notes, and Apple Reminders. The integration is off by default and requires both the master Apple data toggle and a per-source connect action before tools are exposed.
