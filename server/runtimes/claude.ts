@@ -8,6 +8,7 @@ import {
 } from "@anthropic-ai/claude-agent-sdk";
 import type { RuntimeRunRequest, RuntimeRunResult, RuntimeTool } from "./types.js";
 import { aggregateUsageFromResult, EMPTY_USAGE } from "../usage.js";
+import { activeClaudeConfigDir, envWithClaudeConfigDir } from "../claude-profiles.js";
 
 type ClaudePrompt = string | AsyncIterable<SDKUserMessage>;
 
@@ -84,6 +85,9 @@ export async function runClaudeAgent(request: RuntimeRunRequest): Promise<Runtim
   let lastAssistantText = "";
   let usage = { ...EMPTY_USAGE, model: request.model };
   const stderrTail: string[] = [];
+  // The Claude account the owner picked (set_claude_account) is read per
+  // run, so a switch applies from the next turn without a restart.
+  const env = envWithClaudeConfigDir(await activeClaudeConfigDir(), request.env) ?? request.env;
 
   try {
   for await (const msg of query({
@@ -98,7 +102,7 @@ export async function runClaudeAgent(request: RuntimeRunRequest): Promise<Runtim
       permissionMode: "bypassPermissions",
       abortController: request.abortController,
       ...(request.cwd ? { cwd: request.cwd } : {}),
-      ...(request.env ? { env: request.env } : {}),
+      ...(env ? { env } : {}),
       stderr: (data: string) => {
         stderrTail.push(...data.split("\n").filter((line) => line.trim()));
         if (stderrTail.length > CLAUDE_STDERR_TAIL_LINES) {

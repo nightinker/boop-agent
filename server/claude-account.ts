@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { activeClaudeConfigDir, envWithClaudeConfigDir } from "./claude-profiles.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -105,8 +106,10 @@ export async function getClaudeAccount(options: { fresh?: boolean } = {}): Promi
   if (!options.fresh && accountCache && Date.now() - accountCache.at < ACCOUNT_CACHE_MS) {
     return accountCache.account;
   }
+  const env = envWithClaudeConfigDir(await activeClaudeConfigDir());
   const { stdout } = await execFileAsync("claude", ["auth", "status"], {
     timeout: COMMAND_TIMEOUT_MS,
+    ...(env ? { env } : {}),
   });
   const account = parseClaudeAuthStatus(stdout);
   accountCache = { at: Date.now(), account };

@@ -47,7 +47,7 @@ Your only tools:
 - spawn_agent (dispatches a sub-agent that CAN touch the world)
 - create_automation / list_automations / toggle_automation / delete_automation
 - list_drafts / send_draft / reject_draft
-- get_config / uptime / list_skills / set_runtime / set_model / set_codex_reasoning_effort / set_timezone / list_integrations / search_composio_catalog / inspect_toolkit (self-inspection)
+- get_config / uptime / list_skills / set_runtime / set_model / set_codex_reasoning_effort / set_timezone / list_claude_accounts / set_claude_account / list_integrations / search_composio_catalog / inspect_toolkit (self-inspection)
 - start_self_build / list_self_builds / ship_self_build / cancel_self_build (changing Boop's own code)
 - learn_skill (teach Boop a skill from a link, file, notes or what you just did)
 
@@ -212,6 +212,13 @@ When the user asks about Boop itself, pick the tool by intent:
 - Wants to switch models or change speed/quality tradeoff → set_model
   (takes effect next turn; this turn finishes on the current model)
 - Wants to tune Codex depth/speed specifically → set_codex_reasoning_effort
+- Asks which Claude account Boop is on, or which it could use →
+  list_claude_accounts. Wants Boop on a different Claude account ("use my
+  work Claude account") → set_claude_account with a label from that list
+  (takes effect next turn, no restart). Owner only. These only switch
+  between accounts already signed in on this Mac: never ask for, accept or
+  repeat a password, API key or token in chat. If the owner sends one,
+  don't use it; tell them to sign in with \`claude\` in Terminal instead.
 - Wants to know which integrations or accounts are connected → list_integrations
 - Wondering whether some service is connectable at all → search_composio_catalog
 - Probing the actual capabilities of a specific connected integration
@@ -487,7 +494,7 @@ export async function handleUserMessage(opts: HandleOpts): Promise<string> {
     ...createMemoryTools(opts.conversationId),
     ...createAutomationTools(opts.conversationId),
     ...createDraftDecisionTools(opts.conversationId, runtimeConfig),
-    ...createSelfTools(),
+    ...createSelfTools(opts.conversationId),
     ...createSelfBuildTools(opts.conversationId),
     ...createLearnTools(opts.conversationId),
     defineRuntimeTool(
@@ -588,6 +595,8 @@ export async function handleUserMessage(opts: HandleOpts): Promise<string> {
               "mcp__boop-self__set_model",
               "mcp__boop-self__set_codex_reasoning_effort",
               "mcp__boop-self__set_timezone",
+              "mcp__boop-self__list_claude_accounts",
+              "mcp__boop-self__set_claude_account",
               "mcp__boop-self__list_integrations",
               "mcp__boop-self__search_composio_catalog",
               "mcp__boop-self__inspect_toolkit",

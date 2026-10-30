@@ -34,13 +34,32 @@ import {
   setUserTimezone,
 } from "./timezone-config.js";
 import { formatUptime, serverUptimeSeconds } from "./uptime.js";
+import { getClaudeAccount } from "./claude-account.js";
+import {
+  describeProfile,
+  formatProfileList,
+  listClaudeProfiles,
+  resolveProfileInput,
+  setClaudeProfile,
+} from "./claude-profiles.js";
+import { isOwnerConversation } from "./self-build/plan.js";
 import { convexSkillStore, createListSkillsTool } from "./skills/tools.js";
 
 const NAMESPACE = "boop-self";
 
 const reasoningEffortSchema = z.enum(["minimal", "low", "medium", "high", "xhigh"]);
 
-export function createSelfTools(): RuntimeTool[] {
+const NOT_OWNER_ACCOUNT_MESSAGE = "Only Boop's owner can see or switch the Claude account Boop uses.";
+
+/**
+ * Owner-only, like self-build. With no conversation (e.g. a bare MCP
+ * server) there is no owner to check, so the account tools refuse.
+ */
+function isOwner(conversationId: string | undefined): boolean {
+  return conversationId !== undefined && isOwnerConversation(conversationId, process.env.BOOP_OWNER_NUMBERS);
+}
+
+export function createSelfTools(conversationId?: string): RuntimeTool[] {
   return [
     defineRuntimeTool(
       NAMESPACE,
@@ -92,6 +111,69 @@ export function createSelfTools(): RuntimeTool[] {
       async () => runtimeText(formatUptime(serverUptimeSeconds())),
     ),
     createListSkillsTool(convexSkillStore("user"), NAMESPACE),
+    defineRuntimeTool(
+      NAMESPACE,
+      "list_claude_accounts",
+      "List the Claude accounts already signed in on this Mac (separate Claude config dirs such as ~/.claude and ~/.claude-work) and which one Boop uses. Shows labels and account emails only, never credentials. Owner only. Use when the owner asks which Claude account Boop is on or which ones it can switch to.",
+      {},
+      async () => {
+        if (!isOwner(conversationId)) return runtimeText(NOT_OWNER_ACCOUNT_MESSAGE, false);
+        const { profiles, savedLabel } = await listClaudeProfiles();
+        const runtime = (await getRuntimeConfig()).runtime;
+        const note =
+          runtime === "codex"
+            ? "\nNote: Boop is on the Codex runtime right now, so the Claude account only matters once you switch back to Claude."
+            : "";
+        return runtimeText(formatProfileList(profiles, savedLabel) + note);
+      },
+    ),
+    defineRuntimeTool(
+      NAMESPACE,
+      "set_claude_account",
+      "Switch which signed-in Claude account Boop uses, by the label from list_claude_accounts (e.g. \"default\", \"work\") or the account email. Saves the choice and applies from the next turn; no restart needed. Only switches between accounts already signed in on this Mac. Owner only. NEVER ask for, accept or repeat passwords, API keys or tokens: if the owner offers one, refuse and tell them to sign in with `claude` in Terminal instead.",
+      {
+        account: z
+          .string()
+          .describe('Account label from list_claude_accounts (e.g. "work") or its email.'),
+      },
+      async ({ account }) => {
+        if (!isOwner(conversationId)) return runtimeText(NOT_OWNER_ACCOUNT_MESSAGE, false);
+        const { profiles, active } = await listClaudeProfiles();
+        if (profiles.length === 0) return runtimeText(formatProfileList(profiles, null), false);
+        const target = resolveProfileInput(account, profiles);
+        if (!target) {
+          return runtimeText(
+            `No signed-in Claude account called "${account.slice(0, 60)}". Available: ${profiles.map((p) => p.label).join(", ")}.` +
+              (profiles.length === 1
+                ? " That's the only one. To add another, run `CLAUDE_CONFIG_DIR=~/.claude-<name> claude` in Terminal and sign in."
+                : ""),
+            false,
+          );
+        }
+        if (active?.label === target.label) {
+          return runtimeText(`Boop is already using the ${describeProfile(target)} account.`);
+        }
+        await setClaudeProfile(target);
+        const lines = [
+          `Claude account set to ${describeProfile(target)}. Boop uses it from the next turn on; no restart needed.`,
+        ];
+        const check = await getClaudeAccount({ fresh: true }).catch(() => null);
+        if (check && !check.loggedIn) {
+          lines.push(
+            `Heads up: Claude Code reports that login as signed out. Run \`CLAUDE_CONFIG_DIR=${target.configDir} claude\` in Terminal to sign in again, or switch back.`,
+          );
+        }
+        if (process.env.ANTHROPIC_API_KEY) {
+          lines.push(
+            "Note: an Anthropic API key is set in Boop's environment, and Claude Code bills that key ahead of any signed-in account, so this switch won't change billing until it's removed.",
+          );
+        }
+        if ((await getRuntimeConfig()).runtime === "codex") {
+          lines.push("Boop is on the Codex runtime right now; the account applies once you switch back to Claude.");
+        }
+        return runtimeText(lines.join("\n"));
+      },
+    ),
     defineRuntimeTool(
       NAMESPACE,
       "set_timezone",
