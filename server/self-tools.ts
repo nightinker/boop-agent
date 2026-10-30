@@ -51,7 +51,7 @@ export function createSelfTools(): RuntimeTool[] {
           model: runtime.model,
           reasoningEffort: runtime.reasoningEffort ?? null,
           billingMode: runtime.billingMode,
-          claudeEnvDefault: process.env.BOOP_MODEL ?? "claude-sonnet-4-6",
+          claudeEnvDefault: process.env.BOOP_MODEL ?? "claude-sonnet-5-5",
           codexEnvDefault: process.env.BOOP_CODEX_MODEL ?? "gpt-5.5",
           availableClaudeModels: [...KNOWN_MODELS],
           availableCodexModels: [...KNOWN_CODEX_MODELS],
@@ -141,7 +141,7 @@ Use when the user says "use opus", "switch to sonnet", "use Codex mini", "make i
       {
         model: z
           .string()
-          .describe('Model to use. Canonical ID like "claude-opus-4-7" or "gpt-5.4-mini", or an alias.'),
+          .describe('Model to use. Canonical ID like "claude-opus-5-5" or "gpt-5.4-mini", or an alias.'),
       },
       async ({ model }) => {
         const runtime = (await getRuntimeConfig()).runtime;
