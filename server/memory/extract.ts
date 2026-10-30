@@ -6,6 +6,7 @@ import { runAgentRuntime } from "../runtimes/index.js";
 import { EMPTY_USAGE, type UsageTotals } from "../usage.js";
 import { SEGMENT_DEFAULTS, makeMemoryId, type MemorySegment } from "./types.js";
 import { buildPromptWithImages, fetchStoredBytes } from "../images/content-blocks.js";
+import { reviewSkillsForCorrection } from "../skills/review.js";
 
 const EXTRACTION_PROMPT = `You are a memory-extraction subagent.
 
@@ -138,6 +139,21 @@ export async function extractAndStore(opts: {
       conversationId: opts.conversationId,
       data: JSON.stringify({ turnId: opts.turnId, count: facts.length }),
     });
+
+    // Corrections and how-to preferences ("one line per record") are skill
+    // signals; the review itself skips personal facts that aren't about a task.
+    const corrections = facts
+      .filter((f) => f.segment === "correction" || f.segment === "preference")
+      .map((f) => (f.corrects ? `${f.content} (was: ${f.corrects})` : f.content));
+    if (corrections.length > 0) {
+      void reviewSkillsForCorrection({
+        conversationId: opts.conversationId,
+        userMessage: opts.userMessage,
+        assistantReply: opts.assistantReply,
+        corrections,
+        runtimeConfig,
+      }).catch((err) => console.error("[skills] correction review failed", err));
+    }
   } catch (err) {
     console.error("[memory.extract] failed", err);
   }

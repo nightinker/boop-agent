@@ -11,6 +11,14 @@ import { EMPTY_USAGE, type UsageTotals } from "./usage.js";
 import { getRuntimeConfig, type RuntimeConfig } from "./runtime-config.js";
 import { runAgentRuntime } from "./runtimes/index.js";
 import { buildPromptWithImages, fetchStoredBytes } from "./images/content-blocks.js";
+import { formatSkillIndex } from "./skills/format.js";
+import {
+  SKILLS_NAMESPACE,
+  convexSkillStore,
+  createSkillTools,
+  newSkillToolsState,
+} from "./skills/tools.js";
+import { maybeReviewSkillsAfterRun, type ToolCallRecord } from "./skills/review.js";
 
 const running = new Map<string, AbortController>();
 
@@ -105,6 +113,22 @@ Safety:
 - Anything that sends a message, creates an event, or takes an external action: call save_draft with a JSON payload instead of the real send/create tool. Return the summary so the interaction agent can show it to the user.
 - Only the interaction agent's send_draft tool commits. You never commit.`;
 
+/**
+ * Skills are Boop's procedural memory. The index (names and one-line
+ * descriptions) is always in the prompt; full instructions load on demand.
+ */
+export function buildSkillsSection(index: string): string {
+  return `
+
+Skills (your playbook for this user):
+- Before you start, check the saved skills below. If one covers this task, call skill_view and follow it.
+- While you work: if you find a better way, recover from a dead end, or a skill turns out wrong or missing a step, fix it with skill_manage (skill_view it first). If you work out a repeatable multi-step procedure that no skill covers, create one at the class level.
+- Skills hold lessons, not logs: steps, the tools that work, the user's preferences, pitfalls with a short why.
+
+Saved skills:
+${index}`;
+}
+
 export interface SpawnOptions {
   task: string;
   integrations: string[];
@@ -154,6 +178,13 @@ export async function spawnExecutionAgent(opts: SpawnExecutionAgentOpts): Promis
   await convex.mutation(api.agents.update, { agentId, status: "running" });
 
   const draftTools = opts.conversationId ? createDraftStagingTools(opts.conversationId) : [];
+  const skillState = newSkillToolsState();
+  const skillTools = createSkillTools(convexSkillStore("execution", agentId), skillState);
+  const skillIndex = await convex
+    .query(api.skills.list, {})
+    .then((skills) => formatSkillIndex(skills))
+    .catch(() => formatSkillIndex([]));
+  const toolCalls: ToolCallRecord[] = [];
   const integrationServers =
     runtimeConfig.runtime === "claude"
       ? await buildMcpServersForIntegrations(opts.integrations, opts.conversationId)
@@ -163,7 +194,7 @@ export async function spawnExecutionAgent(opts: SpawnExecutionAgentOpts): Promis
       ? await buildRuntimeToolsForIntegrations(opts.integrations, opts.conversationId)
       : [];
   const mcpServers = integrationServers;
-  const runtimeTools = [...draftTools, ...integrationTools];
+  const runtimeTools = [...draftTools, ...skillTools, ...integrationTools];
   const runtimeToolNamespaces = [...new Set(integrationTools.map((tool) => tool.namespace))];
   const allowedTools = [
     "WebSearch",
@@ -171,6 +202,7 @@ export async function spawnExecutionAgent(opts: SpawnExecutionAgentOpts): Promis
     "Skill",
     ...Object.keys(mcpServers).flatMap((n) => [`mcp__${n}__*`]),
     ...(draftTools.length ? ["mcp__boop-drafts__*"] : []),
+    `mcp__${SKILLS_NAMESPACE}__*`,
     ...runtimeToolNamespaces.flatMap((n) => [`mcp__${n}__*`]),
   ];
 
@@ -187,7 +219,7 @@ export async function spawnExecutionAgent(opts: SpawnExecutionAgentOpts): Promis
     });
     const result = await runAgentRuntime(runtimeConfig, {
       prompt: executionPrompt,
-      systemPrompt: EXECUTION_SYSTEM,
+      systemPrompt: EXECUTION_SYSTEM + buildSkillsSection(skillIndex),
       claudeMcpServers: mcpServers,
       tools: runtimeTools,
       allowedTools,
@@ -207,6 +239,7 @@ export async function spawnExecutionAgent(opts: SpawnExecutionAgentOpts): Promis
         const acctSuffix = accounts.length ? ` [${accounts.join(", ")}]` : "";
         logAgent(`tool: ${toolShort}${acctSuffix}`);
         const logInput = redactToolInputForLog(toolName, input);
+        toolCalls.push({ tool: toolShort, input: JSON.stringify(logInput).slice(0, 300) });
         await convex.mutation(api.agents.addLog, {
           agentId,
           logType: "tool_use",
@@ -217,6 +250,8 @@ export async function spawnExecutionAgent(opts: SpawnExecutionAgentOpts): Promis
         broadcast("agent_tool", { agentId, toolName, accounts });
       },
       onToolResult: async (_toolName, text) => {
+        const last = toolCalls[toolCalls.length - 1];
+        if (last && last.result === undefined) last.result = text.slice(0, 300);
         await convex.mutation(api.agents.addLog, {
           agentId,
           logType: "tool_result",
@@ -272,6 +307,20 @@ export async function spawnExecutionAgent(opts: SpawnExecutionAgentOpts): Promis
     });
   }
   broadcast("agent_done", { agentId, status, result: buffer.slice(0, 200) });
+
+  if (status === "completed") {
+    void maybeReviewSkillsAfterRun({
+      agentId,
+      conversationId: opts.conversationId,
+      task: opts.task,
+      integrations: opts.integrations,
+      toolCalls,
+      result: buffer,
+      skillsViewed: [...skillState.viewed],
+      wroteSkill: skillState.wrote,
+      runtimeConfig,
+    }).catch((err) => console.error(`[skills] review after ${shortId} failed`, err));
+  }
 
   return { agentId, result: buffer || errorMsg || "(no output)", status };
 }
