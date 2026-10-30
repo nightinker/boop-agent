@@ -8,6 +8,10 @@ Format:
 
 ---
 
+## Unreleased — Claude account switcher
+
+- Added: owner-only `list_claude_accounts` and `set_claude_account` self tools (`boop-self`). They list the Claude accounts already signed in on this Mac (separate Claude config dirs such as `~/.claude` and `~/.claude-work`, plus any in `BOOP_CLAUDE_CONFIG_DIRS`) and switch which one Boop uses. The choice is saved in Convex settings (`claude_account`) and applied as `CLAUDE_CONFIG_DIR` on the next Claude run, with no restart. Only labels and account emails are shown; credentials are never read, stored or echoed.
+
 ## Unreleased — Uptime self-inspection
 
 - Added: `uptime` self-inspection tool (`boop-self`) reporting how long the Boop server process has been running in a compact format ("Up <1m", "Up 45m", "Up 3h 12m", "Up 2d 4h 5m"). The dispatcher answers uptime questions directly with it — no spawn, no ack.
