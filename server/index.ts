@@ -31,6 +31,7 @@ import {
 } from "./runtime-config.js";
 import { startImageCleanup } from "./images/clean.js";
 import { isPublicServerRequest, isTrustedLocalRequest } from "./local-access.js";
+import { reportPendingRestart } from "./self-build/run.js";
 import {
   checkCswapLogin,
   getClaudeAccount,
@@ -242,6 +243,7 @@ async function main() {
   const port = Number(process.env.PORT ?? 3456);
   server.listen(port, () => {
     console.log(`boop-agent server listening on :${port}`);
+    setTimeout(() => void reportPendingRestart(), 5_000);
     console.log(`  health      GET  http://localhost:${port}/health`);
     console.log(`  chat        POST http://localhost:${port}/chat`);
     console.log(`  sendblue    POST http://localhost:${port}/sendblue/webhook`);

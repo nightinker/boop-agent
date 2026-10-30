@@ -5,6 +5,11 @@ import { createMemoryTools } from "./memory/tools.js";
 import { extractAndStore } from "./memory/extract.js";
 import { spawnExecutionAgent } from "./execution-agent.js";
 import { listEnabledIntegrations } from "./integrations/registry.js";
+import {
+  SELF_BUILD_ALLOWED_TOOLS,
+  SELF_BUILD_PROMPT,
+  createSelfBuildTools,
+} from "./self-build/tools.js";
 import { COMPOSIO_ACCOUNT_INTEGRATION } from "./integrations/composio-account-loader.js";
 import { createAutomationTools } from "./automation-tools.js";
 import { createDraftDecisionTools } from "./draft-tools.js";
@@ -42,6 +47,7 @@ Your only tools:
 - create_automation / list_automations / toggle_automation / delete_automation
 - list_drafts / send_draft / reject_draft
 - get_config / set_runtime / set_model / set_codex_reasoning_effort / set_timezone / list_integrations / search_composio_catalog / inspect_toolkit (self-inspection)
+- start_self_build / list_self_builds / ship_self_build / cancel_self_build (changing Boop's own code)
 
 You cannot answer factual questions from your own knowledge. Not allowed.
 You have NO browser, NO WebSearch, NO WebFetch, NO file access, NO APIs.
@@ -150,6 +156,7 @@ When the user signals they want to back out (cancel, scrap it, different
 version, never mind, etc.), call reject_draft.
 
 Never claim something was sent unless send_draft returned success.
+${SELF_BUILD_PROMPT}
 
 Integration capabilities — IMPORTANT:
 You only know integration NAMES, not their actual tool surface. Composio's
@@ -469,6 +476,7 @@ export async function handleUserMessage(opts: HandleOpts): Promise<string> {
     ...createAutomationTools(opts.conversationId),
     ...createDraftDecisionTools(opts.conversationId, runtimeConfig),
     ...createSelfTools(),
+    ...createSelfBuildTools(opts.conversationId),
     defineRuntimeTool(
       "boop-ack",
       "send_ack",
@@ -557,6 +565,7 @@ export async function handleUserMessage(opts: HandleOpts): Promise<string> {
               "mcp__boop-automations__delete_automation",
               "mcp__boop-draft-decisions__list_drafts",
               "mcp__boop-draft-decisions__send_draft",
+              ...SELF_BUILD_ALLOWED_TOOLS,
               "mcp__boop-draft-decisions__reject_draft",
               "mcp__boop-ack__send_ack",
               "mcp__boop-self__get_config",

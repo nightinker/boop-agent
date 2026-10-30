@@ -36,6 +36,8 @@ export interface RuntimeRunRequest {
   allowedTools?: string[];
   disallowedTools?: string[];
   cwd?: string;
+  /** Replaces the child process environment (Claude runtime). */
+  env?: Record<string, string>;
   abortController?: AbortController;
   mode: RuntimeMode;
   onText?: (text: string) => void | Promise<void>;

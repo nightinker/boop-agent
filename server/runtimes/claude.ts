@@ -97,6 +97,8 @@ export async function runClaudeAgent(request: RuntimeRunRequest): Promise<Runtim
       ...(request.mode === "execution" ? { settingSources: ["project"] as const } : {}),
       permissionMode: "bypassPermissions",
       abortController: request.abortController,
+      ...(request.cwd ? { cwd: request.cwd } : {}),
+      ...(request.env ? { env: request.env } : {}),
       stderr: (data: string) => {
         stderrTail.push(...data.split("\n").filter((line) => line.trim()));
         if (stderrTail.length > CLAUDE_STDERR_TAIL_LINES) {
