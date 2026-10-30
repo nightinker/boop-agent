@@ -570,17 +570,18 @@ export async function authorizeToolkit(
     }
   }
 
-  // 2. Initiate the connection. allowMultiple if there's already an active connection
-  //    so we add another account instead of replacing.
-  const existing = (await listConnectedToolkits()).filter(
-    (c) => c.slug === slug && c.status === "ACTIVE",
-  );
-  const conn = await composio.connectedAccounts.initiate(boopUserId(), authConfigId, {
-    ...(existing.length > 0 ? { allowMultiple: true } : {}),
-    ...(opts?.callbackUrl ? { callbackUrl: opts.callbackUrl } : {}),
+  // 2. Create a connect link. Composio rejects connectedAccounts.initiate for
+  //    Composio-managed auth configs ("use POST /api/v3/connected_accounts/link
+  //    instead"), so go through the link endpoint, which also works for BYO configs.
+  const link = await new ComposioApiClient({
+    apiKey: process.env.COMPOSIO_API_KEY!,
+  }).link.create({
+    auth_config_id: authConfigId,
+    user_id: boopUserId(),
+    ...(opts?.callbackUrl ? { callback_url: opts.callbackUrl } : {}),
     ...(opts?.alias ? { alias: opts.alias } : {}),
   });
-  return { redirectUrl: conn.redirectUrl ?? null, connectionId: conn.id };
+  return { redirectUrl: link.redirect_url ?? null, connectionId: link.connected_account_id };
 }
 
 export async function disconnectToolkit(connectionId: string): Promise<void> {
