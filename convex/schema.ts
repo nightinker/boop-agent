@@ -111,6 +111,7 @@ export default defineSchema({
       v.literal("self-build"),
       v.literal("skill-learn"),
       v.literal("skill-curator"),
+      v.literal("slack-watch"),
     ),
     conversationId: v.optional(v.string()),
     turnId: v.optional(v.string()),
@@ -228,6 +229,28 @@ export default defineSchema({
   // Runtime overrides for things normally pinned by env vars (e.g. the Claude
   // model). Lets the user say "use opus" via iMessage and have the next agent
   // run respect it without a redeploy.
+  // Slack mentions and DMs Boop has seen, for urgent texts and the digest.
+  slackMentions: defineTable({
+    key: v.string(),
+    channel: v.string(),
+    ts: v.string(),
+    threadTs: v.optional(v.string()),
+    kind: v.union(v.literal("dm"), v.literal("mention")),
+    sender: v.string(),
+    channelName: v.optional(v.string()),
+    text: v.string(),
+    summary: v.string(),
+    permalink: v.string(),
+    urgent: v.boolean(),
+    notifiedAt: v.optional(v.number()),
+    answeredAt: v.optional(v.number()),
+    digestedAt: v.optional(v.number()),
+    createdAt: v.number(),
+  })
+    .index("by_key", ["key"])
+    .index("by_channel", ["channel"])
+    .index("by_created", ["createdAt"]),
+
   settings: defineTable({
     key: v.string(),
     value: v.string(),

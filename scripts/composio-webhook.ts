@@ -7,6 +7,7 @@
 // Usage: tsx scripts/composio-webhook.ts <publicUrl>
 import "../server/env-setup.js";
 import { ensureProactiveWatcher } from "../server/proactive-email.js";
+import { ensureSlackWatcher } from "../server/proactive-slack.js";
 
 const publicUrl = process.argv[2];
 if (!publicUrl) {
@@ -20,6 +21,7 @@ if (!process.env.COMPOSIO_API_KEY) {
 
 try {
   await ensureProactiveWatcher(publicUrl);
+  await ensureSlackWatcher(publicUrl);
 } catch (err) {
   console.error("failed:", err);
   process.exit(1);

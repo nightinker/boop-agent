@@ -48,7 +48,15 @@ interface TimezoneSetting {
   description: string;
 }
 
-type Setting = ToggleSetting | TimezoneSetting;
+interface TimesSetting {
+  kind: "times";
+  key: string;
+  label: string;
+  description: string;
+  defaultValue: string;
+}
+
+type Setting = ToggleSetting | TimezoneSetting | TimesSetting;
 
 const SETTINGS: Setting[] = [
   {
@@ -58,6 +66,22 @@ const SETTINGS: Setting[] = [
     description:
       "Watch new Gmail messages. When something important arrives, you'll get an iMessage. Turn off to silence the watcher entirely without disconnecting Gmail.",
     defaultEnabled: true,
+  },
+  {
+    kind: "toggle",
+    key: "slack_watch_enabled",
+    label: "Slack mentions",
+    description:
+      "Watch Slack for messages that mention you and DMs to you. Urgent ones are texted right away; the rest wait for the digest. Messages you've already replied to are left out.",
+    defaultEnabled: true,
+  },
+  {
+    kind: "times",
+    key: "slack_digest_times",
+    label: "Slack digest times",
+    description:
+      "When to text the catch-up of unanswered Slack mentions, in your timezone. Comma-separated 24-hour times. Nothing is sent when there's nothing new.",
+    defaultValue: "11:00,15:00,18:00",
   },
   {
     kind: "timezone",
@@ -205,6 +229,8 @@ export function SettingsPanel({
         {SETTINGS.map((s) =>
           s.kind === "toggle" ? (
             <ToggleRow key={s.key} setting={s} isDark={isDark} />
+          ) : s.kind === "times" ? (
+            <TimesRow key={s.key} setting={s} isDark={isDark} />
           ) : (
             <TimezoneRow key={s.key} setting={s} isDark={isDark} />
           ),
@@ -837,6 +863,95 @@ function ToggleRow({
             }`}
           />
         </button>
+      }
+    />
+  );
+}
+
+/** Same rule as the server's parseDigestTimes: valid HH:MM, sorted, no repeats. */
+function normalizeTimes(raw: string): string[] {
+  const times = raw
+    .split(",")
+    .map((t) => t.trim())
+    .filter(Boolean);
+  const bad = times.find((t) => !/^([01]?\d|2[0-3]):[0-5]\d$/.test(t));
+  if (bad) throw new Error(`"${bad}" isn't a 24-hour time like 09:30.`);
+  return [...new Set(times.map((t) => t.padStart(5, "0")))].sort();
+}
+
+function TimesRow({ setting, isDark }: { setting: TimesSetting; isDark: boolean }) {
+  const value = useQuery(api.settings.get, { key: setting.key });
+  const setSetting = useMutation(api.settings.set);
+  const loading = value === undefined;
+  const stored = !loading && value !== null ? value : setting.defaultValue;
+  const [draft, setDraft] = useState(stored);
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (!loading) setDraft(stored);
+  }, [loading, stored]);
+
+  async function save() {
+    let times: string[];
+    try {
+      times = normalizeTimes(draft);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      return;
+    }
+    if (times.length === 0) {
+      setError("Add at least one time, or turn Slack mentions off.");
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      await setSetting({ key: setting.key, value: times.join(",") });
+      setDraft(times.join(","));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const inputBg = isDark
+    ? "bg-[#17171a] border-white/10 text-zinc-100 placeholder:text-zinc-600"
+    : "bg-zinc-50 border-zinc-200 text-zinc-900 placeholder:text-zinc-400";
+  const btnBg = isDark
+    ? "bg-zinc-100 text-zinc-950 hover:bg-white"
+    : "bg-zinc-950 text-white hover:bg-zinc-800";
+
+  return (
+    <SettingShell
+      label={setting.label}
+      description={setting.description}
+      debugLine={settingDebug(setting.key, value, setting.defaultValue)}
+      isDark={isDark}
+      control={
+        <div className="flex w-full flex-col items-end gap-2 lg:min-w-[380px]">
+          <div className="flex w-full items-center gap-2">
+            <input
+              type="text"
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") void save();
+              }}
+              placeholder={setting.defaultValue}
+              aria-label={setting.label}
+              disabled={saving || loading}
+              className={`min-w-0 flex-1 rounded-xl border px-3 py-2 text-xs outline-none transition-colors focus:border-zinc-400 mono ${inputBg}`}
+            />
+            <button
+              onClick={() => void save()}
+              disabled={saving || loading || draft.trim() === stored}
+              className={`rounded-xl px-3 py-2 text-xs font-medium disabled:opacity-50 ${btnBg}`}
+            >
+              {saving ? "Saving…" : "Save"}
+            </button>
+          </div>
+          {error && <div className="text-[11px] text-rose-400">{error}</div>}
+        </div>
       }
     />
   );

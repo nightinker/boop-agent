@@ -16,6 +16,7 @@ import { refreshIntegrations } from "./integrations/registry.js";
 import { listComposioAccountConnections } from "./integrations/composio-account-loader.js";
 import { getStoredWebhookSecret } from "./composio-webhook.js";
 import { handleEmailEvent } from "./proactive-email.js";
+import { handleSlackEvent } from "./proactive-slack.js";
 
 export function createComposioRouter(): express.Router {
   const router = express.Router();
@@ -275,7 +276,7 @@ export function createComposioRouter(): express.Router {
         return;
       }
       Promise.resolve()
-        .then(() => handleEmailEvent(payload))
+        .then(() => Promise.all([handleEmailEvent(payload), handleSlackEvent(payload)]))
         .catch((err) => console.error("[composio-webhook] dispatch failed", err));
     },
   );

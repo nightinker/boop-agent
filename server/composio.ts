@@ -750,14 +750,20 @@ function withConnectedAccountSchema(schema: unknown, activeCount: number): Recor
 export async function ensureTrigger(
   triggerSlug: string,
   connectedAccountId: string,
+  triggerConfig?: Record<string, unknown>,
 ): Promise<string | null> {
   const composio = getComposio();
   if (!composio) return null;
   try {
-    const resp = await composio.triggers.create(boopUserId(), triggerSlug, {
-      connectedAccountId,
-    });
-    return resp.triggerId ?? null;
+    // Call the API directly: the SDK's triggers.create() leaves out user_id,
+    // which a project with 2FA on requires, so every trigger failed to register.
+    const client = new ComposioApiClient({ apiKey: process.env.COMPOSIO_API_KEY });
+    const resp = await client.triggerInstances.upsert(triggerSlug, {
+      connected_account_id: connectedAccountId,
+      trigger_config: triggerConfig ?? {},
+      user_id: boopUserId(),
+    } as Parameters<typeof client.triggerInstances.upsert>[1]);
+    return resp.trigger_id ?? null;
   } catch (err) {
     console.warn(
       `[composio] ensureTrigger failed: ${triggerSlug} for ${connectedAccountId}`,
