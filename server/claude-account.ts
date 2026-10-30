@@ -1,0 +1,113 @@
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
+
+const COMMAND_TIMEOUT_MS = 15_000;
+const ACCOUNT_CACHE_MS = 30_000;
+
+/**
+ * The Claude runtime has no login of its own: the Agent SDK runs Claude Code,
+ * which uses whichever account is signed in on this Mac. These helpers read
+ * that account, and switch it through cswap (claude-swap) when installed.
+ */
+export interface ClaudeAccount {
+  loggedIn: boolean;
+  email: string | null;
+  orgName: string | null;
+  subscriptionType: string | null;
+  authMethod: string | null;
+}
+
+export interface CswapAccount {
+  number: number;
+  email: string;
+  organizationName: string | null;
+  active: boolean;
+  needsRelogin: boolean;
+}
+
+export interface CswapState {
+  available: boolean;
+  activeAccountNumber: number | null;
+  accounts: CswapAccount[];
+}
+
+export function parseClaudeAuthStatus(stdout: string): ClaudeAccount {
+  const data = JSON.parse(stdout) as Record<string, unknown>;
+  const text = (value: unknown) => (typeof value === "string" && value ? value : null);
+  return {
+    loggedIn: data.loggedIn === true,
+    email: text(data.email),
+    orgName: text(data.orgName),
+    subscriptionType: text(data.subscriptionType),
+    authMethod: text(data.authMethod),
+  };
+}
+
+export function parseCswapList(stdout: string): CswapState {
+  const jsonStart = stdout.indexOf("{");
+  if (jsonStart === -1) throw new Error("cswap list returned no JSON");
+  const data = JSON.parse(stdout.slice(jsonStart)) as {
+    activeAccountNumber?: unknown;
+    accounts?: Array<Record<string, unknown>>;
+  };
+  const accounts = (data.accounts ?? []).map((account) => ({
+    number: Number(account.number),
+    email: String(account.email ?? ""),
+    organizationName:
+      typeof account.organizationName === "string" ? account.organizationName : null,
+    active: account.active === true,
+    needsRelogin: account.usageStatus === "relogin_required",
+  }));
+  return {
+    available: true,
+    activeAccountNumber:
+      typeof data.activeAccountNumber === "number" ? data.activeAccountNumber : null,
+    accounts: accounts.filter((account) => Number.isInteger(account.number) && account.email),
+  };
+}
+
+let accountCache: { at: number; account: ClaudeAccount } | null = null;
+
+export async function getClaudeAccount(options: { fresh?: boolean } = {}): Promise<ClaudeAccount> {
+  if (!options.fresh && accountCache && Date.now() - accountCache.at < ACCOUNT_CACHE_MS) {
+    return accountCache.account;
+  }
+  const { stdout } = await execFileAsync("claude", ["auth", "status"], {
+    timeout: COMMAND_TIMEOUT_MS,
+  });
+  const account = parseClaudeAuthStatus(stdout);
+  accountCache = { at: Date.now(), account };
+  return account;
+}
+
+function isMissingBinary(err: unknown): boolean {
+  return (err as NodeJS.ErrnoException | undefined)?.code === "ENOENT";
+}
+
+export async function listCswapAccounts(): Promise<CswapState> {
+  try {
+    const { stdout } = await execFileAsync("cswap", ["list", "--json"], {
+      timeout: COMMAND_TIMEOUT_MS,
+    });
+    return parseCswapList(stdout);
+  } catch (err) {
+    if (isMissingBinary(err)) {
+      return { available: false, activeAccountNumber: null, accounts: [] };
+    }
+    throw err;
+  }
+}
+
+export async function switchCswapAccount(accountNumber: number): Promise<ClaudeAccount> {
+  const state = await listCswapAccounts();
+  if (!state.available) throw new Error("cswap is not installed on this Mac");
+  if (!state.accounts.some((account) => account.number === accountNumber)) {
+    throw new Error(`cswap has no account ${accountNumber}`);
+  }
+  await execFileAsync("cswap", ["switch", String(accountNumber)], {
+    timeout: COMMAND_TIMEOUT_MS,
+  });
+  return getClaudeAccount({ fresh: true });
+}

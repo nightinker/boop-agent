@@ -25,6 +25,7 @@ import { ConsolidationPanel } from "./components/ConsolidationPanel.js";
 import { SettingsPanel } from "./components/SettingsPanel.js";
 import { ChangelogDrawer } from "./components/ChangelogDrawer.js";
 import { RuntimeProviderLogo, type RuntimeProvider } from "./lib/branding.js";
+import { CLAUDE_ACCOUNT_CHANGED_EVENT } from "./components/ClaudeAccountRow.js";
 import boopGif from "../../assets/boop.gif";
 
 type View =
@@ -120,6 +121,7 @@ export function App() {
   const [runtimeConfig, setRuntimeConfig] = useState<
     RuntimeConfigSnapshot | null | undefined
   >(undefined);
+  const [claudeAccountEmail, setClaudeAccountEmail] = useState<string | null>(null);
   const [changelogOpen, setChangelogOpen] = useState(false);
   const [desktopStatus, setDesktopStatus] = useState<DesktopStatus | null>(null);
   const { connected } = useSocket();
@@ -188,6 +190,28 @@ export function App() {
     storedClaudeModel,
     storedHostedModel,
   ]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadClaudeAccount() {
+      try {
+        const res = await fetch("/api/claude-account", { cache: "no-store" });
+        if (!res.ok) throw new Error(`Claude account fetch failed (${res.status})`);
+        const data = (await res.json()) as { account: { email: string | null } | null };
+        if (!cancelled) setClaudeAccountEmail(data.account?.email ?? null);
+      } catch {
+        if (!cancelled) setClaudeAccountEmail(null);
+      }
+    }
+
+    loadClaudeAccount();
+    window.addEventListener(CLAUDE_ACCOUNT_CHANGED_EVENT, loadClaudeAccount);
+    return () => {
+      cancelled = true;
+      window.removeEventListener(CLAUDE_ACCOUNT_CHANGED_EVENT, loadClaudeAccount);
+    };
+  }, [connected, desktopStatus?.server]);
 
   useEffect(() => {
     function onDesktopStatus(event: MessageEvent) {
@@ -360,7 +384,9 @@ export function App() {
             className={`desktop-no-drag hidden min-w-0 items-center gap-2 rounded-2xl border px-2.5 py-1.5 text-xs sm:flex ${
               isDark ? "border-white/10 bg-white/5 text-zinc-400" : "border-zinc-200 bg-white text-zinc-600"
             }`}
-            title={`Active model: ${providerLabel} ${modelLabel}`}
+            title={`Active model: ${providerLabel} ${modelLabel}${
+              activeRuntime === "claude" && claudeAccountEmail ? ` · ${claudeAccountEmail}` : ""
+            }`}
             aria-label="Open settings"
           >
             {activeRuntime ? (
@@ -378,6 +404,15 @@ export function App() {
             <span className={`max-w-[180px] truncate mono font-medium ${isDark ? "text-zinc-200" : "text-zinc-800"}`}>
               {modelLabel}
             </span>
+            {activeRuntime === "claude" && claudeAccountEmail && (
+              <span
+                className={`max-w-[200px] truncate border-l pl-2 ${
+                  isDark ? "border-white/10 text-zinc-400" : "border-zinc-200 text-zinc-500"
+                }`}
+              >
+                {claudeAccountEmail}
+              </span>
+            )}
           </button>
         </header>
 

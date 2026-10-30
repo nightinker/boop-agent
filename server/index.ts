@@ -31,6 +31,7 @@ import {
 } from "./runtime-config.js";
 import { startImageCleanup } from "./images/clean.js";
 import { isPublicServerRequest, isTrustedLocalRequest } from "./local-access.js";
+import { getClaudeAccount, listCswapAccounts, switchCswapAccount } from "./claude-account.js";
 
 async function main() {
   await loadIntegrations();
@@ -80,6 +81,32 @@ async function main() {
       res.json(await getRuntimeConfig());
     } catch (err) {
       res.status(500).json({ error: String(err) });
+    }
+  });
+
+  app.get("/claude-account", async (_req, res) => {
+    const [account, cswap] = await Promise.allSettled([getClaudeAccount(), listCswapAccounts()]);
+    res.json({
+      account: account.status === "fulfilled" ? account.value : null,
+      accountError: account.status === "rejected" ? String(account.reason) : null,
+      cswap:
+        cswap.status === "fulfilled"
+          ? cswap.value
+          : { available: false, activeAccountNumber: null, accounts: [] },
+      cswapError: cswap.status === "rejected" ? String(cswap.reason) : null,
+    });
+  });
+
+  app.post("/claude-account/switch", async (req, res) => {
+    const accountNumber = Number((req.body as { accountNumber?: unknown })?.accountNumber);
+    if (!Number.isInteger(accountNumber) || accountNumber < 1) {
+      res.status(400).json({ error: "accountNumber must be a positive integer" });
+      return;
+    }
+    try {
+      res.json({ account: await switchCswapAccount(accountNumber) });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
     }
   });
 

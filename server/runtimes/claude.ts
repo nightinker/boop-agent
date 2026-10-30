@@ -4,18 +4,12 @@ import {
   tool,
   type McpServerConfig,
   type McpSdkServerConfigWithInstance,
+  type SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 import type { RuntimeRunRequest, RuntimeRunResult, RuntimeTool } from "./types.js";
 import { aggregateUsageFromResult, EMPTY_USAGE } from "../usage.js";
 
-type ClaudePrompt =
-  | string
-  | AsyncIterable<{
-      type: "user";
-      session_id: string;
-      message: { role: "user"; content: unknown };
-      parent_tool_use_id: null;
-    }>;
+type ClaudePrompt = string | AsyncIterable<SDKUserMessage>;
 
 function toClaudePrompt(prompt: RuntimeRunRequest["prompt"]): ClaudePrompt {
   if (typeof prompt === "string") return prompt;
@@ -23,7 +17,10 @@ function toClaudePrompt(prompt: RuntimeRunRequest["prompt"]): ClaudePrompt {
     yield {
       type: "user" as const,
       session_id: "",
-      message: { role: "user" as const, content: prompt },
+      message: {
+        role: "user" as const,
+        content: prompt as SDKUserMessage["message"]["content"],
+      },
       parent_tool_use_id: null,
     };
   })();
@@ -52,6 +49,19 @@ export function createClaudeMcpServer(
   });
 }
 
+const CLAUDE_STDERR_TAIL_LINES = 40;
+
+/**
+ * The SDK only reports "Claude Code process exited with code 1"; the reason is
+ * on the CLI's stderr. Attach the tail of it so the logs say what went wrong.
+ */
+export function withClaudeStderr(err: unknown, stderrTail: string[]): Error {
+  const error = err instanceof Error ? err : new Error(String(err));
+  if (stderrTail.length === 0) return error;
+  error.message = `${error.message}\nClaude Code stderr:\n${stderrTail.join("\n")}`;
+  return error;
+}
+
 export async function runClaudeAgent(request: RuntimeRunRequest): Promise<RuntimeRunResult> {
   const runtimeServers = new Map<string, RuntimeTool[]>();
   for (const runtimeTool of request.tools) {
@@ -73,7 +83,9 @@ export async function runClaudeAgent(request: RuntimeRunRequest): Promise<Runtim
   let text = "";
   let lastAssistantText = "";
   let usage = { ...EMPTY_USAGE, model: request.model };
+  const stderrTail: string[] = [];
 
+  try {
   for await (const msg of query({
     prompt: toClaudePrompt(request.prompt),
     options: {
@@ -85,6 +97,12 @@ export async function runClaudeAgent(request: RuntimeRunRequest): Promise<Runtim
       ...(request.mode === "execution" ? { settingSources: ["project"] as const } : {}),
       permissionMode: "bypassPermissions",
       abortController: request.abortController,
+      stderr: (data: string) => {
+        stderrTail.push(...data.split("\n").filter((line) => line.trim()));
+        if (stderrTail.length > CLAUDE_STDERR_TAIL_LINES) {
+          stderrTail.splice(0, stderrTail.length - CLAUDE_STDERR_TAIL_LINES);
+        }
+      },
     },
   })) {
     if (msg.type === "assistant") {
@@ -116,6 +134,9 @@ export async function runClaudeAgent(request: RuntimeRunRequest): Promise<Runtim
       usage = aggregateUsageFromResult(msg, request.model);
       await request.onUsage?.(usage);
     }
+  }
+  } catch (err) {
+    throw withClaudeStderr(err, stderrTail);
   }
 
   return { text: lastAssistantText || text, usage };

@@ -9,6 +9,7 @@ import {
   type RuntimeProvider,
 } from "../lib/branding.js";
 import { AppleSection } from "./AppleSection.js";
+import { ClaudeAccountRow } from "./ClaudeAccountRow.js";
 import { BrowserSection } from "./BrowserSection.js";
 
 type RuntimeChoice = "claude" | "codex";
@@ -195,6 +196,7 @@ export function SettingsPanel({
       <div className="space-y-3">
         <TextBoopRow isDark={isDark} desktopPhoneNumber={desktopPhoneNumber} />
         <RuntimeRow isDark={isDark} />
+        <ClaudeAccountRow isDark={isDark} />
         {SETTINGS.map((s) =>
           s.kind === "toggle" ? (
             <ToggleRow key={s.key} setting={s} isDark={isDark} />
