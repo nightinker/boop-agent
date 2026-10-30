@@ -417,10 +417,13 @@ async function shipBuild(input: {
   await chmod(script, 0o755);
   await setStatus(buildId, { status: "restarting" });
   await notify(input.conversationId, `Build ${buildId} is merged and built. Restarting now, back in a minute.`);
+  // `open` hands its environment to the app it launches, so ELECTRON_RUN_AS_NODE
+  // must not reach the helper or the relaunched Boop starts as plain Node and exits.
   const child = spawn("/bin/bash", [script], {
     detached: true,
     stdio: "ignore",
     cwd: dirname(script),
+    env: realNodeEnv(),
   });
   child.unref();
 }
