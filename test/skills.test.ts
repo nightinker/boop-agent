@@ -26,14 +26,12 @@ function memoryStore(initial: StoredSkill[] = []): SkillStore & { skills: Map<st
     get: async (name) => skills.get(name) ?? null,
     create: async (input) => {
       skills.set(input.name, { ...input, pinned: false, status: "active" });
+      return { staged: false };
     },
     update: async (input) => {
       const skill = skills.get(input.name)!;
-      skills.set(input.name, {
-        ...skill,
-        body: input.body,
-        description: input.description ?? skill.description,
-      });
+      skills.set(input.name, { ...skill, body: input.body, description: input.description });
+      return { staged: false };
     },
     recordView: async () => undefined,
   };
@@ -149,6 +147,56 @@ describe("skill tools", () => {
   it("reports a missing skill on view", async () => {
     const result = await tool(createSkillTools(memoryStore()), "skill_view").handle({ name: "nope" });
     expect(result.success).toBe(false);
+  });
+});
+
+describe("approval gate", () => {
+  it("tells the agent a staged change waits for the user", async () => {
+    const store = memoryStore([invoices]);
+    store.update = async () => ({ staged: true });
+    store.create = async () => ({ staged: true });
+    const tools = createSkillTools(store, newSkillToolsState());
+    await tool(tools, "skill_view").handle({ name: invoices.name });
+    const patched = await tool(tools, "skill_manage").handle({
+      action: "patch",
+      name: invoices.name,
+      old_string: "Draft the invoice.",
+      new_string: "Draft the invoice in EUR.",
+    });
+    expect(patched.text).toMatch(/waits for the user's approval/);
+    const created = await tool(tools, "skill_manage").handle({
+      action: "create",
+      name: "file-expenses",
+      description: "File expense claims",
+      body: "## Steps\n1. Attach the receipt.",
+    });
+    expect(created.text).toMatch(/Proposed new skill/);
+  });
+
+  it("stacks a second staged edit on the first", async () => {
+    const store = memoryStore([invoices]);
+    const bodies: string[] = [];
+    store.update = async (input) => {
+      bodies.push(input.body);
+      return { staged: true };
+    };
+    const tools = createSkillTools(store, newSkillToolsState());
+    await tool(tools, "skill_view").handle({ name: invoices.name });
+    const manage = tool(tools, "skill_manage");
+    await manage.handle({
+      action: "patch",
+      name: invoices.name,
+      old_string: "List unbilled time.",
+      new_string: "List unbilled time for last week.",
+    });
+    await manage.handle({
+      action: "patch",
+      name: invoices.name,
+      old_string: "Draft the invoice.",
+      new_string: "Draft the invoice in EUR.",
+    });
+    expect(bodies[1]).toContain("for last week");
+    expect(bodies[1]).toContain("in EUR");
   });
 });
 

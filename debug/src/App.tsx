@@ -4,6 +4,7 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import {
   MachineRobotIcon,
   AiBrain02Icon,
+  BookOpen01Icon,
   WorkflowCircle03Icon,
   Activity01Icon,
   Link04Icon,
@@ -18,6 +19,7 @@ import { useSocket } from "./lib/useSocket.js";
 import { DashboardPanel } from "./components/DashboardPanel.js";
 import { AgentsPanel } from "./components/AgentsPanel.js";
 import { AutomationsPanel } from "./components/AutomationsPanel.js";
+import { SkillsPanel } from "./components/SkillsPanel.js";
 import { MemoryPanel } from "./components/MemoryPanel.js";
 import { EventsPanel } from "./components/EventsPanel.js";
 import { ConnectionsPanel } from "./components/ConnectionsPanel.js";
@@ -33,6 +35,7 @@ type View =
   | "agents"
   | "automations"
   | "memory"
+  | "skills"
   | "events"
   | "consolidation"
   | "connections"
@@ -90,6 +93,7 @@ const NAV_ICONS: Record<View, any> = {
   agents: MachineRobotIcon,
   automations: WorkflowCircle03Icon,
   memory: AiBrain02Icon,
+  skills: BookOpen01Icon,
   events: Activity01Icon,
   consolidation: ArrowShrink02Icon,
   connections: Link04Icon,
@@ -101,6 +105,7 @@ const NAV: { id: View; label: string }[] = [
   { id: "agents", label: "Agents" },
   { id: "automations", label: "Automations" },
   { id: "memory", label: "Memory" },
+  { id: "skills", label: "Skills" },
   { id: "events", label: "Events" },
   { id: "consolidation", label: "Consolidation" },
   { id: "connections", label: "Connections" },
@@ -421,6 +426,7 @@ export function App() {
             {view === "dashboard" && <DashboardPanel isDark={isDark} />}
             {view === "agents" && <AgentsPanel isDark={isDark} />}
             {view === "automations" && <AutomationsPanel isDark={isDark} />}
+            {view === "skills" && <SkillsPanel isDark={isDark} />}
             {view === "memory" && (
               <MemoryPanel isDark={isDark} demoMode={demoModeEnabled} />
             )}
