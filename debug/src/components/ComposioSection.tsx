@@ -2,6 +2,16 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import { useQuery } from "convex/react";
 import { api } from "../../../convex/_generated/api.js";
 import { IntegrationLogo } from "../lib/branding.js";
+import { HugeiconsIcon } from "@hugeicons/react";
+import { Add01Icon, RefreshIcon, Search01Icon } from "@hugeicons/core-free-icons";
+import {
+  COMPOSIO_CONNECT_URL,
+  PersonalComposioSection,
+  usePersonalComposio,
+  type PersonalFilter,
+} from "./PersonalComposioSection.js";
+
+type ConnectionsTab = "all" | "boop" | "personal" | "custom" | "local" | "attention";
 
 type AuthMode = "managed" | "byo";
 
@@ -531,6 +541,9 @@ export function ComposioSection({ isDark }: { isDark: boolean }) {
     Record<string, ToolSummary[] | "loading" | "error">
   >({});
   const [toast, setToast] = useState<ToastState | null>(null);
+  const [tab, setTab] = useState<ConnectionsTab>("all");
+  const [query, setQuery] = useState("");
+  const personal = usePersonalComposio();
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const dismissToast = useCallback(() => {
     if (toastTimerRef.current) {
@@ -887,6 +900,9 @@ export function ComposioSection({ isDark }: { isDark: boolean }) {
         title="Connections"
         count={
           activeCount +
+          (demoModeEnabled
+            ? 0
+            : (personal.data?.connections ?? []).filter((c) => c.active > 0).length) +
           (imessageConnected ? 1 : 0) +
           (notesConnected ? 1 : 0) +
           (remindersConnected ? 1 : 0)
@@ -903,7 +919,101 @@ export function ComposioSection({ isDark }: { isDark: boolean }) {
         <IntroCard isDark={isDark} onDismiss={dismissIntro} />
       )}
 
-      {showLocalAppleConnectors && (
+      {(() => {
+        const personalConnections = demoModeEnabled ? [] : (personal.data?.connections ?? []);
+        const boopToolkits = visibleData?.toolkits ?? [];
+        const boopAttention = boopToolkits.filter((t) =>
+          t.connections.some((c) => c.status !== "ACTIVE"),
+        ).length;
+        const tabs: Array<{ id: ConnectionsTab; label: string; count: number | null }> = [
+          { id: "all", label: "All", count: null },
+          { id: "boop", label: "Boop apps", count: boopToolkits.length },
+          { id: "personal", label: "Your Composio", count: personalConnections.length },
+          {
+            id: "custom",
+            label: "Custom MCP",
+            count: personalConnections.filter((c) => c.custom).length,
+          },
+          ...(showLocalAppleConnectors
+            ? [{ id: "local" as const, label: "Local Mac", count: 3 }]
+            : []),
+          {
+            id: "attention",
+            label: "Needs attention",
+            count: personalConnections.filter((c) => c.active === 0).length + boopAttention,
+          },
+        ];
+        const tabActive = isDark ? "bg-white/10 text-zinc-100" : "bg-zinc-900 text-white";
+        const tabIdle = isDark
+          ? "text-zinc-400 hover:bg-white/5 hover:text-zinc-200"
+          : "text-zinc-500 hover:bg-zinc-100 hover:text-zinc-800";
+        const control = isDark
+          ? "border-white/10 bg-[#17171a] text-zinc-200"
+          : "border-zinc-200 bg-white text-zinc-800";
+        return (
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center gap-1" role="tablist" aria-label="Filter connections">
+              {tabs.map((t) => (
+                <button
+                  key={t.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={tab === t.id}
+                  onClick={() => setTab(t.id)}
+                  className={`rounded-xl px-2.5 py-1.5 text-xs font-medium ${
+                    tab === t.id ? tabActive : tabIdle
+                  } ${t.id === "attention" && t.count ? (isDark ? "text-amber-300" : "text-amber-700") : ""}`}
+                >
+                  {t.label}
+                  {t.count !== null && <span className="ml-1 opacity-60">{t.count}</span>}
+                </button>
+              ))}
+            </div>
+            <div className="flex min-w-0 flex-1 items-center justify-end gap-2 sm:flex-none">
+              <label className={`flex h-8 min-w-0 flex-1 items-center gap-2 rounded-xl border px-2.5 sm:w-48 sm:flex-none ${control}`}>
+                <HugeiconsIcon icon={Search01Icon} size={14} className="shrink-0 opacity-50" />
+                <input
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  placeholder="Search connections"
+                  aria-label="Search connections"
+                  className="min-w-0 flex-1 bg-transparent text-xs outline-none placeholder:opacity-50"
+                />
+              </label>
+              <button
+                type="button"
+                onClick={() => {
+                  void personal.refresh(true);
+                  void fetchToolkits();
+                }}
+                title="Reload connections from Composio"
+                aria-label="Refresh connections"
+                className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-xl border ${control}`}
+              >
+                <HugeiconsIcon
+                  icon={RefreshIcon}
+                  size={14}
+                  className={personal.loading ? "animate-spin" : ""}
+                />
+              </button>
+              <a
+                href={COMPOSIO_CONNECT_URL}
+                target="_blank"
+                rel="noreferrer"
+                title="Opens Composio, where you add custom MCP servers. Refresh here afterwards."
+                className={`flex h-8 shrink-0 items-center gap-1.5 rounded-xl px-3 text-xs font-medium ${
+                  isDark ? "bg-zinc-100 text-zinc-950 hover:bg-white" : "bg-zinc-900 text-white hover:bg-zinc-800"
+                }`}
+              >
+                <HugeiconsIcon icon={Add01Icon} size={14} />
+                Add custom MCP
+              </a>
+            </div>
+          </div>
+        );
+      })()}
+
+      {showLocalAppleConnectors && (tab === "all" || tab === "local") && (
         <SubsectionGrid
           label="Local Mac"
           hint="Read-only, private to this computer"
@@ -948,6 +1058,21 @@ export function ComposioSection({ isDark }: { isDark: boolean }) {
             onOpenAutomationSettings={() => openAutomationSettings("reminders")}
           />
         </SubsectionGrid>
+      )}
+
+      {!demoModeEnabled && ["all", "personal", "custom", "attention"].includes(tab) && (
+        <PersonalComposioSection
+          isDark={isDark}
+          connections={personal.data?.connections ?? []}
+          error={personal.error}
+          filter={
+            ({ all: "all", personal: "all", custom: "custom", attention: "attention" } as Record<
+              string,
+              PersonalFilter
+            >)[tab] ?? "all"
+          }
+          query={query}
+        />
       )}
 
       {needsAuthConfig && (
@@ -1006,9 +1131,18 @@ export function ComposioSection({ isDark }: { isDark: boolean }) {
             <div key={i} className={`h-20 rounded-2xl border shadow-sm ${cardBg} shimmer`} />
           ))}
         </div>
-      ) : (
+      ) : !["all", "boop", "attention"].includes(tab) ? null : (
         (() => {
-          const toolkits = visibleData?.toolkits ?? [];
+          const needle = query.trim().toLowerCase();
+          const toolkits = (visibleData?.toolkits ?? []).filter(
+            (t) =>
+              (!needle ||
+                t.displayName.toLowerCase().includes(needle) ||
+                t.slug.toLowerCase().includes(needle)) &&
+              (tab !== "attention" ||
+                t.connections.some((c) => c.status !== "ACTIVE") ||
+                (!hasActive(t) && t.authMode === "byo" && !t.hasAuthConfig)),
+          );
           const needsSetup = toolkits.filter(
             (t) => !hasActive(t) && t.authMode === "byo" && !t.hasAuthConfig,
           );

@@ -9,6 +9,7 @@ import {
   type RuntimeProvider,
 } from "../lib/branding.js";
 import { AppleSection } from "./AppleSection.js";
+import { Select } from "./Select.js";
 import { ClaudeAccountRow } from "./ClaudeAccountRow.js";
 import { BrowserSection } from "./BrowserSection.js";
 
@@ -674,9 +675,6 @@ function RuntimeRow({ isDark }: { isDark: boolean }) {
   }
   debugParts.push(`billing: ${serverConfig?.billingMode ?? "…"}`);
 
-  const inputBg = isDark
-    ? "bg-[#17171a] border-white/10 text-zinc-100"
-    : "bg-zinc-50 border-zinc-200 text-zinc-900";
   const segmentBase = isDark
     ? "border-white/10 bg-[#17171a] text-zinc-400"
     : "border-zinc-200 bg-zinc-100 text-zinc-500";
@@ -728,23 +726,19 @@ function RuntimeRow({ isDark }: { isDark: boolean }) {
               >
                 Model
               </span>
-              <select
+              <Select
                 value={activeModel}
+                options={activeModelOptions}
+                isDark={isDark}
+                ariaLabel="Model"
                 disabled={saving !== null || storedModel === undefined}
-                onChange={(e) =>
-                  savePatch(`${modelKey}:${e.target.value}`, {
+                onChange={(model) =>
+                  savePatch(`${modelKey}:${model}`, {
                     runtime,
-                    model: e.target.value,
+                    model,
                   })
                 }
-                className={`w-full rounded-xl border px-3 py-2 text-xs outline-none transition-colors focus:border-zinc-400 ${inputBg}`}
-              >
-                {activeModelOptions.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
+              />
             </label>
 
             <label className="flex flex-col gap-1">
@@ -755,27 +749,23 @@ function RuntimeRow({ isDark }: { isDark: boolean }) {
               >
                 Reasoning effort
               </span>
-              <select
+              <Select
                 value={reasoningEffort}
+                options={CODEX_REASONING_EFFORTS}
+                isDark={isDark}
+                ariaLabel="Reasoning effort"
                 disabled={
                   runtime !== "codex" ||
                   saving !== null ||
                   storedHostedEffort === undefined
                 }
-                onChange={(e) =>
-                  savePatch(`codex_reasoning_effort:${e.target.value}`, {
+                onChange={(effort) =>
+                  savePatch(`codex_reasoning_effort:${effort}`, {
                     runtime: "codex",
-                    reasoningEffort: e.target.value as ReasoningEffort,
+                    reasoningEffort: effort,
                   })
                 }
-                className={`w-full rounded-xl border px-3 py-2 text-xs outline-none transition-colors focus:border-zinc-400 disabled:opacity-50 ${inputBg}`}
-              >
-                {CODEX_REASONING_EFFORTS.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
+              />
             </label>
           </div>
 
@@ -958,21 +948,16 @@ function TimezoneRow({
       control={
         <div className="flex w-full flex-col items-end gap-2 lg:min-w-[380px]">
           <div className="flex items-center gap-2 w-full">
-            <select
-              value={
-                COMMON_TIMEZONES.some((t) => t.value === draft) ? draft : ""
-              }
-              onChange={(e) => setDraft(e.target.value)}
+            <Select
+              value={COMMON_TIMEZONES.some((t) => t.value === draft) ? draft : ""}
+              options={COMMON_TIMEZONES}
+              isDark={isDark}
+              ariaLabel="Common time zone"
+              placeholder="Pick a common zone"
+              onChange={setDraft}
               disabled={saving || loading}
-              className={`flex-1 rounded-xl border px-3 py-2 text-xs outline-none transition-colors focus:border-zinc-400 ${inputBg}`}
-            >
-              <option value="">Pick a common zone</option>
-              {COMMON_TIMEZONES.map((t) => (
-                <option key={t.value} value={t.value}>
-                  {t.label}
-                </option>
-              ))}
-            </select>
+              className="flex-1"
+            />
           </div>
           <div className="flex items-center gap-2 w-full">
             <input

@@ -31,7 +31,12 @@ import {
 } from "./runtime-config.js";
 import { startImageCleanup } from "./images/clean.js";
 import { isPublicServerRequest, isTrustedLocalRequest } from "./local-access.js";
-import { getClaudeAccount, listCswapAccounts, switchCswapAccount } from "./claude-account.js";
+import {
+  checkCswapLogin,
+  getClaudeAccount,
+  listCswapAccounts,
+  switchCswapAccount,
+} from "./claude-account.js";
 
 async function main() {
   await loadIntegrations();
@@ -95,6 +100,15 @@ async function main() {
           : { available: false, activeAccountNumber: null, accounts: [] },
       cswapError: cswap.status === "rejected" ? String(cswap.reason) : null,
     });
+  });
+
+  app.post("/claude-account/check", async (req, res) => {
+    const accountNumber = Number((req.body as { accountNumber?: unknown })?.accountNumber);
+    if (!Number.isInteger(accountNumber) || accountNumber < 1) {
+      res.status(400).json({ error: "accountNumber must be a positive integer" });
+      return;
+    }
+    res.json(await checkCswapLogin(accountNumber));
   });
 
   app.post("/claude-account/switch", async (req, res) => {

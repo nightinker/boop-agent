@@ -6,6 +6,7 @@ import { api } from "../../../convex/_generated/api.js";
 import type { Id } from "../../../convex/_generated/dataModel.js";
 import MemoryGraphView from "./MemoryGraphView.js";
 import { EmbeddingBanner } from "./EmbeddingBanner.js";
+import { Select } from "./Select.js";
 import {
   EmptyState,
   HeaderPill,
@@ -173,21 +174,18 @@ export function MemoryPanel({
               ))}
             </div>
 
-            <select
+            <Select
               value={segmentFilter}
-              onChange={(e) => setSegmentFilter(e.target.value as Segment)}
-              className={`rounded-xl border px-2.5 py-1.5 text-xs focus:outline-none ${
-                isDark
-                  ? "border-white/10 bg-[#17171a] text-zinc-300"
-                  : "border-zinc-200 bg-white text-zinc-700"
-              }`}
-            >
-              {SEGMENT_OPTIONS.map((s) => (
-                <option key={s} value={s}>
-                  {s === "all" ? "All segments" : s}
-                </option>
-              ))}
-            </select>
+              options={SEGMENT_OPTIONS.map((s) => ({
+                value: s,
+                label: s === "all" ? "All segments" : s,
+              }))}
+              onChange={setSegmentFilter}
+              isDark={isDark}
+              ariaLabel="Memory segment"
+              size="sm"
+              className="w-40"
+            />
 
             <input
               type="text"

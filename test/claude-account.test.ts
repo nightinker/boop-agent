@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { parseClaudeAuthStatus, parseCswapList } from "../server/claude-account.js";
+import {
+  classifyLoginCheck,
+  parseClaudeAuthStatus,
+  parseCswapList,
+} from "../server/claude-account.js";
 
 describe("Claude account status", () => {
   it("reads the signed-in account", () => {
@@ -92,5 +96,30 @@ describe("cswap account list", () => {
 
   it("rejects output with no JSON", () => {
     expect(() => parseCswapList("nothing here")).toThrow("no JSON");
+  });
+});
+
+describe("saved login check", () => {
+  it("reads a dead refresh token as expired", () => {
+    expect(
+      classifyLoginCheck("Failed to authenticate: OAuth session expired and could not be refreshed", false),
+    ).toEqual({
+      result: "expired",
+      detail: "Failed to authenticate: OAuth session expired and could not be refreshed",
+    });
+  });
+
+  it("tells a usage limit apart from a broken login", () => {
+    expect(
+      classifyLoginCheck("You've hit your weekly limit · resets Nov 3 at 6pm", true).result,
+    ).toBe("limited");
+  });
+
+  it("treats a clean reply as a working login", () => {
+    expect(classifyLoginCheck("OK", true)).toEqual({ result: "works", detail: null });
+  });
+
+  it("reports anything else as an error", () => {
+    expect(classifyLoginCheck("spawn cswap ENOENT", false).result).toBe("error");
   });
 });

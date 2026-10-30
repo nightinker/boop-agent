@@ -13,6 +13,7 @@ import {
   renameConnection,
 } from "./composio.js";
 import { refreshIntegrations } from "./integrations/registry.js";
+import { listComposioAccountConnections } from "./integrations/composio-account-loader.js";
 import { getStoredWebhookSecret } from "./composio-webhook.js";
 import { handleEmailEvent } from "./proactive-email.js";
 
@@ -21,6 +22,28 @@ export function createComposioRouter(): express.Router {
 
   router.get("/status", (_req, res) => {
     res.json({ enabled: Boolean(getComposio()) });
+  });
+
+  router.get("/account-connections", async (req, res) => {
+    try {
+      const [connections, meta] = await Promise.all([
+        listComposioAccountConnections({ fresh: req.query.fresh === "1" }),
+        listToolkitMeta().catch(() => new Map()),
+      ]);
+      if (connections === null) {
+        res.json({ available: false, connections: [] });
+        return;
+      }
+      res.json({
+        available: true,
+        connections: connections.map((c) => ({
+          ...c,
+          logoUrl: meta.get(c.slug)?.logo ?? null,
+        })),
+      });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
   });
 
   router.get("/toolkits", async (req, res) => {
