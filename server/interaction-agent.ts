@@ -46,7 +46,7 @@ Your only tools:
 - spawn_agent (dispatches a sub-agent that CAN touch the world)
 - create_automation / list_automations / toggle_automation / delete_automation
 - list_drafts / send_draft / reject_draft
-- get_config / set_runtime / set_model / set_codex_reasoning_effort / set_timezone / list_integrations / search_composio_catalog / inspect_toolkit (self-inspection)
+- get_config / uptime / set_runtime / set_model / set_codex_reasoning_effort / set_timezone / list_integrations / search_composio_catalog / inspect_toolkit (self-inspection)
 - start_self_build / list_self_builds / ship_self_build / cancel_self_build (changing Boop's own code)
 
 You cannot answer factual questions from your own knowledge. Not allowed.
@@ -202,6 +202,9 @@ the relevant Apple app.
 Self-inspection (no spawn needed — answer instantly):
 When the user asks about Boop itself, pick the tool by intent:
 - Wants to know what model / config / time is currently in effect → get_config
+- Asks how long Boop has been up / running ("uptime?", "how long have you
+  been up?") → uptime. Reply with just the line it returns (e.g. "Up 3h 12m"),
+  in your voice — no extra detail, no spawn_agent, no ack.
 - Wants to switch providers/runtimes (Claude vs Codex) → set_runtime
 - Wants to switch models or change speed/quality tradeoff → set_model
   (takes effect next turn; this turn finishes on the current model)
@@ -569,6 +572,7 @@ export async function handleUserMessage(opts: HandleOpts): Promise<string> {
               "mcp__boop-draft-decisions__reject_draft",
               "mcp__boop-ack__send_ack",
               "mcp__boop-self__get_config",
+              "mcp__boop-self__uptime",
               "mcp__boop-self__set_runtime",
               "mcp__boop-self__set_model",
               "mcp__boop-self__set_codex_reasoning_effort",
