@@ -7,7 +7,7 @@ export function zodShapeToJsonSchema(shape: z.ZodRawShape): JsonSchema {
   const required: string[] = [];
 
   for (const [key, schema] of Object.entries(shape)) {
-    const { schema: json, optional } = zodToJsonSchema(schema);
+    const { schema: json, optional } = zodToJsonSchema(schema as z.ZodTypeAny);
     properties[key] = json;
     if (!optional) required.push(key);
   }
@@ -22,15 +22,15 @@ export function zodShapeToJsonSchema(shape: z.ZodRawShape): JsonSchema {
 
 function zodToJsonSchema(schema: z.ZodTypeAny): { schema: JsonSchema; optional: boolean } {
   if (schema instanceof z.ZodOptional) {
-    const inner = zodToJsonSchema(schema._def.innerType);
+    const inner = zodToJsonSchema(schema.unwrap() as z.ZodTypeAny);
     return { schema: inner.schema, optional: true };
   }
   if (schema instanceof z.ZodDefault) {
-    const inner = zodToJsonSchema(schema._def.innerType);
+    const inner = zodToJsonSchema(schema.unwrap() as z.ZodTypeAny);
     return { schema: inner.schema, optional: true };
   }
   if (schema instanceof z.ZodNullable) {
-    const inner = zodToJsonSchema(schema._def.innerType);
+    const inner = zodToJsonSchema(schema.unwrap() as z.ZodTypeAny);
     return { schema: { ...inner.schema, nullable: true }, optional: inner.optional };
   }
   if (schema instanceof z.ZodString) {
@@ -44,12 +44,12 @@ function zodToJsonSchema(schema: z.ZodTypeAny): { schema: JsonSchema; optional: 
   }
   if (schema instanceof z.ZodEnum) {
     return {
-      schema: withDescription(schema, { type: "string", enum: schema._def.values }),
+      schema: withDescription(schema, { type: "string", enum: schema.options }),
       optional: false,
     };
   }
   if (schema instanceof z.ZodArray) {
-    const item = zodToJsonSchema(schema._def.type);
+    const item = zodToJsonSchema(schema.element as z.ZodTypeAny);
     return {
       schema: withDescription(schema, { type: "array", items: item.schema }),
       optional: false,
