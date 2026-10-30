@@ -1,7 +1,7 @@
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { existsSync } from "node:fs";
-import { chmod, mkdir, readFile, rename, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { api } from "../../convex/_generated/api.js";
@@ -62,6 +62,28 @@ async function must(command: string, args: string[], options: Parameters<typeof 
   const result = await sh(command, args, options);
   if (!result.ok) throw new Error(`${command} ${args.join(" ")} failed:\n${tail(result.output, 15)}`);
   return result.output;
+}
+
+/**
+ * Convex's generated types are gitignored, so a fresh worktree has none and a
+ * copied set can predate the branch (missing whole modules). Generate them
+ * from the worktree's own convex/ folder; `convex codegen` reads the
+ * deployment but doesn't change what runs on it. Fall back to the running
+ * app's copy if codegen can't reach Convex.
+ */
+async function refreshGeneratedTypes(worktree: string, src: string): Promise<void> {
+  const generated = await sh("npx", ["convex", "codegen", "--typecheck", "disable"], {
+    cwd: worktree,
+    timeout: 180_000,
+  });
+  if (generated.ok) return;
+  console.warn(`[self-build] convex codegen failed, copying generated types:\n${tail(generated.output, 5)}`);
+  const fallback = [join(process.cwd(), "convex", "_generated"), join(src, "convex", "_generated")].find(
+    (dir) => existsSync(dir),
+  );
+  if (!fallback) return;
+  await rm(join(worktree, "convex", "_generated"), { recursive: true, force: true });
+  await must("cp", ["-R", fallback, join(worktree, "convex", "_generated")]);
 }
 
 export function sourceDir(): string | null {
@@ -165,9 +187,7 @@ async function runBuild(input: {
   if (existsSync(join(src, "node_modules"))) {
     await symlink(join(src, "node_modules"), join(worktree, "node_modules"), "dir");
   }
-  if (existsSync(join(src, "convex", "_generated"))) {
-    await must("cp", ["-R", join(src, "convex", "_generated"), join(worktree, "convex", "_generated")]);
-  }
+  await refreshGeneratedTypes(worktree, src);
   await setStatus(buildId, { status: "coding", branch, worktreePath: worktree });
 
   const abort = new AbortController();
@@ -223,6 +243,7 @@ async function runBuild(input: {
   const ahead = Number((await must("git", ["rev-list", "--count", "origin/main..HEAD"], { cwd: worktree })).trim());
   if (!ahead) throw new Error("The coding run finished without changing anything.");
 
+  await refreshGeneratedTypes(worktree, src);
   const typecheck = await sh("npx", ["tsc", "--noEmit"], { cwd: worktree, timeout: CHECK_TIMEOUT_MS });
   const tests = await sh("npx", ["vitest", "run"], { cwd: worktree, timeout: CHECK_TIMEOUT_MS });
   const testsPassed = typecheck.ok && tests.ok;
