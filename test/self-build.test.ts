@@ -13,7 +13,7 @@ import {
   restartScript,
   slugify,
 } from "../server/self-build/plan.js";
-import { codingEnv } from "../server/self-build/run.js";
+import { codingEnv, realNodeEnv } from "../server/self-build/run.js";
 import { SELF_BUILD_ALLOWED_TOOLS, createSelfBuildTools } from "../server/self-build/tools.js";
 
 describe("who may change Boop's code", () => {
@@ -127,5 +127,20 @@ describe("main agent tools", () => {
       "cancel_self_build",
     ]);
     expect(SELF_BUILD_ALLOWED_TOOLS).toHaveLength(4);
+  });
+});
+
+describe("build commands use the system Node", () => {
+  it("drops the app's Electron node shim from PATH", () => {
+    const env = realNodeEnv({
+      PATH: "/Users/me/Library/Application Support/Boop/bin:/x/node_modules/.bin:/opt/homebrew/bin:/usr/bin",
+      ELECTRON_RUN_AS_NODE: "1",
+      BOOP_NODE_CMD: "/Users/me/Library/Application Support/Boop/bin/node",
+      HOME: "/Users/me",
+    });
+    expect(env.PATH).toBe("/x/node_modules/.bin:/opt/homebrew/bin:/usr/bin");
+    expect(env.ELECTRON_RUN_AS_NODE).toBeUndefined();
+    expect(env.BOOP_NODE_CMD).toBeUndefined();
+    expect(env.HOME).toBe("/Users/me");
   });
 });

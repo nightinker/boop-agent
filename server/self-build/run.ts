@@ -46,7 +46,7 @@ async function sh(
       cwd: options.cwd,
       timeout: options.timeout ?? 120_000,
       maxBuffer: 50 * 1024 * 1024,
-      env: options.env ?? process.env,
+      env: options.env ?? realNodeEnv(),
     });
     return { ok: true, output: `${stdout}${stderr}` };
   } catch (err) {
@@ -101,7 +101,25 @@ function currentAppPath(): string {
 }
 
 /** Secrets stay out of the coding agent's reach: it gets PATH/HOME, not Boop's keys. */
-export function codingEnv(env: NodeJS.ProcessEnv = process.env): Record<string, string> {
+/**
+ * The desktop app puts a `node` shim first on PATH that runs Electron as Node.
+ * Tools that parse their own argv (electron-builder via yargs) see
+ * process.versions.electron and drop the wrong arguments, so builds run with
+ * the system Node instead.
+ */
+export function realNodeEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const shimDir = env.BOOP_NODE_CMD ? dirname(env.BOOP_NODE_CMD) : null;
+  const path = (env.PATH ?? "")
+    .split(":")
+    .filter((dir) => dir && dir !== shimDir && !dir.endsWith("/Application Support/Boop/bin"))
+    .join(":");
+  const clean: NodeJS.ProcessEnv = { ...env, PATH: path };
+  delete clean.ELECTRON_RUN_AS_NODE;
+  delete clean.BOOP_NODE_CMD;
+  return clean;
+}
+
+export function codingEnv(env: NodeJS.ProcessEnv = realNodeEnv()): Record<string, string> {
   const clean: Record<string, string> = {};
   for (const [key, value] of Object.entries(env)) {
     if (value === undefined) continue;
@@ -321,13 +339,19 @@ export async function shipSelfBuild(input: {
   const src = sourceDir();
   if (!src) return "Self-build isn't set up: set BOOP_SOURCE_DIR in .env.local to Boop's git checkout.";
   const recent = await convex.query(api.selfBuilds.recent, { limit: 10 });
+  const shippable = (b: (typeof recent)[number]) =>
+    Boolean(b.prUrl) && (b.status === "pr_open" || b.status === "failed" || b.status === "rolled_back");
   const build = input.buildId
     ? recent.find((b) => b.buildId === input.buildId)
-    : recent.find((b) => b.status === "pr_open");
-  if (!build || build.status !== "pr_open" || !build.prUrl) {
+    : recent.find(shippable);
+  if (!build || !shippable(build) || !build.prUrl) {
     return "There's no finished build waiting to ship.";
   }
-  if (!build.testsPassed && !input.allowFailingChecks) {
+  const merged = await prIsMerged(build.prUrl);
+  if (build.status !== "pr_open" && !merged) {
+    return `That build's last attempt failed before its PR was merged (${build.error?.split("\n")[0] ?? "unknown error"}). Ask the owner whether to start a new build instead.`;
+  }
+  if (!merged && !build.testsPassed && !input.allowFailingChecks) {
     return `Build ${build.buildId} has failing checks. Ask the owner to confirm shipping it anyway before calling this again with allowFailingChecks.`;
   }
   await setStatus(build.buildId, { status: "shipping" });
@@ -342,6 +366,12 @@ export async function shipSelfBuild(input: {
   return `Shipping build ${build.buildId}: merging, rebuilding and restarting. I'll be offline for a minute or two and text you when I'm back.`;
 }
 
+async function prIsMerged(prUrl: string): Promise<boolean> {
+  const repo = parseGitHubRepo(prUrl.replace(/\/pull\/\d+$/, ""));
+  const state = await sh("gh", ["pr", "view", prUrl, "--json", "state", "-q", ".state", ...(repo ? ["--repo", repo] : [])]);
+  return state.ok && state.output.trim().split("\n").pop() === "MERGED";
+}
+
 async function shipBuild(input: {
   build: { buildId: string; prUrl: string };
   conversationId: string;
@@ -349,7 +379,9 @@ async function shipBuild(input: {
 }): Promise<void> {
   const { buildId, prUrl } = input.build;
   const repo = parseGitHubRepo(prUrl.replace(/\/pull\/\d+$/, ""));
-  await must("gh", ["pr", "merge", prUrl, "--merge", ...(repo ? ["--repo", repo] : [])], { cwd: input.src });
+  if (!(await prIsMerged(prUrl))) {
+    await must("gh", ["pr", "merge", prUrl, "--merge", ...(repo ? ["--repo", repo] : [])], { cwd: input.src });
+  }
 
   if (process.env.BOOP_DESKTOP !== "1") {
     await setStatus(buildId, { status: "shipped" });
@@ -359,6 +391,9 @@ async function shipBuild(input: {
 
   const release = join(input.src, ".claude", "worktrees", `self-build-release-${buildId}`);
   await must("git", ["fetch", "origin", "main"], { cwd: input.src });
+  if (existsSync(release)) {
+    await sh("git", ["worktree", "remove", "--force", release], { cwd: input.src });
+  }
   await must("git", ["worktree", "add", "--detach", release, "origin/main"], { cwd: input.src });
   const sameDeps = (await sh("cmp", ["-s", join(input.src, "package-lock.json"), join(release, "package-lock.json")])).ok;
   if (sameDeps && existsSync(join(input.src, "node_modules"))) {
