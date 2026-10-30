@@ -19,12 +19,19 @@ export interface ClaudeAccount {
   authMethod: string | null;
 }
 
+export interface UsageWindow {
+  percent: number;
+  resetsIn: string | null;
+}
+
 export interface CswapAccount {
   number: number;
   email: string;
   organizationName: string | null;
   active: boolean;
   needsRelogin: boolean;
+  status: "ok" | "relogin_required" | "unavailable" | "unknown";
+  usage: { fiveHour: UsageWindow | null; weekly: UsageWindow | null } | null;
 }
 
 export interface CswapState {
@@ -45,6 +52,22 @@ export function parseClaudeAuthStatus(stdout: string): ClaudeAccount {
   };
 }
 
+function parseUsageWindow(value: unknown): UsageWindow | null {
+  if (!value || typeof value !== "object") return null;
+  const window = value as { pct?: unknown; countdown?: unknown };
+  if (typeof window.pct !== "number") return null;
+  return {
+    percent: Math.round(window.pct),
+    resetsIn: typeof window.countdown === "string" ? window.countdown : null,
+  };
+}
+
+function parseStatus(value: unknown): CswapAccount["status"] {
+  return value === "ok" || value === "relogin_required" || value === "unavailable"
+    ? value
+    : "unknown";
+}
+
 export function parseCswapList(stdout: string): CswapState {
   const jsonStart = stdout.indexOf("{");
   if (jsonStart === -1) throw new Error("cswap list returned no JSON");
@@ -59,6 +82,14 @@ export function parseCswapList(stdout: string): CswapState {
       typeof account.organizationName === "string" ? account.organizationName : null,
     active: account.active === true,
     needsRelogin: account.usageStatus === "relogin_required",
+    status: parseStatus(account.usageStatus),
+    usage:
+      account.usage && typeof account.usage === "object"
+        ? {
+            fiveHour: parseUsageWindow((account.usage as Record<string, unknown>).fiveHour),
+            weekly: parseUsageWindow((account.usage as Record<string, unknown>).sevenDay),
+          }
+        : null,
   }));
   return {
     available: true,

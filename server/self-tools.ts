@@ -7,6 +7,10 @@ import {
 } from "./composio.js";
 import { activeProvider as activeEmbeddingProvider } from "./embeddings.js";
 import { listEnabledIntegrations } from "./integrations/registry.js";
+import {
+  COMPOSIO_ACCOUNT_INTEGRATION,
+  listComposioAccountToolkits,
+} from "./integrations/composio-account-loader.js";
 import { createClaudeMcpServer } from "./runtimes/claude.js";
 import { defineRuntimeTool } from "./runtimes/tool.js";
 import { runtimeText, type RuntimeReasoningEffort, type RuntimeTool } from "./runtimes/types.js";
@@ -177,12 +181,20 @@ Use when the user says "use opus", "switch to sonnet", "use Codex mini", "make i
       {},
       async () => {
         const connected = await listConnectedToolkits();
-        const summary = connected.map((c) => ({
+        const summary: Array<Record<string, string>> = connected.map((c) => ({
           slug: c.slug,
           status: c.status,
           account: c.accountLabel ?? c.accountEmail ?? c.alias ?? "(unknown)",
           connectionId: c.connectionId,
         }));
+        const personal = await listComposioAccountToolkits().catch(() => []);
+        for (const slug of personal) {
+          summary.push({
+            slug,
+            status: "ACTIVE",
+            account: `personal Composio account — spawn with integration "${COMPOSIO_ACCOUNT_INTEGRATION}"`,
+          });
+        }
         return runtimeText(
           summary.length === 0
             ? "No integrations are currently connected. The user can connect new ones from the Connections panel in the debug UI."
