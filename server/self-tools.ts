@@ -9,7 +9,7 @@ import { activeProvider as activeEmbeddingProvider } from "./embeddings.js";
 import { listEnabledIntegrations } from "./integrations/registry.js";
 import {
   COMPOSIO_ACCOUNT_INTEGRATION,
-  listComposioAccountToolkits,
+  currentComposioAccountToolkits,
 } from "./integrations/composio-account-loader.js";
 import { createClaudeMcpServer } from "./runtimes/claude.js";
 import { defineRuntimeTool } from "./runtimes/tool.js";
@@ -187,7 +187,7 @@ Use when the user says "use opus", "switch to sonnet", "use Codex mini", "make i
           account: c.accountLabel ?? c.accountEmail ?? c.alias ?? "(unknown)",
           connectionId: c.connectionId,
         }));
-        const personal = await listComposioAccountToolkits().catch(() => []);
+        const personal = await currentComposioAccountToolkits().catch(() => []);
         for (const slug of personal) {
           summary.push({
             slug,

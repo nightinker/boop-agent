@@ -52,3 +52,53 @@ describe("dispatcher integration list", () => {
     ).toBe("gmail, composio-account (Vueschool Staging, Banner Studio)");
   });
 });
+
+describe("personal Composio connection summary", () => {
+  it("counts active connections per toolkit and flags custom ones", async () => {
+    const { parseConnectionSummary } = await import(
+      "../server/integrations/composio-account-loader.js"
+    );
+    const summary = parseConnectionSummary(
+      JSON.stringify({
+        stripe: [{ status: "ACTIVE" }, { status: "ACTIVE" }],
+        custom_vueschool_metabase: [{ status: "INITIATED" }],
+        gmail: [],
+      }),
+    );
+    expect(summary).toEqual([
+      { slug: "stripe", name: "Stripe", active: 2, total: 2, custom: false },
+      {
+        slug: "custom_vueschool_metabase",
+        name: "Vueschool Metabase",
+        active: 0,
+        total: 1,
+        custom: true,
+      },
+    ]);
+  });
+});
+
+describe("personal Composio integration description", () => {
+  it("names every connected service for the dispatcher", async () => {
+    const { describeComposioAccount } = await import(
+      "../server/integrations/composio-account-loader.js"
+    );
+    const text = describeComposioAccount(["custom_vueschool_staging", "stripe"]);
+    expect(text).toContain("Vueschool Staging, Stripe");
+  });
+});
+
+describe("merging connection lists", () => {
+  it("adds toolkits the CLI list left out without overwriting known ones", async () => {
+    const { mergeConnectionMaps } = await import(
+      "../server/integrations/composio-account-loader.js"
+    );
+    expect(
+      mergeConnectionMaps({ github: [{ status: "ACTIVE" }] }, [
+        { asana: [{ status: "ACTIVE" }] },
+        { github: [{ status: "EXPIRED" }] },
+        {},
+      ]),
+    ).toEqual({ github: [{ status: "ACTIVE" }], asana: [{ status: "ACTIVE" }] });
+  });
+});

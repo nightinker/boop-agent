@@ -142,3 +142,49 @@ export async function switchCswapAccount(accountNumber: number): Promise<ClaudeA
   });
   return getClaudeAccount({ fresh: true });
 }
+
+export interface LoginCheck {
+  accountNumber: number;
+  result: "works" | "expired" | "limited" | "error";
+  detail: string | null;
+  checkedAt: string;
+}
+
+const LOGIN_CHECK_MODEL = "claude-haiku-5-5";
+
+export function classifyLoginCheck(output: string, exitedCleanly: boolean): {
+  result: LoginCheck["result"];
+  detail: string | null;
+} {
+  const firstLine = output.split("\n").map((line) => line.trim()).find(Boolean) ?? null;
+  if (/failed to authenticate|oauth|log ?in again|not logged in|invalid_grant/i.test(output)) {
+    return { result: "expired", detail: firstLine };
+  }
+  if (/hit your (weekly|5-hour|usage) limit|usage limit|rate limit/i.test(output)) {
+    return { result: "limited", detail: firstLine };
+  }
+  return exitedCleanly ? { result: "works", detail: null } : { result: "error", detail: firstLine };
+}
+
+/**
+ * cswap marks a saved login dead after one failed refresh and never retries,
+ * so its "re-login needed" can be months stale. `claude auth status` doesn't
+ * help: it reads the saved token without testing it. The only real proof is a
+ * request, so this sends one short message on the cheapest model as that
+ * account, in an isolated `cswap run` that leaves Boop's login alone.
+ */
+export async function checkCswapLogin(accountNumber: number): Promise<LoginCheck> {
+  const checkedAt = new Date().toISOString();
+  try {
+    const { stdout, stderr } = await execFileAsync(
+      "cswap",
+      ["run", String(accountNumber), "--", "-p", "Reply with OK", "--model", LOGIN_CHECK_MODEL],
+      { timeout: 90_000 },
+    );
+    return { accountNumber, checkedAt, ...classifyLoginCheck(`${stdout}\n${stderr}`, true) };
+  } catch (err) {
+    const failure = err as { stdout?: string; stderr?: string; message?: string };
+    const output = [failure.stdout, failure.stderr, failure.message].filter(Boolean).join("\n");
+    return { accountNumber, checkedAt, ...classifyLoginCheck(output, false) };
+  }
+}
