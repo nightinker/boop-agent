@@ -97,6 +97,14 @@ describe("restart script", () => {
     expect(script).toContain("write_result rolled_back");
   });
 
+  it("quits Boop by bundle id and makes sure nothing survives", () => {
+    expect(script).toContain('tell application id \\"$BUNDLE_ID\\" to quit');
+    expect(script).toContain('pgrep -f "^$APP/Contents/"');
+    expect(script).toContain('lsof -ti "tcp:$port" -sTCP:LISTEN');
+    expect(script).toContain("xargs kill -KILL");
+    expect(script).toContain("stop_boop || { write_result failed; exit 1; }");
+  });
+
   it("quotes paths safely", () => {
     expect(script).toContain(`BACKUP='/tmp/it'\\''s here/previous'`);
   });
@@ -142,5 +150,20 @@ describe("build commands use the system Node", () => {
     expect(env.ELECTRON_RUN_AS_NODE).toBeUndefined();
     expect(env.BOOP_NODE_CMD).toBeUndefined();
     expect(env.HOME).toBe("/Users/me");
+  });
+});
+
+describe("restart helper process matching", () => {
+  it("only matches processes started from the app, not ones that mention it", () => {
+    const script = restartScript({
+      buildId: "b",
+      newAppPath: "/n/Boop.app",
+      appPath: "/Applications/Boop.app",
+      backupDir: "/b",
+      resultPath: "/r",
+      healthUrl: "h",
+    });
+    expect(script).toContain('pgrep -f "^$APP/Contents/"');
+    expect(script).not.toContain('pgrep -f "$APP/Contents/"');
   });
 });
