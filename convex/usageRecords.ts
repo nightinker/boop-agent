@@ -10,6 +10,9 @@ const sourceV = v.union(
   v.literal("consolidation-judge"),
   v.literal("proactive"),
   v.literal("skill-review"),
+  v.literal("self-build"),
+  v.literal("skill-learn"),
+  v.literal("skill-curator"),
 );
 
 export const record = mutation({

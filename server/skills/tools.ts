@@ -17,7 +17,7 @@ import {
 export const SKILLS_NAMESPACE = "boop-skills";
 export const SETTING_WRITE_APPROVAL = "skills_write_approval";
 
-export type SkillOrigin = "execution" | "review" | "correction" | "user";
+export type SkillOrigin = "execution" | "review" | "correction" | "user" | "learn" | "curator";
 
 export interface StoredSkill extends SkillSummary {
   body: string;
@@ -44,6 +44,8 @@ export interface SkillStore {
     reason?: string;
   }): Promise<{ staged: boolean }>;
   recordView(name: string): Promise<void>;
+  /** Only the curator's merge pass gets an archive tool. */
+  archive?(name: string, reason: string): Promise<void>;
 }
 
 async function approvalRequired(origin: SkillOrigin): Promise<boolean> {
@@ -99,6 +101,9 @@ export function convexSkillStore(origin: SkillOrigin, agentId?: string): SkillSt
     recordView: async (name) => {
       await convex.mutation(api.skills.recordView, { name });
     },
+    archive: async (name, reason) => {
+      await convex.mutation(api.skills.archiveByAgent, { name, reason, origin });
+    },
   };
 }
 
@@ -107,9 +112,12 @@ export function convexSkillStore(origin: SkillOrigin, agentId?: string): SkillSt
  * {name, description}, with the description cut to its first line. Cheap and
  * synchronous from the user's point of view (one Convex query, no sub-agent).
  */
-export function createListSkillsTool(store: Pick<SkillStore, "list">): RuntimeTool {
+export function createListSkillsTool(
+  store: Pick<SkillStore, "list">,
+  namespace: string = SKILLS_NAMESPACE,
+): RuntimeTool {
   return defineRuntimeTool(
-    SKILLS_NAMESPACE,
+    namespace,
     "list_skills",
     "List every saved skill as JSON {skills: [{name, description}]}, where description is the skill's one-line description. Use when the user asks what skills Boop has. An empty list means no skills are saved yet.",
     {},
@@ -146,9 +154,46 @@ function withWarnings(message: string, body: string): string {
 export function createSkillTools(
   store: SkillStore,
   state: SkillToolsState = newSkillToolsState(),
+  options: { allowArchive?: boolean } = {},
 ): RuntimeTool[] {
   const read = async (name: string) => state.staged.get(name) ?? (await store.get(name));
+  const archiveTools: RuntimeTool[] =
+    options.allowArchive && store.archive
+      ? [
+          defineRuntimeTool(
+            SKILLS_NAMESPACE,
+            "skill_archive",
+            "Archive a skill whose content you have already folded into another skill (absorbed_into). Archiving hides it from the agents; it can be restored and is never deleted.",
+            {
+              name: z.string(),
+              absorbed_into: z.string().describe("The skill that now covers this one."),
+              reason: z.string().describe("One sentence."),
+            },
+            async ({ name, absorbed_into, reason }) => {
+              if (name === absorbed_into) return { text: "A skill can't absorb itself.", success: false };
+              if (!state.viewed.has(name) || !state.viewed.has(absorbed_into)) {
+                return {
+                  text: `Call skill_view on both "${name}" and "${absorbed_into}" first.`,
+                  success: false,
+                };
+              }
+              const target = await read(absorbed_into);
+              if (!target || target.status !== "active") {
+                return { text: `"${absorbed_into}" isn't an active skill.`, success: false };
+              }
+              const skill = await read(name);
+              if (!skill) return { text: `No skill named "${name}".`, success: false };
+              if (skill.pinned) return { text: `"${name}" is pinned; leave it.`, success: false };
+              await store.archive!(name, `Merged into ${absorbed_into}: ${reason}`);
+              state.wrote = true;
+              broadcast("skill_updated", { name, action: "archive" });
+              return { text: `Archived "${name}" (merged into "${absorbed_into}").` };
+            },
+          ),
+        ]
+      : [];
   return [
+    ...archiveTools,
     defineRuntimeTool(
       SKILLS_NAMESPACE,
       "skill_list",

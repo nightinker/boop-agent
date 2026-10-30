@@ -87,19 +87,29 @@ export function formatSkillIndex(skills: SkillSummary[]): string {
 export const NO_DESCRIPTION = "(no description)";
 
 /** First non-blank line of a description, or a placeholder when there is none. */
-export function firstLineDescription(description: string | null | undefined): string {
-  const line = (description ?? "")
+export function firstLineDescription(description: unknown): string {
+  if (typeof description !== "string") return NO_DESCRIPTION;
+  const line = description
     .split(/\r?\n/)
     .map((l) => l.trim())
     .find((l) => l.length > 0);
   return line ?? NO_DESCRIPTION;
 }
 
-/** The {name, description} list the dispatcher's list_skills tool returns. */
-export function summarizeSkillsForListing(
-  skills: Array<{ name: string; description?: string | null }> | null | undefined,
-): SkillSummary[] {
-  return (skills ?? [])
-    .filter((skill) => skill?.name)
-    .map((skill) => ({ name: skill.name, description: firstLineDescription(skill.description) }));
+/**
+ * The {name, description} list the dispatcher's list_skills tool returns.
+ * Tolerates malformed rows: a missing/non-array result is "no skills", rows
+ * without a usable string name are skipped, and a missing or non-string
+ * description becomes the placeholder.
+ */
+export function summarizeSkillsForListing(skills: unknown): SkillSummary[] {
+  if (!Array.isArray(skills)) return [];
+  const out: SkillSummary[] = [];
+  for (const skill of skills) {
+    if (!skill || typeof skill !== "object") continue;
+    const { name, description } = skill as { name?: unknown; description?: unknown };
+    if (typeof name !== "string" || !name.trim()) continue;
+    out.push({ name: name.trim(), description: firstLineDescription(description) });
+  }
+  return out;
 }

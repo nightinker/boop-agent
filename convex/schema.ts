@@ -108,6 +108,9 @@ export default defineSchema({
       v.literal("consolidation-judge"),
       v.literal("proactive"),
       v.literal("skill-review"),
+      v.literal("self-build"),
+      v.literal("skill-learn"),
+      v.literal("skill-curator"),
     ),
     conversationId: v.optional(v.string()),
     turnId: v.optional(v.string()),
@@ -255,6 +258,8 @@ export default defineSchema({
     body: v.string(),
     status: v.union(v.literal("active"), v.literal("archived")),
     pinned: v.boolean(),
+    // Set by the curator when a skill hasn't been used for a while.
+    stale: v.optional(v.boolean()),
     createdBy: v.union(v.literal("agent"), v.literal("user")),
     viewCount: v.number(),
     patchCount: v.number(),
@@ -282,6 +287,8 @@ export default defineSchema({
       v.literal("review"),
       v.literal("correction"),
       v.literal("user"),
+      v.literal("learn"),
+      v.literal("curator"),
     ),
     agentId: v.optional(v.string()),
     createdAt: v.number(),
@@ -301,6 +308,8 @@ export default defineSchema({
       v.literal("review"),
       v.literal("correction"),
       v.literal("user"),
+      v.literal("learn"),
+      v.literal("curator"),
     ),
     agentId: v.optional(v.string()),
     // One agent run's edits to a skill stack into a single pending change.
@@ -309,4 +318,33 @@ export default defineSchema({
     createdAt: v.number(),
     resolvedAt: v.optional(v.number()),
   }).index("by_status", ["status", "createdAt"]),
+
+  // Features Boop builds into its own code when the owner asks over iMessage.
+  selfBuilds: defineTable({
+    buildId: v.string(),
+    conversationId: v.string(),
+    request: v.string(),
+    status: v.union(
+      v.literal("coding"),
+      v.literal("testing"),
+      v.literal("pr_open"),
+      v.literal("failed"),
+      v.literal("cancelled"),
+      v.literal("shipping"),
+      v.literal("restarting"),
+      v.literal("shipped"),
+      v.literal("rolled_back"),
+    ),
+    branch: v.optional(v.string()),
+    worktreePath: v.optional(v.string()),
+    prUrl: v.optional(v.string()),
+    summary: v.optional(v.string()),
+    testsPassed: v.optional(v.boolean()),
+    testOutput: v.optional(v.string()),
+    error: v.optional(v.string()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_buildId", ["buildId"])
+    .index("by_createdAt", ["createdAt"]),
 });

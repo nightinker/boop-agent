@@ -5,11 +5,16 @@ import { createMemoryTools } from "./memory/tools.js";
 import { extractAndStore } from "./memory/extract.js";
 import { spawnExecutionAgent } from "./execution-agent.js";
 import { listEnabledIntegrations } from "./integrations/registry.js";
+import { LEARN_ALLOWED_TOOLS, LEARN_INSTRUCTIONS, createLearnTools } from "./skills/learn.js";
+import {
+  SELF_BUILD_ALLOWED_TOOLS,
+  SELF_BUILD_PROMPT,
+  createSelfBuildTools,
+} from "./self-build/tools.js";
 import { COMPOSIO_ACCOUNT_INTEGRATION } from "./integrations/composio-account-loader.js";
 import { createAutomationTools } from "./automation-tools.js";
 import { createDraftDecisionTools } from "./draft-tools.js";
 import { createSelfTools } from "./self-tools.js";
-import { convexSkillStore, createListSkillsTool } from "./skills/tools.js";
 import {
   getRuntimeConfig,
   resolveRuntimeInput,
@@ -42,8 +47,9 @@ Your only tools:
 - spawn_agent (dispatches a sub-agent that CAN touch the world)
 - create_automation / list_automations / toggle_automation / delete_automation
 - list_drafts / send_draft / reject_draft
-- list_skills (the saved skills, name + one-line description)
-- get_config / set_runtime / set_model / set_codex_reasoning_effort / set_timezone / list_integrations / search_composio_catalog / inspect_toolkit (self-inspection)
+- get_config / uptime / list_skills / set_runtime / set_model / set_codex_reasoning_effort / set_timezone / list_integrations / search_composio_catalog / inspect_toolkit (self-inspection)
+- start_self_build / list_self_builds / ship_self_build / cancel_self_build (changing Boop's own code)
+- learn_skill (teach Boop a skill from a link, file, notes or what you just did)
 
 You cannot answer factual questions from your own knowledge. Not allowed.
 You have NO browser, NO WebSearch, NO WebFetch, NO file access, NO APIs.
@@ -152,6 +158,8 @@ When the user signals they want to back out (cancel, scrap it, different
 version, never mind, etc.), call reject_draft.
 
 Never claim something was sent unless send_draft returned success.
+${SELF_BUILD_PROMPT}
+${LEARN_INSTRUCTIONS}
 
 Integration capabilities — IMPORTANT:
 You only know integration NAMES, not their actual tool surface. Composio's
@@ -197,6 +205,9 @@ the relevant Apple app.
 Self-inspection (no spawn needed — answer instantly):
 When the user asks about Boop itself, pick the tool by intent:
 - Wants to know what model / config / time is currently in effect → get_config
+- Asks how long Boop has been up / running ("uptime?", "how long have you
+  been up?") → uptime. Reply with just the line it returns (e.g. "Up 3h 12m"),
+  in your voice — no extra detail, no spawn_agent, no ack.
 - Wants to switch providers/runtimes (Claude vs Codex) → set_runtime
 - Wants to switch models or change speed/quality tradeoff → set_model
   (takes effect next turn; this turn finishes on the current model)
@@ -477,7 +488,8 @@ export async function handleUserMessage(opts: HandleOpts): Promise<string> {
     ...createAutomationTools(opts.conversationId),
     ...createDraftDecisionTools(opts.conversationId, runtimeConfig),
     ...createSelfTools(),
-    createListSkillsTool(convexSkillStore("user")),
+    ...createSelfBuildTools(opts.conversationId),
+    ...createLearnTools(opts.conversationId),
     defineRuntimeTool(
       "boop-ack",
       "send_ack",
@@ -566,9 +578,12 @@ export async function handleUserMessage(opts: HandleOpts): Promise<string> {
               "mcp__boop-automations__delete_automation",
               "mcp__boop-draft-decisions__list_drafts",
               "mcp__boop-draft-decisions__send_draft",
+              ...SELF_BUILD_ALLOWED_TOOLS,
+              ...LEARN_ALLOWED_TOOLS,
               "mcp__boop-draft-decisions__reject_draft",
               "mcp__boop-ack__send_ack",
               "mcp__boop-self__get_config",
+              "mcp__boop-self__uptime",
               "mcp__boop-self__set_runtime",
               "mcp__boop-self__set_model",
               "mcp__boop-self__set_codex_reasoning_effort",
@@ -576,7 +591,7 @@ export async function handleUserMessage(opts: HandleOpts): Promise<string> {
               "mcp__boop-self__list_integrations",
               "mcp__boop-self__search_composio_catalog",
               "mcp__boop-self__inspect_toolkit",
-              "mcp__boop-skills__list_skills",
+              "mcp__boop-self__list_skills",
             ],
       // Belt-and-suspenders: even with bypassPermissions the SDK can leak
       // its built-ins if we only whitelist. Explicitly block them on the

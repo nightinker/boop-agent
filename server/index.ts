@@ -11,6 +11,7 @@ import { startCleanupLoop } from "./memory/clean.js";
 import { startAutomationLoop } from "./automations.js";
 import { startHeartbeatLoop } from "./heartbeat.js";
 import { startConsolidationLoop } from "./consolidation.js";
+import { runCurator, startCuratorLoop } from "./skills/curator.js";
 import { cancelAgent, retryAgent } from "./execution-agent.js";
 import { createComposioRouter } from "./composio-routes.js";
 import { ensureProactiveWatcher } from "./proactive-email.js";
@@ -31,6 +32,7 @@ import {
 } from "./runtime-config.js";
 import { startImageCleanup } from "./images/clean.js";
 import { isPublicServerRequest, isTrustedLocalRequest } from "./local-access.js";
+import { reportPendingRestart } from "./self-build/run.js";
 import {
   checkCswapLogin,
   getClaudeAccount,
@@ -44,6 +46,7 @@ async function main() {
   startAutomationLoop();
   startHeartbeatLoop();
   startConsolidationLoop();
+  startCuratorLoop();
   startImageCleanup();
   // No-op when a paid embedding key is set; otherwise downloads/loads the
   // local BGE-large model in the background so the first user-facing
@@ -119,6 +122,17 @@ async function main() {
     }
     try {
       res.json({ account: await switchCswapAccount(accountNumber) });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  app.post("/skills/curate", async (req, res) => {
+    try {
+      const body = (req.body ?? {}) as { consolidate?: unknown };
+      res.json(
+        await runCurator({ force: true, consolidate: body.consolidate === true ? true : undefined }),
+      );
     } catch (err) {
       res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
     }
@@ -242,6 +256,7 @@ async function main() {
   const port = Number(process.env.PORT ?? 3456);
   server.listen(port, () => {
     console.log(`boop-agent server listening on :${port}`);
+    setTimeout(() => void reportPendingRestart(), 5_000);
     console.log(`  health      GET  http://localhost:${port}/health`);
     console.log(`  chat        POST http://localhost:${port}/chat`);
     console.log(`  sendblue    POST http://localhost:${port}/sendblue/webhook`);

@@ -204,8 +204,37 @@ describe("list_skills (dispatcher)", () => {
 
   it("summarizes defensively", () => {
     expect(firstLineDescription(undefined)).toBe(NO_DESCRIPTION);
+    expect(firstLineDescription(42)).toBe(NO_DESCRIPTION);
     expect(summarizeSkillsForListing(null)).toEqual([]);
+    expect(summarizeSkillsForListing({ not: "an array" })).toEqual([]);
     expect(summarizeSkillsForListing([{ name: "", description: "x" }])).toEqual([]);
+  });
+
+  it("skips malformed rows and keeps the good ones", async () => {
+    const listSkills = createListSkillsTool({
+      list: async () =>
+        [
+          null,
+          "oops",
+          { description: "no name" },
+          { name: 7, description: "numeric name" },
+          { name: "   ", description: "blank name" },
+          { name: "ok", description: null },
+          { name: " good ", description: "Works fine" },
+        ] as never,
+    });
+    expect(JSON.parse((await listSkills.handle({})).text)).toEqual({
+      skills: [
+        { name: "ok", description: NO_DESCRIPTION },
+        { name: "good", description: "Works fine" },
+      ],
+    });
+  });
+
+  it("can be registered in the self-inspection namespace", () => {
+    const listSkills = createListSkillsTool(memoryStore(), "boop-self");
+    expect(listSkills.namespace).toBe("boop-self");
+    expect(listSkills.name).toBe("list_skills");
   });
 });
 

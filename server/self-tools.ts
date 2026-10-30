@@ -33,6 +33,8 @@ import {
   resolveTimezoneInput,
   setUserTimezone,
 } from "./timezone-config.js";
+import { formatUptime, serverUptimeSeconds } from "./uptime.js";
+import { convexSkillStore, createListSkillsTool } from "./skills/tools.js";
 
 const NAMESPACE = "boop-self";
 
@@ -82,6 +84,14 @@ export function createSelfTools(): RuntimeTool[] {
         return runtimeText(JSON.stringify(config, null, 2));
       },
     ),
+    defineRuntimeTool(
+      NAMESPACE,
+      "uptime",
+      'Return how long the Boop server process has been running, as a compact line like "Up 3h 12m". Use when the user asks how long Boop has been up/running ("uptime?", "how long have you been up?"). Reply with just that line.',
+      {},
+      async () => runtimeText(formatUptime(serverUptimeSeconds())),
+    ),
+    createListSkillsTool(convexSkillStore("user"), NAMESPACE),
     defineRuntimeTool(
       NAMESPACE,
       "set_timezone",
