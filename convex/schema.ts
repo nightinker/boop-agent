@@ -107,6 +107,7 @@ export default defineSchema({
       v.literal("consolidation-adversary"),
       v.literal("consolidation-judge"),
       v.literal("proactive"),
+      v.literal("skill-review"),
     ),
     conversationId: v.optional(v.string()),
     turnId: v.optional(v.string()),
@@ -246,4 +247,43 @@ export default defineSchema({
   })
     .index("by_automation", ["automationId"])
     .index("by_run_id", ["runId"]),
+
+  // Procedural memory: how to do a class of task, written and refined by Boop.
+  skills: defineTable({
+    name: v.string(),
+    description: v.string(),
+    body: v.string(),
+    status: v.union(v.literal("active"), v.literal("archived")),
+    pinned: v.boolean(),
+    createdBy: v.union(v.literal("agent"), v.literal("user")),
+    viewCount: v.number(),
+    patchCount: v.number(),
+    lastUsedAt: v.optional(v.number()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_name", ["name"])
+    .index("by_status", ["status"]),
+
+  skillRevisions: defineTable({
+    name: v.string(),
+    action: v.union(
+      v.literal("create"),
+      v.literal("patch"),
+      v.literal("rewrite"),
+      v.literal("archive"),
+      v.literal("restore"),
+    ),
+    description: v.string(),
+    body: v.string(),
+    reason: v.optional(v.string()),
+    origin: v.union(
+      v.literal("execution"),
+      v.literal("review"),
+      v.literal("correction"),
+      v.literal("user"),
+    ),
+    agentId: v.optional(v.string()),
+    createdAt: v.number(),
+  }).index("by_name", ["name", "createdAt"]),
 });
