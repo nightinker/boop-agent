@@ -11,6 +11,7 @@ import { startCleanupLoop } from "./memory/clean.js";
 import { startAutomationLoop } from "./automations.js";
 import { startHeartbeatLoop } from "./heartbeat.js";
 import { startConsolidationLoop } from "./consolidation.js";
+import { runCurator, startCuratorLoop } from "./skills/curator.js";
 import { cancelAgent, retryAgent } from "./execution-agent.js";
 import { createComposioRouter } from "./composio-routes.js";
 import { ensureProactiveWatcher } from "./proactive-email.js";
@@ -45,6 +46,7 @@ async function main() {
   startAutomationLoop();
   startHeartbeatLoop();
   startConsolidationLoop();
+  startCuratorLoop();
   startImageCleanup();
   // No-op when a paid embedding key is set; otherwise downloads/loads the
   // local BGE-large model in the background so the first user-facing
@@ -120,6 +122,17 @@ async function main() {
     }
     try {
       res.json({ account: await switchCswapAccount(accountNumber) });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  app.post("/skills/curate", async (req, res) => {
+    try {
+      const body = (req.body ?? {}) as { consolidate?: unknown };
+      res.json(
+        await runCurator({ force: true, consolidate: body.consolidate === true ? true : undefined }),
+      );
     } catch (err) {
       res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
     }
