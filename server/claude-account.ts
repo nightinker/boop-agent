@@ -1,4 +1,8 @@
 import { execFile } from "node:child_process";
+import { constants as fsConstants } from "node:fs";
+import { access } from "node:fs/promises";
+import { homedir } from "node:os";
+import { delimiter, join } from "node:path";
 import { promisify } from "node:util";
 import { activeClaudeConfigDir, envWithClaudeConfigDir } from "./claude-profiles.js";
 
@@ -120,11 +124,62 @@ function isMissingBinary(err: unknown): boolean {
   return (err as NodeJS.ErrnoException | undefined)?.code === "ENOENT";
 }
 
+/**
+ * Where to look for cswap. Boop often runs from the desktop app or launchd,
+ * whose PATH lacks ~/.local/bin (where `uv tool install claude-swap` puts
+ * it), so the usual install spots are checked after PATH. BOOP_CSWAP_PATH
+ * wins when set.
+ */
+export function cswapCandidates(
+  env: Record<string, string | undefined> = process.env,
+  home: string = homedir(),
+): string[] {
+  const candidates: string[] = [];
+  if (env.BOOP_CSWAP_PATH?.trim()) candidates.push(env.BOOP_CSWAP_PATH.trim());
+  for (const dir of (env.PATH ?? "").split(delimiter)) {
+    if (dir) candidates.push(join(dir, "cswap"));
+  }
+  candidates.push(
+    join(home, ".local", "bin", "cswap"),
+    "/opt/homebrew/bin/cswap",
+    "/usr/local/bin/cswap",
+    join(home, ".cargo", "bin", "cswap"),
+  );
+  return [...new Set(candidates)];
+}
+
+/** The cswap executable on this Mac, or null when it isn't installed. */
+export async function findCswap(
+  env: Record<string, string | undefined> = process.env,
+  home: string = homedir(),
+): Promise<string | null> {
+  for (const candidate of cswapCandidates(env, home)) {
+    try {
+      await access(candidate, fsConstants.X_OK);
+      return candidate;
+    } catch {
+      // not here: try the next spot
+    }
+  }
+  return null;
+}
+
+export const CSWAP_NOT_FOUND_MESSAGE =
+  "cswap isn't installed on this Mac, or Boop can't find it (looked on PATH, ~/.local/bin, /opt/homebrew/bin and /usr/local/bin). Install it with `uv tool install claude-swap`, or set BOOP_CSWAP_PATH to its full path.";
+
+async function runCswap(args: string[], timeout = COMMAND_TIMEOUT_MS) {
+  const bin = await findCswap();
+  if (!bin) {
+    const err = new Error(CSWAP_NOT_FOUND_MESSAGE) as NodeJS.ErrnoException;
+    err.code = "ENOENT";
+    throw err;
+  }
+  return execFileAsync(bin, args, { timeout });
+}
+
 export async function listCswapAccounts(): Promise<CswapState> {
   try {
-    const { stdout } = await execFileAsync("cswap", ["list", "--json"], {
-      timeout: COMMAND_TIMEOUT_MS,
-    });
+    const { stdout } = await runCswap(["list", "--json"]);
     return parseCswapList(stdout);
   } catch (err) {
     if (isMissingBinary(err)) {
@@ -136,13 +191,11 @@ export async function listCswapAccounts(): Promise<CswapState> {
 
 export async function switchCswapAccount(accountNumber: number): Promise<ClaudeAccount> {
   const state = await listCswapAccounts();
-  if (!state.available) throw new Error("cswap is not installed on this Mac");
+  if (!state.available) throw new Error(CSWAP_NOT_FOUND_MESSAGE);
   if (!state.accounts.some((account) => account.number === accountNumber)) {
     throw new Error(`cswap has no account ${accountNumber}`);
   }
-  await execFileAsync("cswap", ["switch", String(accountNumber)], {
-    timeout: COMMAND_TIMEOUT_MS,
-  });
+  await runCswap(["switch", String(accountNumber)]);
   return getClaudeAccount({ fresh: true });
 }
 
@@ -179,10 +232,9 @@ export function classifyLoginCheck(output: string, exitedCleanly: boolean): {
 export async function checkCswapLogin(accountNumber: number): Promise<LoginCheck> {
   const checkedAt = new Date().toISOString();
   try {
-    const { stdout, stderr } = await execFileAsync(
-      "cswap",
+    const { stdout, stderr } = await runCswap(
       ["run", String(accountNumber), "--", "-p", "Reply with OK", "--model", LOGIN_CHECK_MODEL],
-      { timeout: 90_000 },
+      90_000,
     );
     return { accountNumber, checkedAt, ...classifyLoginCheck(`${stdout}\n${stderr}`, true) };
   } catch (err) {
