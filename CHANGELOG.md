@@ -10,6 +10,7 @@ Format:
 
 ## Unreleased — Claude account switcher
 
+- Added: cswap (claude-swap) accounts in the Claude account switcher. `list_claude_accounts` now also lists the accounts cswap manages (number, email, org, usage, "needs a fresh login"), and `set_claude_account` accepts a cswap number, email or org name ("switch to globex"). It runs `cswap switch`, which changes this Mac's main Claude login, and drops any config-dir choice so Boop uses that login from the next turn, with no restart. A login cswap flags as dead is tested first; if it really is dead, nothing changes and the owner gets the Terminal steps (`claude` → `/login`, then `cswap add`). Boop finds cswap on PATH or the usual install spots (`BOOP_CSWAP_PATH` overrides) and says so plainly when it isn't installed. Config-dir accounts keep working as before and win when a name matches both.
 - Added: owner-only `list_claude_accounts` and `set_claude_account` self tools (`boop-self`). They list the Claude accounts already signed in on this Mac (separate Claude config dirs such as `~/.claude` and `~/.claude-work`, plus any in `BOOP_CLAUDE_CONFIG_DIRS`) and switch which one Boop uses. The choice is saved in Convex settings (`claude_account`) and applied as `CLAUDE_CONFIG_DIR` on the next Claude run, with no restart. Only labels and account emails are shown; credentials are never read, stored or echoed.
 
 ## Unreleased — Uptime self-inspection

@@ -171,7 +171,9 @@ export function describeProfile(profile: ClaudeProfile): string {
 export function formatProfileList(
   profiles: ClaudeProfile[],
   savedLabel: string | null,
+  options: { otherAccounts?: boolean } = {},
 ): string {
+  if (profiles.length === 0 && options.otherAccounts) return "None signed in.";
   if (profiles.length === 0) {
     return "No signed-in Claude accounts found on this Mac. Sign in with `claude` in Terminal (or `CLAUDE_CONFIG_DIR=~/.claude-<name> claude` for an extra account), then ask again.";
   }
@@ -185,7 +187,7 @@ export function formatProfileList(
       `The saved account "${missingSavedLabel}" is no longer signed in on this Mac, so Boop is using ${active ? `"${active.label}"` : "the default login"}.`,
     );
   }
-  if (profiles.length === 1) {
+  if (profiles.length === 1 && !options.otherAccounts) {
     notes.push(
       "This is the only Claude account found. To add another, run `CLAUDE_CONFIG_DIR=~/.claude-<name> claude` in Terminal and sign in there.",
     );
@@ -218,6 +220,15 @@ async function loadState(): Promise<{ profiles: ClaudeProfile[]; savedLabel: str
 export async function listClaudeProfiles() {
   const state = await loadState();
   return { ...state, ...pickActiveProfile(state.profiles, state.savedLabel) };
+}
+
+/**
+ * Drop any config-dir choice so Boop runs on this Mac's main Claude login,
+ * which is the one cswap switches.
+ */
+export async function clearClaudeProfile(): Promise<void> {
+  await convex.mutation(api.settings.clear, { key: CLAUDE_ACCOUNT_KEY });
+  cache = null;
 }
 
 export async function setClaudeProfile(profile: ClaudeProfile): Promise<void> {
