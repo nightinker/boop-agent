@@ -11,9 +11,11 @@ import {
   browserSnapshot,
   browserText,
   browserUrl,
+  formatScreenshotResult,
   launchLocalBrowser,
   openBrowserUrl,
 } from "./launcher.js";
+import { DEVICE_PRESET_SUMMARY } from "./devices.js";
 
 const MCP_NAMESPACE = "browser";
 const RUNTIME_NAMESPACE = "local_browser";
@@ -103,9 +105,36 @@ export function createBrowserTools(namespace = RUNTIME_NAMESPACE): RuntimeTool[]
     defineRuntimeTool(
       namespace,
       "browser_screenshot",
-      "Capture a screenshot of the current browser page and return the local PNG path. Use only when the accessibility snapshot is insufficient.",
-      {},
-      async () => wrap(async () => `Screenshot saved: ${await browserScreenshot()}`),
+      [
+        "Capture a PNG screenshot and return its local path, pixel size, and a width check.",
+        `For "mobile/iPhone/phone view", "tablet/iPad view", "desktop view", or a custom size, pass device and/or width/height: the page is rendered in a fresh emulated context (real isMobile + touch + mobile user agent, so responsive layouts render like on the device). Presets: ${DEVICE_PRESET_SUMMARY}. Aliases: mobile/phone -> iphone, android -> pixel, tablet -> ipad.`,
+        "Without device/size options it captures the current page as-is. To send the image to the user, pass the returned path to attach_image, after confirming the width check says OK.",
+      ].join(" "),
+      {
+        url: z
+          .string()
+          .optional()
+          .describe("Page to capture. Defaults to the current browser page."),
+        device: z
+          .string()
+          .optional()
+          .describe("Device preset: iphone, pixel, ipad, laptop, desktop (or mobile, phone, tablet)."),
+        width: z.number().optional().describe("Viewport width in CSS px (overrides the preset)."),
+        height: z.number().optional().describe("Viewport height in CSS px (overrides the preset)."),
+        deviceScaleFactor: z.number().optional().describe("Pixel ratio, e.g. 3 for iPhone."),
+        isMobile: z
+          .boolean()
+          .optional()
+          .describe("Emulate a mobile device so the page's viewport meta tag is honored."),
+        hasTouch: z.boolean().optional(),
+        userAgent: z.string().optional(),
+        fullPage: z
+          .boolean()
+          .optional()
+          .describe("Capture the full scrollable page instead of only the viewport. Default false."),
+      },
+      async (args) =>
+        wrap(async () => formatScreenshotResult(await browserScreenshot(args))),
     ),
     defineRuntimeTool(
       namespace,

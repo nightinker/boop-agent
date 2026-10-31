@@ -1,6 +1,13 @@
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
-import { chmodSync, existsSync, mkdirSync, readdirSync, unlinkSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  unlinkSync,
+} from "node:fs";
 import { homedir, platform, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { BrowserContext, Page } from "patchright";
@@ -8,6 +15,14 @@ import {
   getBrowserSettings,
   type BrowserSettings,
 } from "../runtime-config.js";
+import { MAX_OUTBOUND_IMAGE_BYTES } from "../images/outbound.js";
+import {
+  readPngSize,
+  resolveDeviceEmulation,
+  wantsEmulation,
+  type DeviceEmulation,
+  type DeviceEmulationInput,
+} from "./devices.js";
 
 const require = createRequire(import.meta.url);
 const SCREENSHOT_DIR = join(tmpdir(), "boop-browser-screenshots");
@@ -453,8 +468,32 @@ export async function browserUrl(): Promise<string> {
   return page.url();
 }
 
-export async function browserScreenshot(): Promise<string> {
-  const page = await currentPage();
+export interface ScreenshotOptions extends DeviceEmulationInput {
+  /** Page to capture. Defaults to the current page. */
+  url?: string;
+  /** Capture the whole scrollable page instead of just the viewport. */
+  fullPage?: boolean;
+}
+
+export interface ScreenshotResult {
+  path: string;
+  url: string;
+  bytes: number;
+  /** Actual pixel size of the saved PNG. */
+  imageWidth: number | null;
+  imageHeight: number | null;
+  /** Set when device/viewport emulation was used. */
+  emulation?: DeviceEmulation;
+  /** Image width the requested emulation should produce (CSS width x scale). */
+  expectedImageWidth?: number;
+  /** Layout width the page actually rendered at, and its scrollable width. */
+  innerWidth?: number;
+  scrollWidth?: number;
+  /** True when the PNG was re-captured at 1x to fit the iMessage size cap. */
+  downscaled: boolean;
+}
+
+function nextScreenshotPath(): string {
   mkdirSync(SCREENSHOT_DIR, { recursive: true, mode: 0o700 });
   try {
     chmodSync(SCREENSHOT_DIR, 0o700);
@@ -468,9 +507,131 @@ export async function browserScreenshot(): Promise<string> {
   } catch {
     // Screenshot rotation is best-effort; capture should still proceed.
   }
-  const path = join(SCREENSHOT_DIR, `boop-browser-${Date.now()}.png`);
-  await page.screenshot({ path, fullPage: false });
-  return path;
+  return join(SCREENSHOT_DIR, `boop-browser-${Date.now()}.png`);
+}
+
+function imageInfo(path: string) {
+  const bytes = readFileSync(path);
+  const size = readPngSize(bytes);
+  return {
+    bytes: bytes.byteLength,
+    imageWidth: size?.width ?? null,
+    imageHeight: size?.height ?? null,
+  };
+}
+
+export async function browserScreenshot(
+  options: ScreenshotOptions = {},
+): Promise<ScreenshotResult> {
+  if (wantsEmulation(options)) return await emulatedScreenshot(options);
+  const page = await currentPage();
+  if (options.url !== undefined) {
+    await page.goto(normalizeUrl(options.url), { waitUntil: "load", timeout: 30_000 });
+  }
+  const path = nextScreenshotPath();
+  await page.screenshot({ path, fullPage: options.fullPage ?? false });
+  return { path, url: page.url(), downscaled: false, ...imageInfo(path) };
+}
+
+/**
+ * Capture a screenshot in a throwaway headless context with real device
+ * emulation (viewport, deviceScaleFactor, isMobile, hasTouch, userAgent).
+ * isMobile can only be set when a context is created, and the user's
+ * persistent profile context is shared, so we never resize it in place.
+ * Cookies/localStorage are copied from the running profile so logged-in
+ * pages render the same way.
+ */
+async function emulatedScreenshot(options: ScreenshotOptions): Promise<ScreenshotResult> {
+  const emulation = resolveDeviceEmulation(options);
+  const settings = await getBrowserSettings();
+  assertBrowserEnabled(settings);
+  const targetUrl = normalizeUrl(options.url ?? getExistingPage()?.url() ?? "");
+  if (targetUrl === "about:blank") {
+    throw new Error("Pass a url to screenshot (no page is open in the local browser).");
+  }
+  const storageState = context ? await context.storageState().catch(() => undefined) : undefined;
+  const { chromium } = await loadPatchright();
+  const executablePath = effectiveBrowserExecutablePath(settings);
+  const browser = await withTimeout(
+    chromium.launch({
+      headless: true,
+      args: settings.extraArgs,
+      ...(executablePath ? { executablePath } : { channel: settings.channel || "chrome" }),
+    }),
+    BROWSER_LAUNCH_TIMEOUT_MS,
+    browserLaunchTimeoutMessage(settings),
+  );
+  try {
+    const emulatedContext = await browser.newContext({
+      viewport: { width: emulation.width, height: emulation.height },
+      screen: { width: emulation.width, height: emulation.height },
+      deviceScaleFactor: emulation.deviceScaleFactor,
+      isMobile: emulation.isMobile,
+      hasTouch: emulation.hasTouch,
+      ...(emulation.userAgent ? { userAgent: emulation.userAgent } : {}),
+      ...(storageState ? { storageState } : {}),
+    });
+    const page = await emulatedContext.newPage();
+    await page.goto(targetUrl, { waitUntil: "load", timeout: 30_000 });
+    await page.waitForLoadState("networkidle", { timeout: 5_000 }).catch(() => undefined);
+    const layout = await page.evaluate(() => ({
+      innerWidth: window.innerWidth,
+      scrollWidth: document.documentElement.scrollWidth,
+    }));
+    const fullPage = options.fullPage ?? false;
+    const path = nextScreenshotPath();
+    await page.screenshot({ path, fullPage });
+    let info = imageInfo(path);
+    let downscaled = false;
+    if (info.bytes > MAX_OUTBOUND_IMAGE_BYTES && emulation.deviceScaleFactor > 1) {
+      // Too big for an iMessage attachment; re-capture at 1 image px per CSS px.
+      await page.screenshot({ path, fullPage, scale: "css" });
+      info = imageInfo(path);
+      downscaled = true;
+    }
+    const scale = downscaled ? 1 : emulation.deviceScaleFactor;
+    return {
+      path,
+      url: page.url(),
+      emulation,
+      expectedImageWidth: Math.round(emulation.width * scale),
+      ...layout,
+      downscaled,
+      ...info,
+    };
+  } finally {
+    await browser.close().catch(() => undefined);
+  }
+}
+
+/** Human/agent-readable summary, including a width check the agent can trust. */
+export function formatScreenshotResult(result: ScreenshotResult): string {
+  const lines = [`Screenshot saved: ${result.path}`, `Page: ${result.url}`];
+  const size =
+    result.imageWidth !== null ? `${result.imageWidth}x${result.imageHeight} px` : "unknown size";
+  lines.push(`Image: ${size}, ${Math.round(result.bytes / 1024)} KB.`);
+  if (result.emulation) {
+    const e = result.emulation;
+    lines.push(
+      `Emulated: ${e.width}x${e.height} CSS px @${e.deviceScaleFactor}x, isMobile=${e.isMobile}, hasTouch=${e.hasTouch}${e.userAgent ? ", custom user agent" : ""}.`,
+    );
+    if (result.downscaled) {
+      lines.push(
+        `Re-captured at 1x because the ${e.deviceScaleFactor}x image exceeded the ${MAX_OUTBOUND_IMAGE_BYTES / (1024 * 1024)} MB iMessage limit.`,
+      );
+    }
+    const widthOk = result.imageWidth === result.expectedImageWidth;
+    const overflow =
+      result.scrollWidth !== undefined &&
+      result.innerWidth !== undefined &&
+      (result.scrollWidth > result.innerWidth || result.innerWidth !== e.width);
+    lines.push(
+      widthOk && !overflow
+        ? `Width check: OK (image ${result.imageWidth} px = ${e.width} CSS px x ${result.downscaled ? 1 : e.deviceScaleFactor}; page fits the viewport).`
+        : `Width check: MISMATCH (expected image width ${result.expectedImageWidth} px, got ${result.imageWidth}; page layout width ${result.innerWidth}, scroll width ${result.scrollWidth} vs requested ${e.width}). The page may be cut off or wider than the device; tell the user.`,
+    );
+  }
+  return lines.join("\n");
 }
 
 export async function installPatchrightChrome(): Promise<InstallResult> {
