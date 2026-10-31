@@ -1,9 +1,10 @@
 import express from "express";
 import { api } from "../convex/_generated/api.js";
 import { convex } from "./convex-client.js";
-import { handleUserMessage } from "./interaction-agent.js";
+import { handleUserMessageWithAttachments } from "./interaction-agent.js";
 import { broadcast } from "./broadcast.js";
 import { validateImageHeader, MAX_IMAGE_BYTES, type ImageMediaType } from "./images/mime.js";
+import type { OutboundImage } from "./images/outbound.js";
 import { redactContactHandle, redactPhoneNumbers } from "./privacy.js";
 import { maybeHandleScriptedDemoReply } from "./scripted-demo-replies.js";
 import { verifySendblueWebhookSecret } from "./sendblue-webhook-auth.js";
@@ -74,22 +75,52 @@ function normalizeE164(n: string | undefined): string | undefined {
   return trimmed;
 }
 
-export async function sendImessage(toNumber: string, text: string): Promise<void> {
-  const h = headers();
-  if (!h) {
-    console.warn("[sendblue] missing credentials — not sending");
-    return;
-  }
-  const from = normalizeE164(process.env.SENDBLUE_FROM_NUMBER);
-  if (!from) {
+export interface ImageSendFailure {
+  filename: string;
+  reason: string;
+}
+
+export interface SendImessageResult {
+  /** Filenames of images delivered as iMessage attachments. */
+  sentImages: string[];
+  failedImages: ImageSendFailure[];
+}
+
+/** The plain-text fallback the user gets when attachments couldn't be sent. */
+export function imageFailureNotice(failures: ImageSendFailure[]): string {
+  if (failures.length === 0) return "";
+  const names = failures.map((f) => f.filename).join(", ");
+  const reasons = [...new Set(failures.map((f) => f.reason))].join("; ");
+  const what = failures.length === 1 ? "the image" : `${failures.length} images`;
+  return `(Couldn't send ${what} (${names}): ${reasons})`;
+}
+
+function explainSendFailure(body: string, from: string): void {
+  if (body.includes("missing required parameter") && body.includes("from_number")) {
     console.error(
-      `[sendblue] SENDBLUE_FROM_NUMBER is not set. Run \`npm run sendblue:sync\` (pulls it from \`sendblue lines\`) or paste your provisioned number into .env.local, then restart \`npm run dev\`.`,
+      `[sendblue] → Set SENDBLUE_FROM_NUMBER in .env.local to your Sendblue-provisioned number and restart the server.`,
     );
-    return;
+  } else if (body.includes("Cannot send messages to self")) {
+    console.error(
+      `[sendblue] → SENDBLUE_FROM_NUMBER is your personal cell. It must be the Sendblue-provisioned number (the one people text TO).`,
+    );
+  } else if (body.includes("This phone number is not defined")) {
+    console.error(
+      `[sendblue] → Sendblue doesn't recognize from_number=${redactContactHandle(from)}. Run \`npm run sendblue:sync\` to pull the correct one from \`sendblue lines\`, then restart the server.`,
+    );
   }
+}
+
+async function sendTextParts(
+  h: Record<string, string>,
+  from: string,
+  toNumber: string,
+  text: string,
+): Promise<void> {
   // Intentional privacy guard: Boop should not deliver phone numbers back over
   // iMessage, even if an agent includes one in its final reply.
   const plain = redactPhoneNumbers(stripMarkdown(text));
+  if (!plain) return;
   for (const part of chunk(plain)) {
     const res = await fetch(`${API_BASE}/send-message`, {
       method: "POST",
@@ -101,23 +132,121 @@ export async function sendImessage(toNumber: string, text: string): Promise<void
       console.error(
         `[sendblue] send failed ${res.status}: ${redactPhoneNumbers(body).slice(0, 500)}`,
       );
-      if (body.includes("missing required parameter") && body.includes("from_number")) {
-        console.error(
-          `[sendblue] → Set SENDBLUE_FROM_NUMBER in .env.local to your Sendblue-provisioned number and restart the server.`,
-        );
-      } else if (body.includes("Cannot send messages to self")) {
-        console.error(
-          `[sendblue] → SENDBLUE_FROM_NUMBER is your personal cell. It must be the Sendblue-provisioned number (the one people text TO).`,
-        );
-      } else if (body.includes("This phone number is not defined")) {
-        console.error(
-          `[sendblue] → Sendblue doesn't recognize from_number=${redactContactHandle(from)}. Run \`npm run sendblue:sync\` to pull the correct one from \`sendblue lines\`, then restart the server.`,
-        );
-      }
+      explainSendFailure(body, from);
     } else {
       console.log(`[sendblue] → sent ${part.length} chars to ${redactContactHandle(toNumber)}`);
     }
   }
+}
+
+/**
+ * Upload an image to Sendblue's CDN, then send it as a media message.
+ * Throws with a short, user-presentable reason on failure.
+ */
+async function sendImageAttachment(
+  h: Record<string, string>,
+  from: string,
+  toNumber: string,
+  image: OutboundImage,
+): Promise<void> {
+  const { "Content-Type": _json, ...authHeaders } = h;
+  const form = new FormData();
+  form.append(
+    "file",
+    new Blob([image.bytes as Uint8Array<ArrayBuffer>], { type: image.mediaType }),
+    image.filename,
+  );
+  let upload: Response;
+  try {
+    upload = await fetch(`${API_BASE}/upload-file`, {
+      method: "POST",
+      headers: authHeaders,
+      body: form,
+      signal: AbortSignal.timeout(30_000),
+    });
+  } catch (err) {
+    throw new Error(`upload failed (${String(err)})`);
+  }
+  if (!upload.ok) {
+    const body = await upload.text().catch(() => "");
+    console.error(
+      `[sendblue] image upload failed ${upload.status}: ${redactPhoneNumbers(body).slice(0, 300)}`,
+    );
+    throw new Error(`upload failed (HTTP ${upload.status})`);
+  }
+  const uploaded = (await upload.json().catch(() => ({}))) as { media_url?: unknown };
+  if (typeof uploaded.media_url !== "string" || !uploaded.media_url) {
+    throw new Error("upload failed (no media_url returned)");
+  }
+  const res = await fetch(`${API_BASE}/send-message`, {
+    method: "POST",
+    headers: h,
+    body: JSON.stringify({ number: toNumber, from_number: from, media_url: uploaded.media_url }),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    console.error(
+      `[sendblue] image send failed ${res.status}: ${redactPhoneNumbers(body).slice(0, 500)}`,
+    );
+    explainSendFailure(body, from);
+    throw new Error(`send failed (HTTP ${res.status})`);
+  }
+  console.log(
+    `[sendblue] → sent image ${image.filename} (${image.bytes.byteLength} bytes) to ${redactContactHandle(toNumber)}`,
+  );
+}
+
+/**
+ * Send a reply over iMessage. Text goes first, then each image as its own
+ * attachment message. If any image fails, the user gets a short text notice
+ * instead, so a failed attachment never silently disappears.
+ */
+export async function sendImessage(
+  toNumber: string,
+  text: string,
+  images: OutboundImage[] = [],
+): Promise<SendImessageResult> {
+  const result: SendImessageResult = { sentImages: [], failedImages: [] };
+  const h = headers();
+  if (!h) {
+    console.warn("[sendblue] missing credentials — not sending");
+    result.failedImages = images.map((i) => ({ filename: i.filename, reason: "iMessage not configured" }));
+    return result;
+  }
+  const from = normalizeE164(process.env.SENDBLUE_FROM_NUMBER);
+  if (!from) {
+    console.error(
+      `[sendblue] SENDBLUE_FROM_NUMBER is not set. Run \`npm run sendblue:sync\` (pulls it from \`sendblue lines\`) or paste your provisioned number into .env.local, then restart \`npm run dev\`.`,
+    );
+    result.failedImages = images.map((i) => ({ filename: i.filename, reason: "iMessage not configured" }));
+    return result;
+  }
+  await sendTextParts(h, from, toNumber, text);
+  for (const image of images) {
+    try {
+      await sendImageAttachment(h, from, toNumber, image);
+      result.sentImages.push(image.filename);
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      result.failedImages.push({ filename: image.filename, reason });
+    }
+  }
+  if (result.failedImages.length > 0) {
+    await sendTextParts(h, from, toNumber, imageFailureNotice(result.failedImages));
+  }
+  return result;
+}
+
+/**
+ * Conversation history is text-only, so record which images went out (or
+ * didn't) — otherwise next turn Boop has no idea it already sent a chart.
+ */
+export function withAttachmentNote(reply: string, sent: SendImessageResult): string {
+  const lines = [reply];
+  if (sent.sentImages.length > 0) lines.push(`[sent image: ${sent.sentImages.join(", ")}]`);
+  const notice = imageFailureNotice(sent.failedImages);
+  if (notice) lines.push(notice);
+  return lines.join("\n");
 }
 
 export async function sendTypingIndicator(toNumber: string): Promise<void> {
@@ -274,7 +403,12 @@ export function createSendblueRouter(): express.Router {
           fromNumber: from_number,
           turnTag,
         },
-        { sendImessage, sendTypingIndicator },
+        {
+          sendImessage: async (to, text) => {
+            await sendImessage(to, text);
+          },
+          sendTypingIndicator,
+        },
       )
     ) {
       return;
@@ -282,7 +416,7 @@ export function createSendblueRouter(): express.Router {
 
     const stopTyping = startTypingLoop(from_number);
     try {
-      const reply = await handleUserMessage({
+      const { reply, attachments } = await handleUserMessageWithAttachments({
         conversationId,
         content: textForLog,
         turnTag,
@@ -297,11 +431,11 @@ export function createSendblueRouter(): express.Router {
         console.log(
           `[turn ${turnTag}] → reply (${elapsed}s, ${reply.length} chars): ${JSON.stringify(replyPreview)}`,
         );
-        await sendImessage(from_number, reply);
+        const sent = await sendImessage(from_number, reply, attachments);
         await convex.mutation(api.messages.send, {
           conversationId,
           role: "assistant",
-          content: reply,
+          content: withAttachmentNote(reply, sent),
         });
       } else {
         console.log(`[turn ${turnTag}] → (no reply)`);

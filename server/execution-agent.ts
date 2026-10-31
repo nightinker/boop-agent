@@ -19,6 +19,12 @@ import {
   newSkillToolsState,
 } from "./skills/tools.js";
 import { maybeReviewSkillsAfterRun, type ToolCallRecord } from "./skills/review.js";
+import {
+  ATTACHMENTS_NAMESPACE,
+  IMAGE_ATTACHMENTS_PROMPT,
+  createImageAttachmentTools,
+} from "./images/attach-tool.js";
+import { OutboundImageCollector, type OutboundImage } from "./images/outbound.js";
 
 const running = new Map<string, AbortController>();
 
@@ -136,6 +142,11 @@ export interface SpawnOptions {
   name?: string;
   runtimeConfig?: RuntimeConfig;
   imageStorageIds?: string[];
+  /**
+   * Give the agent the attach_image tool. Only set this when the caller will
+   * deliver SpawnResult.attachments to the user (e.g. over iMessage).
+   */
+  allowImageAttachments?: boolean;
 }
 
 export type SpawnExecutionAgentOpts = SpawnOptions;
@@ -144,6 +155,8 @@ export interface SpawnResult {
   agentId: string;
   result: string;
   status: "completed" | "failed" | "cancelled";
+  /** Images the agent attached with attach_image, validated and loaded. */
+  attachments: OutboundImage[];
 }
 
 export async function spawnExecutionAgent(opts: SpawnExecutionAgentOpts): Promise<SpawnResult> {
@@ -184,6 +197,10 @@ export async function spawnExecutionAgent(opts: SpawnExecutionAgentOpts): Promis
     .query(api.skills.list, {})
     .then((skills) => formatSkillIndex(skills))
     .catch(() => formatSkillIndex([]));
+  const attachmentCollector = new OutboundImageCollector();
+  const attachmentTools = opts.allowImageAttachments
+    ? createImageAttachmentTools(attachmentCollector)
+    : [];
   const toolCalls: ToolCallRecord[] = [];
   const integrationServers =
     runtimeConfig.runtime === "claude"
@@ -194,7 +211,7 @@ export async function spawnExecutionAgent(opts: SpawnExecutionAgentOpts): Promis
       ? await buildRuntimeToolsForIntegrations(opts.integrations, opts.conversationId)
       : [];
   const mcpServers = integrationServers;
-  const runtimeTools = [...draftTools, ...skillTools, ...integrationTools];
+  const runtimeTools = [...draftTools, ...attachmentTools, ...skillTools, ...integrationTools];
   const runtimeToolNamespaces = [...new Set(integrationTools.map((tool) => tool.namespace))];
   const allowedTools = [
     "WebSearch",
@@ -202,6 +219,7 @@ export async function spawnExecutionAgent(opts: SpawnExecutionAgentOpts): Promis
     "Skill",
     ...Object.keys(mcpServers).flatMap((n) => [`mcp__${n}__*`]),
     ...(draftTools.length ? ["mcp__boop-drafts__*"] : []),
+    ...(attachmentTools.length ? [`mcp__${ATTACHMENTS_NAMESPACE}__*`] : []),
     `mcp__${SKILLS_NAMESPACE}__*`,
     ...runtimeToolNamespaces.flatMap((n) => [`mcp__${n}__*`]),
   ];
@@ -219,7 +237,10 @@ export async function spawnExecutionAgent(opts: SpawnExecutionAgentOpts): Promis
     });
     const result = await runAgentRuntime(runtimeConfig, {
       prompt: executionPrompt,
-      systemPrompt: EXECUTION_SYSTEM + buildSkillsSection(skillIndex),
+      systemPrompt:
+        EXECUTION_SYSTEM +
+        (attachmentTools.length ? IMAGE_ATTACHMENTS_PROMPT : "") +
+        buildSkillsSection(skillIndex),
       claudeMcpServers: mcpServers,
       tools: runtimeTools,
       allowedTools,
@@ -322,7 +343,13 @@ export async function spawnExecutionAgent(opts: SpawnExecutionAgentOpts): Promis
     }).catch((err) => console.error(`[skills] review after ${shortId} failed`, err));
   }
 
-  return { agentId, result: buffer || errorMsg || "(no output)", status };
+  const attachments = status === "completed" ? attachmentCollector.list : [];
+  if (attachmentCollector.list.length > 0) {
+    logAgent(
+      `attachments: ${attachments.length} delivered of ${attachmentCollector.list.length} attached`,
+    );
+  }
+  return { agentId, result: buffer || errorMsg || "(no output)", status, attachments };
 }
 
 export function cancelAgent(agentId: string): boolean {

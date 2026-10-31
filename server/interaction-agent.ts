@@ -31,6 +31,7 @@ import {
   fetchStoredBytes,
 } from "./images/content-blocks.js";
 import { redactPhoneNumbers } from "./privacy.js";
+import { OutboundImageCollector, type OutboundImage } from "./images/outbound.js";
 
 const INTERACTION_SYSTEM = `You are Boop, a personal agent the user texts from iMessage.
 
@@ -44,7 +45,7 @@ Tone: Warm, witty, concise. Write like you're texting a friend. No corporate voi
 
 Your only tools:
 - recall / write_memory (durable memory for this user)
-- spawn_agent (dispatches a sub-agent that CAN touch the world)
+- spawn_agent (dispatches a sub-agent that CAN touch the world, and can attach images to your reply)
 - create_automation / list_automations / toggle_automation / delete_automation
 - list_drafts / send_draft / reject_draft
 - get_config / uptime / list_skills / set_runtime / set_model / set_codex_reasoning_effort / set_timezone / list_claude_accounts / set_claude_account / list_integrations / search_composio_catalog / inspect_toolkit (self-inspection)
@@ -265,6 +266,12 @@ IDs to its imageRefs parameter so the sub-agent can see the image too. If the
 user sends a photo with no caption, ask a short clarifying question rather
 than guessing what they want.
 
+Sending images: you can't attach files yourself, but sub-agents can. When the
+user wants to SEE something (a chart, a screenshot, a generated image, a
+photo), say so in the spawn_agent task ("attach the chart as an image"). The
+spawn_agent result tells you which images will be delivered with your reply;
+mention them briefly and never invent attachments it didn't report.
+
 Format: Plain iMessage-friendly text. Markdown sparingly. Keep replies under ~400 chars when you can.`;
 
 interface HandleOpts {
@@ -361,7 +368,47 @@ export function describeIntegrationsForPrompt(
     .join(", ");
 }
 
+/**
+ * Describe images a sub-agent attached, for the dispatcher's view of the
+ * spawn_agent result. The dispatcher has no file access; it just needs to know
+ * the images will go out with its reply so it doesn't paste paths or promise
+ * something that was dropped.
+ */
+export function describeSpawnAttachments(
+  attached: OutboundImage[],
+  dropped: OutboundImage[],
+): string {
+  const parts: string[] = [];
+  if (attached.length > 0) {
+    parts.push(
+      `[${attached.length} image(s) attached by the agent (${attached
+        .map((i) => i.filename)
+        .join(", ")}) will be delivered to the user as iMessage attachments with your reply. Mention them naturally; don't paste their paths or URLs.]`,
+    );
+  }
+  if (dropped.length > 0) {
+    parts.push(
+      `[${dropped.length} image(s) (${dropped
+        .map((i) => i.filename)
+        .join(", ")}) were dropped: per-reply image limit reached. Tell the user they couldn't be sent.]`,
+    );
+  }
+  return parts.length > 0 ? `\n\n${parts.join("\n")}` : "";
+}
+
+export interface InteractionTurnResult {
+  reply: string;
+  /** Images sub-agents attached this turn, to send alongside the reply. */
+  attachments: OutboundImage[];
+}
+
 export async function handleUserMessage(opts: HandleOpts): Promise<string> {
+  return (await handleUserMessageWithAttachments(opts)).reply;
+}
+
+export async function handleUserMessageWithAttachments(
+  opts: HandleOpts,
+): Promise<InteractionTurnResult> {
   const turnId = randomId("turn");
   const enabledIntegrations = await listEnabledIntegrations();
   const integrations = enabledIntegrations.map((i) => i.name);
@@ -439,7 +486,7 @@ export async function handleUserMessage(opts: HandleOpts): Promise<string> {
         turnId,
       });
     }
-    return reply;
+    return { reply, attachments: [] };
   }
 
   if (
@@ -459,8 +506,14 @@ export async function handleUserMessage(opts: HandleOpts): Promise<string> {
         turnId,
       });
     }
-    return reply;
+    return { reply, attachments: [] };
   }
+
+  const turnAttachments = new OutboundImageCollector();
+  // Only iMessage turns can deliver attachments; local chat and proactive
+  // turns don't give sub-agents the attach_image tool.
+  const canSendImages =
+    opts.conversationId.startsWith("sms:") && opts.kind !== "proactive";
 
   const sendAck = async (message: string): Promise<void> => {
     const text = redactPhoneNumbers(message.trim());
@@ -564,12 +617,22 @@ export async function handleUserMessage(opts: HandleOpts): Promise<string> {
           name: args.name,
           runtimeConfig,
           imageStorageIds,
+          allowImageAttachments: canSendImages,
         });
-        return runtimeText(`[agent ${res.agentId} ${res.status}]\n\n${redactPhoneNumbers(res.result)}`);
+        const dropped = turnAttachments.addAll(res.attachments);
+        const attached = res.attachments.filter((a) => !dropped.includes(a));
+        if (attached.length > 0 || dropped.length > 0) {
+          log(`attachments: +${attached.length} (dropped ${dropped.length})`);
+        }
+        return runtimeText(
+          `[agent ${res.agentId} ${res.status}]\n\n${redactPhoneNumbers(res.result)}` +
+            describeSpawnAttachments(attached, dropped),
+        );
       },
     ),
   ];
   let reply = "";
+  let turnFailed = false;
   let usage: UsageTotals = { ...EMPTY_USAGE };
   try {
     const result = await runAgentRuntime(runtimeConfig, {
@@ -635,6 +698,7 @@ export async function handleUserMessage(opts: HandleOpts): Promise<string> {
     usage = result.usage;
   } catch (err) {
     console.error(`[turn ${tag}] query failed`, err);
+    turnFailed = true;
     reply = "Sorry — I hit an error processing that. Try again in a moment.";
   }
 
@@ -705,5 +769,6 @@ export async function handleUserMessage(opts: HandleOpts): Promise<string> {
     }).catch((err) => console.error("[interaction] extraction error", err));
   }
 
-  return reply;
+  // Don't send images under an error reply that can't describe them.
+  return { reply, attachments: turnFailed ? [] : turnAttachments.list };
 }

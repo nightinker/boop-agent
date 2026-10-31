@@ -8,6 +8,12 @@ Format:
 
 ---
 
+## Unreleased — Sending images over iMessage
+
+- Added: sub-agents can attach images to Boop's iMessage reply with a new `attach_image` tool (`boop-attachments`), passing an absolute local file path or an http(s) URL. Images are delivered as real iMessage attachments after the reply text, via Sendblue's `upload-file` endpoint and a `media_url` send. Supported: png, jpg/jpeg, gif, heic; max 5 MB each and 5 per reply. Files are checked by their contents (magic bytes), not just the extension; private-network URLs are refused.
+- Added: if an image can't be attached or sent, the agent gets the reason right away, and the user gets a short text notice ("Couldn't send the image (chart.png): …") instead of a silent drop. Conversation history records which images were sent.
+- The tool is only offered on iMessage turns and on automations that notify over iMessage. Receiving images is unchanged.
+
 ## Unreleased — Claude account switcher
 
 - Added: cswap (claude-swap) accounts in the Claude account switcher. `list_claude_accounts` now also lists the accounts cswap manages (number, email, org, usage, "needs a fresh login"), and `set_claude_account` accepts a cswap number, email or org name ("switch to globex"). It runs `cswap switch`, which changes this Mac's main Claude login, and drops any config-dir choice so Boop uses that login from the next turn, with no restart. A login cswap flags as dead is tested first; if it really is dead, nothing changes and the owner gets the Terminal steps (`claude` → `/login`, then `cswap add`). Boop finds cswap on PATH or the usual install spots (`BOOP_CSWAP_PATH` overrides) and says so plainly when it isn't installed. Config-dir accounts keep working as before and win when a name matches both.
