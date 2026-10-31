@@ -1,7 +1,7 @@
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { existsSync } from "node:fs";
-import { chmod, mkdir, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, readdir, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { api } from "../../convex/_generated/api.js";
@@ -12,12 +12,17 @@ import { runAgentRuntime } from "../runtimes/index.js";
 import {
   branchName,
   codingPrompt,
+  healthTimeoutSeconds,
   isOwnerConversation,
+  logsToPrune,
   newBuildId,
   parseGitHubRepo,
   prBody,
   readyMessage,
   restartScript,
+  ROLLBACK_LOG_LINES,
+  rollbackMessage,
+  startupLogName,
   tail,
 } from "./plan.js";
 import { CANCELLABLE, formatBuildList, queuedMessage, shipBlocker } from "./queue.js";
@@ -347,6 +352,7 @@ export async function shipSelfBuild(input: {
   conversationId: string;
   buildId?: string;
   allowFailingChecks?: boolean;
+  healthTimeoutSeconds?: number;
 }): Promise<string> {
   const refused = refuseUnlessOwner(input.conversationId);
   if (refused) return refused;
@@ -371,7 +377,12 @@ export async function shipSelfBuild(input: {
   const blocker = shipBlocker(recent, build.buildId, process.env.BOOP_DESKTOP === "1");
   if (blocker) return blocker;
   await setStatus(build.buildId, { status: "shipping" });
-  void shipBuild({ build: { buildId: build.buildId, prUrl: build.prUrl }, conversationId: build.conversationId, src }).catch(
+  void shipBuild({
+    build: { buildId: build.buildId, prUrl: build.prUrl },
+    conversationId: build.conversationId,
+    src,
+    healthTimeoutSec: healthTimeoutSeconds(input.healthTimeoutSeconds),
+  }).catch(
     async (err) => {
       const message = err instanceof Error ? err.message : String(err);
       console.error(`[self-build ${build.buildId}] ship failed`, err);
@@ -393,6 +404,7 @@ async function shipBuild(input: {
   build: { buildId: string; prUrl: string };
   conversationId: string;
   src: string;
+  healthTimeoutSec: number;
 }): Promise<void> {
   const { buildId, prUrl } = input.build;
   const repo = parseGitHubRepo(prUrl.replace(/\/pull\/\d+$/, ""));
@@ -425,6 +437,8 @@ async function shipBuild(input: {
 
   const dir = stateDir();
   await mkdir(dir, { recursive: true });
+  await pruneBuildLogs(dir);
+  const startupLogPath = join(dir, startupLogName(buildId, await readdir(dir)));
   const script = join(dir, `restart-${buildId}.sh`);
   await writeFile(
     script,
@@ -437,6 +451,9 @@ async function shipBuild(input: {
       healthUrl: `http://localhost:${process.env.PORT ?? 3456}/health`,
       logPath: join(dir, `restart-${buildId}.log`),
       ports: [Number(process.env.PORT ?? 3456), 5173, 4040],
+      startupLogPath,
+      startupMarkerPath: join(dir, "startup-log-request"),
+      healthTimeoutSec: input.healthTimeoutSec,
     }),
   );
   await chmod(script, 0o755);
@@ -492,22 +509,56 @@ async function waitForRestartResult(): Promise<void> {
   }
 }
 
+/** Keep only the newest few startup logs, restart logs and restart scripts. */
+async function pruneBuildLogs(dir: string): Promise<void> {
+  try {
+    const names = await readdir(dir);
+    const files = await Promise.all(
+      names.map(async (name) => ({ name, mtimeMs: (await stat(join(dir, name)).catch(() => null))?.mtimeMs ?? 0 })),
+    );
+    await Promise.all(logsToPrune(files).map((name) => rm(join(dir, name), { force: true })));
+  } catch (err) {
+    console.warn("[self-build] couldn't prune old build logs", err);
+  }
+}
+
+async function readLogTail(path: string | undefined): Promise<string | undefined> {
+  if (!path || !existsSync(path)) return undefined;
+  try {
+    return tail(await readFile(path, "utf8"), ROLLBACK_LOG_LINES);
+  } catch {
+    return undefined;
+  }
+}
+
 /** After a restart, report how the swap went (the old process can't). */
 export async function reportPendingRestart(): Promise<void> {
   const resultPath = join(stateDir(), "pending-result.json");
   if (!existsSync(resultPath)) return;
   try {
-    const result = JSON.parse(await readFile(resultPath, "utf8")) as { buildId: string; status: string };
+    const result = JSON.parse(await readFile(resultPath, "utf8")) as {
+      buildId: string;
+      status: string;
+      startupLog?: string;
+      healthTimeoutSec?: number;
+    };
     await rename(resultPath, join(stateDir(), `reported-${result.buildId}.json`));
     const build = await convex.query(api.selfBuilds.get, { buildId: result.buildId });
     if (!build) return;
-    const shipped = result.status === "shipped";
-    await setStatus(result.buildId, { status: shipped ? "shipped" : "rolled_back" });
+    if (result.status === "shipped") {
+      await setStatus(result.buildId, { status: "shipped" });
+      await notify(build.conversationId, `I'm back, running build ${result.buildId}: ${build.request.slice(0, 120)}`);
+      return;
+    }
+    const logPath = result.startupLog && existsSync(result.startupLog) ? result.startupLog : undefined;
+    const logTail = await readLogTail(logPath);
+    await setStatus(result.buildId, {
+      status: "rolled_back",
+      ...(logPath ? { startupLogPath: logPath, startupLogTail: (logTail ?? "").slice(-8000) } : {}),
+    });
     await notify(
       build.conversationId,
-      shipped
-        ? `I'm back, running build ${result.buildId}: ${build.request.slice(0, 120)}`
-        : `Build ${result.buildId} didn't start properly, so I rolled back to the previous version. The code is still merged; ask me to look into it.`,
+      rollbackMessage({ buildId: result.buildId, logPath, logTail, healthTimeoutSec: logPath ? result.healthTimeoutSec : undefined }),
     );
   } catch (err) {
     console.error("[self-build] couldn't report the restart", err);

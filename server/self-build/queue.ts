@@ -19,6 +19,8 @@ interface BuildSummary {
   request: string;
   prUrl?: string;
   testsPassed?: boolean;
+  startupLogPath?: string;
+  startupLogTail?: string;
 }
 
 export const CANCELLABLE: BuildStatus[] = ["queued", "coding", "testing", "pr_open"];
@@ -57,7 +59,11 @@ export function shipBlocker(
 
 function line(b: BuildSummary): string {
   const checks = b.testsPassed === false ? " (checks failing)" : "";
-  return `${b.buildId} · ${b.status}${checks} · ${b.request.slice(0, 80)}${b.prUrl ? ` · ${b.prUrl}` : ""}`;
+  const summary = `${b.buildId} · ${b.status}${checks} · ${b.request.slice(0, 80)}${b.prUrl ? ` · ${b.prUrl}` : ""}`;
+  if (b.status !== "rolled_back" || !b.startupLogPath) return summary;
+  // A rolled-back ship shows why the new build didn't start.
+  const logTail = b.startupLogTail?.trim() ? b.startupLogTail.trimEnd() : "(empty)";
+  return `${summary}\n  failed-start log: ${b.startupLogPath}\n${logTail}`;
 }
 
 export function formatBuildList(recent: BuildSummary[], queued: BuildSummary[]): string {
