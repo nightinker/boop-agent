@@ -7,6 +7,7 @@ import {
   installPatchrightChrome,
   launchLocalBrowser,
 } from "./browser/launcher.js";
+import { isLocalBrowserSupported, LOCAL_BROWSER_UNSUPPORTED_MESSAGE } from "./platform-support.js";
 
 function readUrl(value: unknown): string | undefined {
   return typeof value === "string" ? value.trim() : undefined;
@@ -79,9 +80,24 @@ function requireLocalBrowserControl(req: Request, res: Response, next: NextFunct
   });
 }
 
+function requireLocalBrowserSupport(req: Request, res: Response, next: NextFunction): void {
+  if (isLocalBrowserSupported()) {
+    next();
+    return;
+  }
+  // Status and close stay answerable so the UI can hide the section and
+  // shutdown hooks stay harmless; everything that would start Chrome is refused.
+  if (req.path === "/status" || req.path === "/close") {
+    next();
+    return;
+  }
+  res.status(409).json({ ok: false, supported: false, error: LOCAL_BROWSER_UNSUPPORTED_MESSAGE });
+}
+
 export function createBrowserRouter(): express.Router {
   const router = express.Router();
   router.use(requireLocalBrowserControl);
+  router.use(requireLocalBrowserSupport);
 
   router.get("/status", async (_req, res) => {
     try {

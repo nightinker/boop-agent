@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { hostPlatformPromptNote } from "./platform-support.js";
 import { api } from "../convex/_generated/api.js";
 import { convex } from "./convex-client.js";
 import { createMemoryTools } from "./memory/tools.js";
@@ -457,10 +458,11 @@ export async function handleUserMessageWithAttachments(
     .map((m) => `${m.role.toUpperCase()}: ${m.content}`)
     .join("\n");
 
-  const systemPrompt = INTERACTION_SYSTEM.replace(
-    "{{INTEGRATIONS}}",
-    integrationSummary || "(no integrations configured yet)",
-  );
+  const systemPrompt =
+    INTERACTION_SYSTEM.replace(
+      "{{INTEGRATIONS}}",
+      integrationSummary || "(no integrations configured yet)",
+    ) + hostPlatformPromptNote();
 
   const userText = opts.mediaError
     ? `[user sent images but they couldn't be downloaded: ${opts.mediaError}]\n${opts.content}`

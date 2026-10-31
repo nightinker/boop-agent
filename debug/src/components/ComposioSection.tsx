@@ -61,6 +61,8 @@ interface AppleBridgeStatus {
 }
 
 interface AppleStatus {
+  /** False when the server is not on macOS (e.g. a Linux VPS). */
+  supported?: boolean;
   enabled: boolean;
   messagesEnabled: boolean;
   notesEnabled: boolean;
@@ -891,6 +893,7 @@ export function ComposioSection({ isDark }: { isDark: boolean }) {
     visibleAppleStatus?.bridge.permissions?.reminders === "granted";
   const showLocalAppleConnectors =
     visibleAppleLoaded &&
+    visibleAppleStatus?.supported !== false &&
     (visibleAppleStatus?.bridge.source === "local-server" ||
       visibleAppleStatus?.bridge.source === "desktop-bridge");
 

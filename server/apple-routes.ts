@@ -16,8 +16,11 @@ import {
 import { getAppleBridgeStatus, type AppleBridgeStatus } from "./apple/client.js";
 import { requestLocalNotesAccess } from "./apple/notes-local.js";
 import { requestLocalRemindersAccess } from "./apple/reminders-local.js";
+import { APPLE_DATA_UNSUPPORTED_MESSAGE, isAppleDataSupported } from "./platform-support.js";
 
 interface AppleStatusResponse {
+  /** False when Boop runs somewhere Apple data cannot exist (e.g. a Linux VPS). */
+  supported: boolean;
   enabled: boolean;
   messagesEnabled: boolean;
   notesEnabled: boolean;
@@ -44,6 +47,36 @@ function requireLocalAppleControl(req: Request, res: Response, next: NextFunctio
   });
 }
 
+export function unsupportedAppleStatus(): AppleStatusResponse {
+  return {
+    supported: false,
+    enabled: false,
+    messagesEnabled: false,
+    notesEnabled: false,
+    remindersEnabled: false,
+    bridge: {
+      running: false,
+      source: "unavailable",
+      port: null,
+      version: null,
+      permissions: null,
+      error: APPLE_DATA_UNSUPPORTED_MESSAGE,
+    },
+  };
+}
+
+function requireAppleDataSupport(req: Request, res: Response, next: NextFunction): void {
+  if (isAppleDataSupported()) {
+    next();
+    return;
+  }
+  if (req.method === "GET" && req.path === "/status") {
+    res.json(unsupportedAppleStatus());
+    return;
+  }
+  res.status(409).json({ ok: false, supported: false, error: APPLE_DATA_UNSUPPORTED_MESSAGE });
+}
+
 async function appleStatus(): Promise<AppleStatusResponse> {
   const settings = await getAppleSettings();
   const bridge = await getAppleBridgeStatus({
@@ -51,6 +84,7 @@ async function appleStatus(): Promise<AppleStatusResponse> {
     probeReminders: settings.remindersEnabled,
   });
   return {
+    supported: true,
     enabled: settings.enabled,
     messagesEnabled: settings.messagesEnabled,
     notesEnabled: settings.notesEnabled,
@@ -111,6 +145,7 @@ async function openAutomationSettings(): Promise<void> {
 export function createAppleRouter(): express.Router {
   const router = express.Router();
   router.use(requireLocalAppleControl);
+  router.use(requireAppleDataSupport);
 
   router.get("/status", async (_req, res) => {
     try {

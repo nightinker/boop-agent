@@ -1,0 +1,21 @@
+# Headless Boop. See docs/DEPLOY-VPS.md ("Docker").
+# Run either this or the systemd service, never both, and keep only one Boop
+# receiving the Sendblue webhook at a time.
+services:
+  boop:
+    build: .
+    image: boop-agent
+    restart: unless-stopped
+    env_file: .env.local
+    # Localhost only: put Caddy or nginx with TLS on the host in front of it.
+    ports:
+      - "127.0.0.1:3456:3456"
+    volumes:
+      # Claude login (`docker compose run --rm boop claude`, then /login).
+      - boop-claude:/home/node/.claude
+      # Local embedding model cache and other runtime data.
+      - boop-data:/app/data
+
+volumes:
+  boop-claude:
+  boop-data:

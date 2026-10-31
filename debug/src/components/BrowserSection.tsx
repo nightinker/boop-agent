@@ -32,6 +32,8 @@ interface BrowserSettings {
 }
 
 interface BrowserStatus {
+  /** False when the server is not on macOS (e.g. a Linux VPS). */
+  supported?: boolean;
   running: boolean;
   patchrightVersion: string;
   detectedChromePath: string | null;
@@ -190,6 +192,9 @@ export function BrowserSection({ isDark }: { isDark: boolean }) {
   const launchedAt = status?.launchedAt
     ? new Date(status.launchedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
     : null;
+
+  // Local browser use is Mac-only; hide it entirely on a headless server.
+  if (status?.supported === false) return null;
 
   return (
     <section className={panelCardClass(isDark, "fade-in overflow-hidden")}>

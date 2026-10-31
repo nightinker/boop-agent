@@ -1,8 +1,15 @@
 import { createBrowserMcp, createBrowserTools } from "../browser/tools.js";
 import { getBrowserSettings } from "../runtime-config.js";
+import { isLocalBrowserSupported } from "../platform-support.js";
 import { registerIntegration } from "./registry.js";
 
-export function registerBrowserIntegration(): void {
+export function registerBrowserIntegration(
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  if (!isLocalBrowserSupported(platform)) {
+    console.log(`[browser] skipped local browser integration (macOS only; running on ${platform})`);
+    return false;
+  }
   registerIntegration({
     name: "browser",
     description:
@@ -12,4 +19,5 @@ export function registerBrowserIntegration(): void {
     createTools: async () => createBrowserTools(),
   });
   console.log("[browser] registered local Patchright browser integration");
+  return true;
 }

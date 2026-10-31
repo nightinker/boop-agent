@@ -3,6 +3,7 @@ import { convex } from "./convex-client.js";
 import type { RuntimeName, RuntimeReasoningEffort } from "./runtimes/types.js";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { isAppleDataSupported, isLocalBrowserSupported } from "./platform-support.js";
 
 const RUNTIME_KEY = "runtime";
 const CLAUDE_MODEL_KEY = "model";
@@ -306,7 +307,10 @@ export async function getBrowserSettings(): Promise<BrowserSettings> {
   ]);
 
   const value: BrowserSettings = {
-    enabled: settingBool(enabled, process.env.BOOP_BROWSER_ENABLED, false),
+    // Forced off where the local browser is unsupported (e.g. a Linux VPS),
+    // even if a synced setting from the owner's Mac says otherwise.
+    enabled:
+      isLocalBrowserSupported() && settingBool(enabled, process.env.BOOP_BROWSER_ENABLED, false),
     profileDir:
       profileDir?.trim() ||
       process.env.BOOP_BROWSER_PROFILE_DIR?.trim() ||
@@ -342,7 +346,10 @@ export async function getAppleSettings(): Promise<AppleSettings> {
     getSetting(APPLE_NOTES_ENABLED_KEY),
     getSetting(APPLE_REMINDERS_ENABLED_KEY),
   ]);
-  const appleEnabled = settingBool(enabled, process.env.BOOP_APPLE_ENABLED, false);
+  // Apple data only exists on macOS. Settings live in Convex and may have been
+  // turned on from the owner's Mac, so force them off on any other platform.
+  const appleEnabled =
+    isAppleDataSupported() && settingBool(enabled, process.env.BOOP_APPLE_ENABLED, false);
   const value: AppleSettings = {
     enabled: appleEnabled,
     messagesEnabled:

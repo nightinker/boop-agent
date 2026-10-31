@@ -16,6 +16,7 @@ import {
   type BrowserSettings,
 } from "../runtime-config.js";
 import { MAX_OUTBOUND_IMAGE_BYTES } from "../images/outbound.js";
+import { isLocalBrowserSupported } from "../platform-support.js";
 import {
   readPngSize,
   resolveDeviceEmulation,
@@ -55,6 +56,8 @@ export interface LaunchResult {
 }
 
 export interface BrowserStatus {
+  /** False when Boop runs somewhere the local browser is not offered (e.g. a Linux VPS). */
+  supported: boolean;
   running: boolean;
   patchrightVersion: string;
   detectedChromePath: string | null;
@@ -409,6 +412,7 @@ export async function getBrowserStatus(): Promise<BrowserStatus> {
   const settings = await getBrowserSettings();
   const page = getExistingPage();
   return {
+    supported: isLocalBrowserSupported(),
     running: Boolean(context),
     patchrightVersion: patchrightVersion(),
     detectedChromePath: detectChromePath(),
