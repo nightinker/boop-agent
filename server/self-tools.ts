@@ -34,12 +34,20 @@ import {
   setUserTimezone,
 } from "./timezone-config.js";
 import { formatUptime, serverUptimeSeconds } from "./uptime.js";
-import { checkCswapLogin, getClaudeAccount, listCswapAccounts, switchCswapAccount } from "./claude-account.js";
 import {
-  describeCswapAccount,
+  checkCswapLogin,
+  getClaudeAccount,
+  getClaudeAccountForConfigDir,
+  listCswapAccounts,
+  switchCswapAccount,
+} from "./claude-account.js";
+import {
+  accountNameFromPhrase,
+  ambiguousAccountMessage,
   formatCswapSection,
   resolveCswapInput,
   switchToCswapAccount,
+  unknownAccountMessage,
   type CswapLookup,
 } from "./claude-cswap-accounts.js";
 import {
@@ -132,7 +140,7 @@ export function createSelfTools(conversationId?: string): RuntimeTool[] {
     defineRuntimeTool(
       NAMESPACE,
       "list_claude_accounts",
-      "List the Claude accounts Boop can use and which one it is on: accounts managed by cswap (claude-swap, the owner's account switcher, e.g. \"cswap 3 — me@globex.example (Globex)\") and separate Claude config dirs signed in on this Mac (~/.claude, ~/.claude-work). Shows labels, emails and org names only, never credentials. Says clearly if cswap isn't installed. Owner only. Use when the owner asks which Claude account Boop is on or which ones it can switch to.",
+      "List the Claude accounts Boop can use and which one it is on: accounts managed by cswap (claude-swap, the owner's account switcher), shown by email and organization name and separate Claude config dirs signed in on this Mac (~/.claude, ~/.claude-work). Shows labels, emails and org names only, never credentials. Says clearly if cswap isn't installed. Owner only. Use when the owner asks which Claude account Boop is on or which ones it can switch to.",
       {},
       async () => {
         if (!isOwner(conversationId)) return runtimeText(NOT_OWNER_ACCOUNT_MESSAGE, false);
@@ -156,61 +164,26 @@ export function createSelfTools(conversationId?: string): RuntimeTool[] {
     defineRuntimeTool(
       NAMESPACE,
       "set_claude_account",
-      "Switch which Claude account Boop uses. Accepts a config-dir label from list_claude_accounts (e.g. \"default\", \"work\"), or a cswap account by number (\"cswap 8\" or \"8\"), email, or org name (e.g. \"globex\"). Config-dir labels win when a name matches both. A cswap account is switched with `cswap switch`, which also changes this Mac's main Claude login (as for the desktop app). Saves the choice and applies from the next turn; no restart needed. If the account needs a fresh browser login, it changes nothing and returns the steps for the owner to run in Terminal. Owner only. NEVER ask for, accept or repeat passwords, API keys, tokens or login codes: if the owner offers one, refuse and tell them to sign in with `claude` in Terminal instead.",
+      "Switch which Claude account Boop uses. Accepts what the owner said in plain words: an account's organization name, email, or the name in its email (e.g. \"globex\", \"my Globex account\"), or a config-dir label like \"default\". cswap accounts are matched first. Never ask the owner for an account number. A cswap account is switched with `cswap switch`, which also changes this Mac's main Claude login (as for the desktop app). Saves the choice and applies from the next turn; no restart needed. If the account needs a fresh browser login, it changes nothing and returns the steps for the owner to run in Terminal. Owner only. NEVER ask for, accept or repeat passwords, API keys, tokens or login codes: if the owner offers one, refuse and tell them to sign in with `claude` in Terminal instead.",
       {
         account: z
           .string()
-          .describe('Config-dir label (e.g. "work"), cswap number ("cswap 8"), email, or org name (e.g. "globex").'),
+          .describe('The account as the owner named it: org name, email, or name in the email (e.g. "globex", "globex"). Filler words are fine.'),
       },
       async ({ account }) => {
         if (!isOwner(conversationId)) return runtimeText(NOT_OWNER_ACCOUNT_MESSAGE, false);
         const { profiles, active } = await listClaudeProfiles();
-        const target = resolveProfileInput(account, profiles);
+        const asked = account.slice(0, 60);
         const lines: string[] = [];
-        if (target) {
-          if (active?.label === target.label) {
-            return runtimeText(`Boop is already using the ${describeProfile(target)} account.`);
-          }
-          await setClaudeProfile(target);
-          lines.push(
-            `Claude account set to ${describeProfile(target)}. Boop uses it from the next turn on; no restart needed.`,
-          );
-          const check = await getClaudeAccount({ fresh: true }).catch(() => null);
-          if (check && !check.loggedIn) {
-            lines.push(
-              `Heads up: Claude Code reports that login as signed out. Run \`CLAUDE_CONFIG_DIR=${target.configDir} claude\` in Terminal to sign in again, or switch back.`,
-            );
-          }
-        } else {
-          const cswap = await lookupCswap();
-          const match =
-            cswap.ok && cswap.state.available
-              ? resolveCswapInput(account, cswap.state.accounts)
-              : ({ kind: "none" } as const);
-          if (match.kind === "ambiguous") {
-            return runtimeText(
-              `"${account.slice(0, 60)}" matches more than one cswap account: ${match.accounts.map(describeCswapAccount).join("; ")}. Which one? (e.g. "cswap ${match.accounts[0].number}")`,
-              false,
-            );
-          }
-          if (match.kind === "none") {
-            const known = [
-              ...profiles.map((p) => p.label),
-              ...(cswap.ok ? cswap.state.accounts.map((a) => `cswap ${a.number}`) : []),
-            ];
-            const cswapNote = !cswap.ok
-              ? ` ${cswap.error}`
-              : !cswap.state.available
-                ? ` ${formatCswapSection(cswap, true).replace(/^cswap accounts: /, "")}`
-                : "";
-            return runtimeText(
-              `No Claude account called "${account.slice(0, 60)}".` +
-                (known.length ? ` Available: ${known.join(", ")}.` : "") +
-                cswapNote +
-                " To add one, sign in with `claude` in Terminal, then run `cswap add`.",
-              false,
-            );
-          }
+        const cswap = await lookupCswap();
+        const match =
+          cswap.ok && cswap.state.available
+            ? resolveCswapInput(account, cswap.state.accounts)
+            : ({ kind: "none" } as const);
+        if (match.kind === "ambiguous") {
+          return runtimeText(ambiguousAccountMessage(asked, match.accounts), false);
+        }
+        if (match.kind === "match") {
           const result = await switchToCswapAccount(match.account, !active || active.isDefault, {
             checkLogin: checkCswapLogin,
             switchAccount: switchCswapAccount,
@@ -222,6 +195,39 @@ export function createSelfTools(conversationId?: string): RuntimeTool[] {
           });
           if (!result.ok) return runtimeText(result.text, false);
           lines.push(result.text);
+        } else {
+          const target = resolveProfileInput(accountNameFromPhrase(account) || account, profiles);
+          if (!target) {
+            const names = cswap.ok && cswap.state.available ? cswap.state.accounts : [];
+            const cswapNote = !cswap.ok
+              ? cswap.error
+              : !cswap.state.available
+                ? formatCswapSection(cswap, true).replace(/^cswap accounts: /, "")
+                : "";
+            return runtimeText(
+              names.length
+                ? unknownAccountMessage(asked, names)
+                : `I couldn't find a Claude account matching "${asked}". ${cswapNote} To add one, sign in with \`claude\` in Terminal, then run \`cswap add\`.`,
+              false,
+            );
+          }
+          if (active?.label === target.label) {
+            return runtimeText(`Boop is already using the ${describeProfile(target)} account.`);
+          }
+          // A config dir can hold an identity without a working login (signed out), so check before switching.
+          if (!target.isDefault) {
+            const login = await getClaudeAccountForConfigDir(target.configDir).catch(() => null);
+            if (!login?.loggedIn) {
+              return runtimeText(
+                `The ${describeProfile(target)} account is signed out on this Mac, so I didn't switch to it. Sign in with \`CLAUDE_CONFIG_DIR=${target.configDir} claude\` in Terminal, then ask me again.`,
+                false,
+              );
+            }
+          }
+          await setClaudeProfile(target);
+          lines.push(
+            `Claude account set to ${describeProfile(target)}. Boop uses it from the next turn on; no restart needed.`,
+          );
         }
         if (process.env.ANTHROPIC_API_KEY) {
           lines.push(

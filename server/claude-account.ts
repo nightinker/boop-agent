@@ -110,14 +110,38 @@ export async function getClaudeAccount(options: { fresh?: boolean } = {}): Promi
   if (!options.fresh && accountCache && Date.now() - accountCache.at < ACCOUNT_CACHE_MS) {
     return accountCache.account;
   }
-  const env = envWithClaudeConfigDir(await activeClaudeConfigDir());
-  const { stdout } = await execFileAsync("claude", ["auth", "status"], {
-    timeout: COMMAND_TIMEOUT_MS,
-    ...(env ? { env } : {}),
-  });
-  const account = parseClaudeAuthStatus(stdout);
+  const account = await readAuthStatus(envWithClaudeConfigDir(await activeClaudeConfigDir()));
   accountCache = { at: Date.now(), account };
   return account;
+}
+
+/**
+ * `claude auth status` exits non-zero when signed out, but still prints the
+ * status as JSON. Read it instead of surfacing a bare "Command failed".
+ */
+async function readAuthStatus(env: Record<string, string> | undefined): Promise<ClaudeAccount> {
+  try {
+    const { stdout } = await execFileAsync("claude", ["auth", "status"], {
+      timeout: COMMAND_TIMEOUT_MS,
+      ...(env ? { env } : {}),
+    });
+    return parseClaudeAuthStatus(stdout);
+  } catch (err) {
+    const stdout = (err as { stdout?: unknown } | null)?.stdout;
+    if (typeof stdout === "string" && stdout.trim()) {
+      try {
+        return parseClaudeAuthStatus(stdout);
+      } catch {
+        // not JSON: fall through to the original error
+      }
+    }
+    throw err;
+  }
+}
+
+/** Whether a Claude config dir (~/.claude-work, …) has a working login right now. */
+export async function getClaudeAccountForConfigDir(configDir: string): Promise<ClaudeAccount> {
+  return readAuthStatus(envWithClaudeConfigDir(configDir));
 }
 
 function isMissingBinary(err: unknown): boolean {

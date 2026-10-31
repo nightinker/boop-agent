@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cswapCandidates, findCswap, type CswapAccount, type LoginCheck } from "../server/claude-account.js";
 import {
+  ambiguousAccountMessage,
+  unknownAccountMessage,
   cswapReloginInstructions,
   formatCswapSection,
   resolveCswapInput,
@@ -81,6 +83,25 @@ describe("matching a cswap account", () => {
     expect(pick("acme")).toBe(2);
   });
 
+  it("understands plain-English requests without numbers", () => {
+    const pick = (input: string) => {
+      const m = resolveCswapInput(input, accounts);
+      return m.kind === "match" ? m.account.number : m.kind;
+    };
+    expect(pick("switch to Globex")).toBe(8);
+    expect(pick("Please use my Acme Corp account")).toBe(2);
+    expect(pick("can you switch over to the globex login")).toBe(8);
+    expect(pick("switch to my account")).toBe("none");
+  });
+
+  it("never puts slot numbers in chat-facing text", () => {
+    const ask = ambiguousAccountMessage("me", accounts);
+    const unknown = unknownAccountMessage("nobody", accounts);
+    expect(ask).not.toMatch(/cswap|\b[128]\b/);
+    expect(unknown).not.toMatch(/cswap|\b[128]\b/);
+    expect(ask).toContain("me@acme.example (Acme Corp)");
+  });
+
   it("asks when a name fits several accounts, and rejects unknown ones", () => {
     expect(resolveCswapInput("me", accounts).kind).toBe("ambiguous"); // same email name on all three
     expect(resolveCswapInput("ak", accounts).kind).toBe("none"); // too short for a partial match
@@ -97,8 +118,8 @@ describe("listing cswap accounts", () => {
       { ok: true, state: { available: true, activeAccountNumber: 1, accounts } },
       true,
     );
-    expect(text).toContain("• (active) cswap 1 — me@example.test (Personal)");
-    expect(text).toContain("cswap 8 — me@globex.example (Globex) — needs a fresh login");
+    expect(text).toContain("• (active) me@example.test (Personal)");
+    expect(text).toContain("me@globex.example (Globex) — needs a fresh login");
   });
 
   it("says the active cswap login isn't Boop's when a config dir is chosen", () => {
@@ -106,7 +127,7 @@ describe("listing cswap accounts", () => {
       { ok: true, state: { available: true, activeAccountNumber: 1, accounts } },
       false,
     );
-    expect(text).toContain("• (main login) cswap 1");
+    expect(text).toContain("• (main login) me@example.test");
   });
 
   it("says plainly when cswap isn't installed or fails", () => {

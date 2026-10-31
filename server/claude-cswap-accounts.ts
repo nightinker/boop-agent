@@ -29,27 +29,51 @@ export type CswapMatch =
 
 const NUMBER_INPUT = /^(?:cswap|account|slot|acct)?\s*#?\s*(\d+)$/;
 
+/** Words people wrap around an account name in chat ("switch to my Globex account"). */
+const FILLER_WORDS = new Set([
+  "switch", "swap", "change", "go", "move", "set", "put", "use", "using", "login", "log", "sign", "signin",
+  "to", "over", "back", "into", "on", "onto", "the", "a", "an", "my", "our", "your", "please", "pls",
+  "claude", "account", "accounts", "profile", "cswap", "for", "as", "with", "and", "now", "instead",
+  "boop", "can", "you", "could", "lets", "let's", "let", "us",
+]);
+
+/** The account name left after dropping filler words: "switch to my Globex account" → "globex". */
+export function accountNameFromPhrase(input: string): string {
+  const trimmed = input.trim().toLowerCase();
+  if (trimmed.includes("@") && !/\s/.test(trimmed)) return trimmed;
+  const words = trimmed.split(/[^a-z0-9@._+'-]+/).filter(Boolean);
+  const kept = words.filter((word) => !FILLER_WORDS.has(word));
+  return (kept.length ? kept : []).join(" ");
+}
+
 /**
- * Match what the owner typed ("8", "cswap 8", "globex", an email) against
- * cswap's accounts: slot number, exact email, exact org name, email name,
- * then a unique partial match on the email or org name.
+ * Match what the owner said ("Globex", "switch to my Globex account", an
+ * email) against cswap's accounts: exact email, exact org name, email name,
+ * then a unique partial match on the email or org name. A bare slot number
+ * still works but is never asked for.
  */
 export function resolveCswapInput(input: string, accounts: CswapAccount[]): CswapMatch {
-  const wanted = input.trim().toLowerCase();
-  if (!wanted) return { kind: "none" };
-  const asNumber = NUMBER_INPUT.exec(wanted);
+  const raw = input.trim().toLowerCase();
+  if (!raw) return { kind: "none" };
+  const asNumber = NUMBER_INPUT.exec(raw);
   if (asNumber) {
     const account = accounts.find((a) => a.number === Number(asNumber[1]));
     return account ? { kind: "match", account } : { kind: "none" };
   }
+  const wanted = accountNameFromPhrase(raw);
+  if (!wanted) return { kind: "none" };
   const email = (a: CswapAccount) => a.email.toLowerCase();
   const org = (a: CswapAccount) => a.organizationName?.toLowerCase() ?? "";
+  const tokens = wanted.split(" ").filter((token) => token.length >= 3);
   const matchers: Array<(a: CswapAccount) => boolean> = [
     (a) => email(a) === wanted,
     (a) => org(a) === wanted,
     (a) => email(a).split("@")[0] === wanted,
   ];
   if (wanted.length >= 3) matchers.push((a) => email(a).includes(wanted) || org(a).includes(wanted));
+  if (tokens.length) {
+    matchers.push((a) => tokens.every((token) => email(a).includes(token) || org(a).includes(token)));
+  }
   for (const matches of matchers) {
     const candidates = accounts.filter(matches);
     if (candidates.length === 1) return { kind: "match", account: candidates[0] };
@@ -58,9 +82,21 @@ export function resolveCswapInput(input: string, accounts: CswapAccount[]): Cswa
   return { kind: "none" };
 }
 
+/** How an account is named in chat: the email, plus the org when there is one. Never a slot number. */
 export function describeCswapAccount(account: CswapAccount): string {
-  const who = account.organizationName ? `${account.email} (${account.organizationName})` : account.email;
-  return `cswap ${account.number} — ${who}`;
+  return account.organizationName ? `${account.email} (${account.organizationName})` : account.email;
+}
+
+/** The question to ask when what the owner said fits several accounts. */
+export function ambiguousAccountMessage(input: string, accounts: CswapAccount[]): string {
+  const options = accounts.map((a) => `• ${describeCswapAccount(a)}`).join("\n");
+  return `"${input}" could be more than one account:\n${options}\nWhich one do you mean? You can reply with the email or the organization name.`;
+}
+
+/** The reply when nothing matches, listing the accounts by name. */
+export function unknownAccountMessage(input: string, accounts: CswapAccount[]): string {
+  const options = accounts.map((a) => `• ${describeCswapAccount(a)}`).join("\n");
+  return `I couldn't find a Claude account matching "${input}". The accounts I can switch to:\n${options}`;
 }
 
 /** What the owner runs in Terminal to give cswap a fresh login for this account. */
