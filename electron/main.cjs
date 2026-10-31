@@ -72,6 +72,75 @@ function desktopDataRoot() {
 app.setName(productName);
 app.setPath("userData", desktopDataRoot());
 
+// Self-build restart diagnostics. When the restart helper launches a new
+// build it leaves a marker naming a per-build log file; this launch claims
+// the marker and appends all startup output there with timestamps and phase
+// markers, so a build that fails its health check (and gets rolled back)
+// still leaves a record of why. Normal launches find no marker and log nothing.
+const STARTUP_LOG_MAX_MS = 15 * 60_000;
+const STARTUP_LOG_MAX_BYTES = 5 * 1024 * 1024;
+let startupLog = null;
+
+function claimStartupLog() {
+  const marker = path.join(desktopDataRoot(), "self-build", "startup-log-request");
+  let target = "";
+  try {
+    target = fs.readFileSync(marker, "utf8").trim();
+    fs.unlinkSync(marker);
+  } catch {
+    return;
+  }
+  if (!target) return;
+  try {
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    startupLog = { fd: fs.openSync(target, "a"), startedAt: Date.now(), bytes: 0, phases: new Set() };
+    writeStartupLog(`[electron] app launched (version ${app.getVersion()}, pid ${process.pid})`);
+    process.on("unhandledRejection", (reason) => {
+      writeStartupLog(`[electron] unhandled rejection: ${reason && reason.stack ? reason.stack : reason}`);
+    });
+  } catch {
+    startupLog = null;
+  }
+}
+
+function writeStartupLog(line) {
+  if (!startupLog) return;
+  const elapsed = Date.now() - startupLog.startedAt;
+  if (elapsed > STARTUP_LOG_MAX_MS || startupLog.bytes > STARTUP_LOG_MAX_BYTES) {
+    closeStartupLog("startup log closed (time or size limit reached)");
+    return;
+  }
+  const text = `${new Date().toISOString()} ${line}\n`;
+  try {
+    fs.writeSync(startupLog.fd, text);
+    startupLog.bytes += Buffer.byteLength(text);
+  } catch {
+    startupLog = null;
+  }
+}
+
+function closeStartupLog(reason) {
+  if (!startupLog) return;
+  const { fd } = startupLog;
+  try {
+    fs.writeSync(fd, `${new Date().toISOString()} [electron] ${reason}\n`);
+    fs.closeSync(fd);
+  } catch {}
+  startupLog = null;
+}
+
+function startupPhase(name) {
+  if (!startupLog || startupLog.phases.has(name)) return;
+  startupLog.phases.add(name);
+  const seconds = ((Date.now() - startupLog.startedAt) / 1000).toFixed(1);
+  writeStartupLog(`[phase] ${name} +${seconds}s`);
+}
+
+// Observe only: neither hook changes how Electron handles the error.
+process.on("uncaughtExceptionMonitor", (error) => {
+  writeStartupLog(`[electron] uncaught exception: ${error && error.stack ? error.stack : error}`);
+});
+
 function isInsideMutablePath(relativePath) {
   const normalized = relativePath.split(path.sep).join("/");
   if (/^\.env\..+\.local$/.test(normalized)) return true;
@@ -593,8 +662,14 @@ function ingestLine(line) {
 
   const next = { lastMessage: plain };
   let checkWebhookForPublicUrl = "";
-  if (/boop-agent server listening on :/.test(plain)) next.server = "running";
-  if (/Convex functions ready/.test(plain)) next.convex = "running";
+  if (/boop-agent server listening on :/.test(plain)) {
+    next.server = "running";
+    startupPhase("server boot: listening");
+  }
+  if (/Convex functions ready/.test(plain)) {
+    next.convex = "running";
+    startupPhase("convex connect: functions ready");
+  }
 
   const dashboardMatch =
     plain.match(/Local:\s+(http:\/\/\S+)/) ||
@@ -614,7 +689,9 @@ function ingestLine(line) {
     next.registeredWebhookUrl = "";
     next.webhookDetails = "Checking Sendblue registration against the active tunnel.";
     checkWebhookForPublicUrl = publicUrl;
+    startupPhase("tunnel setup: public URL ready");
   }
+  if (/could not read tunnel URL/.test(plain)) startupPhase("tunnel setup: failed to read tunnel URL");
 
   if (/ngrok is not installed|No public tunnel configured/.test(plain)) {
     next.tunnel = "stopped";
@@ -622,6 +699,7 @@ function ingestLine(line) {
     next.expectedWebhookUrl = "";
     next.registeredWebhookUrl = "";
     next.webhookDetails = "No public tunnel is running, so Sendblue cannot reach this app.";
+    startupPhase("tunnel setup: no tunnel configured");
   }
   if (/Convex types haven't been generated/.test(plain)) next.state = "setup-required";
   if (/A child process exited with code|fatal /.test(plain)) next.state = "error";
@@ -636,6 +714,7 @@ function pipeOutput(stream, shouldIngest = () => true) {
     buffer += chunk.toString();
     let index;
     while ((index = buffer.indexOf("\n")) !== -1) {
+      writeStartupLog(stripAnsi(buffer.slice(0, index)));
       if (shouldIngest()) ingestLine(buffer.slice(0, index));
       buffer = buffer.slice(index + 1);
     }
@@ -676,7 +755,9 @@ async function syncConvexRuntime() {
       ? "Synchronizing Convex functions for this desktop version."
       : "Generating Convex files in the desktop runtime folder.",
   });
+  startupPhase("convex sync: started");
   await runBootstrap(convex.cmd, [...convex.args, "dev", "--once", "--typecheck=disable"]);
+  startupPhase("convex sync: finished");
   refreshConnectionStatus();
 }
 
@@ -717,6 +798,7 @@ async function startBoop() {
       resetServiceStatuses("stopped");
       return;
     }
+    writeStartupLog(`[electron] convex sync failed: ${error instanceof Error ? error.message : String(error)}`);
     setStatus({
       state: "setup-required",
       server: "stopped",
@@ -734,16 +816,19 @@ async function startBoop() {
   });
   const child = boopProcess;
   starting = false;
+  startupPhase("server boot: process started");
 
   pipeOutput(child.stdout, () => boopProcess === child);
   pipeOutput(child.stderr, () => boopProcess === child);
   child.on("error", (error) => {
+    writeStartupLog(`[electron] server process error: ${error.message}`);
     if (boopProcess !== child) return;
     starting = false;
     boopProcess = undefined;
     setStatus({ state: "error", lastMessage: error.message });
   });
-  child.on("exit", (code) => {
+  child.on("exit", (code, signal) => {
+    writeStartupLog(`[electron] server process exited (code ${code}, signal ${signal})`);
     if (boopProcess !== child) return;
     starting = false;
     boopProcess = undefined;
@@ -820,7 +905,10 @@ ipcMain.handle("boop:open-dashboard", () => {
 });
 ipcMain.handle("boop:show-runtime-folder", () => shell.openPath(runtimeRoot));
 
+claimStartupLog();
+
 app.whenReady().then(() => {
+  startupPhase("electron ready");
   runtimeRoot = getRuntimeRoot();
   Object.assign(status, refreshConnectionStatus(), { runtimeRoot });
   if (isMac && app.dock) app.dock.setIcon(createIcon(256));
@@ -837,6 +925,7 @@ app.whenReady().then(() => {
 app.on("before-quit", () => {
   quitting = true;
   stopBoop();
+  writeStartupLog("[electron] quitting");
 });
 
 app.on("window-all-closed", () => {

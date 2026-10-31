@@ -138,9 +138,15 @@ export function restartScript(input: {
   logPath?: string;
   bundleId?: string;
   ports?: number[];
+  /** Per-build, per-attempt file the new build writes its startup output to. */
+  startupLogPath?: string;
+  /** File the new build's Electron main reads to learn where startupLogPath is. */
+  startupMarkerPath?: string;
+  healthTimeoutSec?: number;
 }): string {
   const q = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`;
   const ports = (input.ports ?? [3456, 5173, 4040]).join(" ");
+  const startupLog = input.startupLogPath ?? `${input.resultPath}.startup.log`;
   return `#!/bin/bash
 set -u
 # open passes this to the app it launches; Boop would start as plain Node and exit.
@@ -154,12 +160,17 @@ BUILD=${q(input.buildId)}
 LOG=${q(input.logPath ?? `${input.resultPath}.log`)}
 BUNDLE_ID=${q(input.bundleId ?? "com.raroque.boop")}
 PORTS="${ports}"
+STARTUP_LOG=${q(startupLog)}
+STARTUP_MARKER=${q(input.startupMarkerPath ?? `${input.resultPath}.startup-request`)}
+HEALTH_TIMEOUT=${input.healthTimeoutSec === undefined ? healthTimeoutSeconds() : Math.max(1, Math.round(input.healthTimeoutSec))}
 
 log() { printf '%s %s\\n' "$(date +%H:%M:%S)" "$*" >> "$LOG"; }
+# Notes in the new build's own startup log. Appended only, never truncated.
+startup_note() { printf '%s [restart-helper] %s\\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >> "$STARTUP_LOG"; }
 
 write_result() {
   log "result: $1"
-  printf '{"buildId":"%s","status":"%s","at":"%s"}\\n' "$BUILD" "$1" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$RESULT"
+  printf '{"buildId":"%s","status":"%s","at":"%s","startupLog":"%s","healthTimeoutSec":%s}\\n' "$BUILD" "$1" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$STARTUP_LOG" "$HEALTH_TIMEOUT" > "$RESULT"
 }
 
 boop_pids() {
@@ -188,7 +199,8 @@ stop_boop() {
 }
 
 wait_for_health() {
-  for _ in $(seq 1 90); do
+  local start=$SECONDS
+  while [ $((SECONDS - start)) -lt "$HEALTH_TIMEOUT" ]; do
     curl -fsS -m 3 "$HEALTH" >/dev/null 2>&1 && return 0
     sleep 2
   done
@@ -206,12 +218,23 @@ if ! ditto "$NEW" "$APP"; then
   log "copy failed, restoring"
   rm -rf "$APP"; mv "$BACKUP/Boop.app" "$APP"; open -a "$APP"; write_result rolled_back; exit 1
 fi
-log "launching new build"
+log "launching new build (health timeout \${HEALTH_TIMEOUT}s, startup log $STARTUP_LOG)"
+# The new build claims this marker at launch and writes its startup output to
+# STARTUP_LOG. It is removed before any rollback so the previous version never
+# writes to (or truncates) the failed build's log.
+mkdir -p "$(dirname "$STARTUP_LOG")"
+startup_note "launching build $BUILD (health check $HEALTH, timeout \${HEALTH_TIMEOUT}s)"
+printf '%s\\n' "$STARTUP_LOG" > "$STARTUP_MARKER"
+LAUNCHED_AT=$SECONDS
 open -a "$APP"
 
 if wait_for_health; then
+  rm -f "$STARTUP_MARKER"
+  startup_note "[phase] health endpoint ready +$((SECONDS - LAUNCHED_AT))s"
   write_result shipped
 else
+  rm -f "$STARTUP_MARKER"
+  startup_note "health check timed out after $((SECONDS - LAUNCHED_AT))s (limit \${HEALTH_TIMEOUT}s), rolling back"
   log "new build never answered, rolling back"
   stop_boop
   rm -rf "$APP"
@@ -220,4 +243,69 @@ else
   write_result rolled_back
 fi
 `;
+}
+
+export const DEFAULT_HEALTH_TIMEOUT_SEC = 180;
+
+/**
+ * How long a restarted build gets to answer its health check: an explicit
+ * value (from ship_self_build), else BOOP_SELF_BUILD_HEALTH_TIMEOUT, else 180s.
+ * Clamped to 30s–1h so a typo can't hang or instantly fail a ship.
+ */
+export function healthTimeoutSeconds(
+  override?: number | string,
+  env: string | undefined = process.env.BOOP_SELF_BUILD_HEALTH_TIMEOUT,
+): number {
+  for (const candidate of [override, env]) {
+    const value = Number(candidate);
+    if (candidate !== undefined && candidate !== "" && Number.isFinite(value) && value > 0) {
+      return Math.min(3600, Math.max(30, Math.round(value)));
+    }
+  }
+  return DEFAULT_HEALTH_TIMEOUT_SEC;
+}
+
+/** startup-<buildId>-<attempt>.log, attempt counting up per ship of that build. */
+export function startupLogName(buildId: string, existing: string[]): string {
+  const prefix = `startup-${buildId}-`;
+  const attempts = existing
+    .filter((name) => name.startsWith(prefix) && name.endsWith(".log"))
+    .map((name) => Number(name.slice(prefix.length, -".log".length)))
+    .filter((n) => Number.isInteger(n) && n > 0);
+  return `${prefix}${Math.max(0, ...attempts) + 1}.log`;
+}
+
+export const KEEP_BUILD_LOGS = 10;
+
+/**
+ * Self-build files to delete so only the newest `keep` of each kind remain
+ * (startup logs, restart helper logs, restart scripts).
+ */
+export function logsToPrune(files: { name: string; mtimeMs: number }[], keep = KEEP_BUILD_LOGS): string[] {
+  const kinds: [string, string][] = [
+    ["startup-", ".log"],
+    ["restart-", ".log"],
+    ["restart-", ".sh"],
+  ];
+  return kinds.flatMap(([prefix, suffix]) =>
+    files
+      .filter((f) => f.name.startsWith(prefix) && f.name.endsWith(suffix))
+      .sort((a, b) => b.mtimeMs - a.mtimeMs)
+      .slice(keep)
+      .map((f) => f.name),
+  );
+}
+
+export const ROLLBACK_LOG_LINES = 50;
+
+export function rollbackMessage(input: { buildId: string; logPath?: string; logTail?: string; healthTimeoutSec?: number }): string {
+  const lines = [
+    `Build ${input.buildId} didn't start properly${input.healthTimeoutSec ? ` (no health check answer within ${input.healthTimeoutSec}s)` : ""}, so I rolled back to the previous version. The code is still merged; ask me to look into it.`,
+  ];
+  if (input.logPath) {
+    lines.push("", `Startup log: ${input.logPath}`);
+    lines.push(input.logTail?.trim() ? `Last lines:\n${input.logTail.trimEnd()}` : "(the new build wrote nothing to it)");
+    lines.push("", "To retry with more time: ship it again with a longer health timeout.");
+  }
+  return lines.join("\n");
 }

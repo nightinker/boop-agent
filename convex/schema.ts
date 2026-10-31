@@ -393,6 +393,9 @@ export default defineSchema({
     testsPassed: v.optional(v.boolean()),
     testOutput: v.optional(v.string()),
     error: v.optional(v.string()),
+    // Failed-start diagnostics kept when a restart rolls back.
+    startupLogPath: v.optional(v.string()),
+    startupLogTail: v.optional(v.string()),
     createdAt: v.number(),
     updatedAt: v.number(),
   })

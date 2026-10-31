@@ -125,6 +125,8 @@ export const update = mutation({
     testsPassed: v.optional(v.boolean()),
     testOutput: v.optional(v.string()),
     error: v.optional(v.string()),
+    startupLogPath: v.optional(v.string()),
+    startupLogTail: v.optional(v.string()),
   },
   handler: async (ctx, { buildId, ...patch }) => {
     const build = await ctx.db
