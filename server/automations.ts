@@ -5,6 +5,7 @@ import { spawnExecutionAgent } from "./execution-agent.js";
 import { sendImessage, withAttachmentNote } from "./sendblue.js";
 import { broadcast } from "./broadcast.js";
 import { getUserTimezone } from "./timezone-config.js";
+import { isUsageLimitError, logSuppressedUsageLimit } from "./usage-limit.js";
 
 function randomId(prefix: string): string {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
@@ -61,14 +62,19 @@ async function runAutomation(a: {
       name: `auto:${a.name}`,
       allowImageAttachments: a.notifyConversationId?.startsWith("sms:") ?? false,
     });
+    // A spend/usage-limit error is not a result: record it on the run for the
+    // debug dashboard, log it (deduped), and never text it to the user.
+    const usageLimited = res.usageLimited === true || isUsageLimitError(res.result);
     await convex.mutation(api.automations.updateRun, {
       runId,
-      status: res.status === "completed" ? "completed" : "failed",
-      result: res.result,
+      status: res.status === "completed" && !usageLimited ? "completed" : "failed",
+      ...(usageLimited ? { error: res.result } : { result: res.result }),
       agentId: res.agentId,
     });
 
-    if (a.notifyConversationId && res.result) {
+    if (usageLimited) {
+      logSuppressedUsageLimit(`automation:${a.automationId}`, res.result);
+    } else if (a.notifyConversationId && res.result) {
       let content = `[${a.name}]\n\n${res.result}`;
       if (a.notifyConversationId.startsWith("sms:")) {
         const number = a.notifyConversationId.slice(4);
@@ -85,6 +91,7 @@ async function runAutomation(a: {
 
     broadcast("automation_completed", { automationId: a.automationId, runId });
   } catch (err) {
+    if (isUsageLimitError(err)) logSuppressedUsageLimit(`automation:${a.automationId}`, err);
     await convex.mutation(api.automations.updateRun, {
       runId,
       status: "failed",

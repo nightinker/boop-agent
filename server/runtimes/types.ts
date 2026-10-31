@@ -49,6 +49,12 @@ export interface RuntimeRunRequest {
 export interface RuntimeRunResult {
   text: string;
   usage: UsageTotals;
+  /**
+   * Set when the runtime reported the turn as an API error rather than a real
+   * answer (Claude SDK assistant `error`, e.g. "billing_error"); `text` then
+   * holds the error message.
+   */
+  errorCode?: string;
 }
 
 export function runtimeText(text: string, success = true): RuntimeToolResult {
