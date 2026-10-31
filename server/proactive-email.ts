@@ -9,7 +9,8 @@ import { convex } from "./convex-client.js";
 import { getRuntimeConfig, type RuntimeConfig } from "./runtime-config.js";
 import { runAgentRuntime } from "./runtimes/index.js";
 import { EMPTY_USAGE, type UsageTotals } from "./usage.js";
-import { handleUserMessage } from "./interaction-agent.js";
+import { handleUserMessageWithAttachments } from "./interaction-agent.js";
+import { isUsageLimitText, logSuppressedUsageLimit } from "./usage-limit.js";
 import { sendImessage } from "./sendblue.js";
 import { ensureTrigger, getComposio, listConnectedToolkits } from "./composio.js";
 import { ensureWebhookSubscription } from "./composio-webhook.js";
@@ -302,14 +303,20 @@ async function dispatchProactiveNotice(summary: string): Promise<void> {
     return;
   }
   const conversationId = `sms:${phone}`;
-  const reply = await handleUserMessage({
+  if (isUsageLimitText(summary)) {
+    logSuppressedUsageLimit("proactive-email", summary);
+    return;
+  }
+  const { reply, usageLimited } = await handleUserMessageWithAttachments({
     conversationId,
     content: `[proactive notice] ${summary}`,
     kind: "proactive",
   });
   // handleUserMessage only sends iMessage from inside send_ack; the final
-  // reply is the caller's responsibility.
-  if (reply && reply !== "(no reply)") {
+  // reply is the caller's responsibility. On a spend/usage limit the reply is
+  // empty (the error is logged, never texted) and the raw summary below still
+  // gets the notice through.
+  if (reply && reply !== "(no reply)" && !usageLimited) {
     await sendImessage(phone, reply);
     await convex.mutation(api.messages.send, {
       conversationId,
@@ -325,7 +332,9 @@ async function dispatchProactiveNotice(summary: string): Promise<void> {
       role: "assistant",
       content: summary,
     });
-    console.log(`[proactive] IA produced no reply; sent raw summary`);
+    console.log(
+      `[proactive] IA produced no reply${usageLimited ? " (usage limit)" : ""}; sent raw summary`,
+    );
   }
 }
 

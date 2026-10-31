@@ -25,6 +25,7 @@ import {
   createImageAttachmentTools,
 } from "./images/attach-tool.js";
 import { OutboundImageCollector, type OutboundImage } from "./images/outbound.js";
+import { isUsageLimitError } from "./usage-limit.js";
 
 const running = new Map<string, AbortController>();
 
@@ -158,6 +159,11 @@ export interface SpawnResult {
   status: "completed" | "failed" | "cancelled";
   /** Images the agent attached with attach_image, validated and loaded. */
   attachments: OutboundImage[];
+  /**
+   * The model runtime hit a spend/usage limit; `result` is that error, not a
+   * real answer. Background callers must not forward it to the user.
+   */
+  usageLimited?: boolean;
 }
 
 export async function spawnExecutionAgent(opts: SpawnExecutionAgentOpts): Promise<SpawnResult> {
@@ -229,6 +235,7 @@ export async function spawnExecutionAgent(opts: SpawnExecutionAgentOpts): Promis
   let usage: UsageTotals = { ...EMPTY_USAGE };
   let status: "completed" | "failed" | "cancelled" = "completed";
   let errorMsg: string | undefined;
+  let usageLimited = false;
 
   try {
     const executionPrompt = await buildPromptWithImages({
@@ -283,9 +290,21 @@ export async function spawnExecutionAgent(opts: SpawnExecutionAgentOpts): Promis
     });
     if (!buffer) buffer = result.text;
     usage = result.usage;
+    if (isUsageLimitError(buffer, result.errorCode) || isUsageLimitError(result.text)) {
+      usageLimited = true;
+      status = "failed";
+      errorMsg = `usage limit: ${(buffer || result.text).trim().slice(0, 500)}`;
+      buffer = "";
+      await convex.mutation(api.agents.addLog, {
+        agentId,
+        logType: "error",
+        content: errorMsg,
+      });
+    }
   } catch (err) {
     status = abort.signal.aborted ? "cancelled" : "failed";
     errorMsg = String(err);
+    if (isUsageLimitError(err)) usageLimited = true;
     await convex.mutation(api.agents.addLog, {
       agentId,
       logType: "error",
@@ -350,7 +369,13 @@ export async function spawnExecutionAgent(opts: SpawnExecutionAgentOpts): Promis
       `attachments: ${attachments.length} delivered of ${attachmentCollector.list.length} attached`,
     );
   }
-  return { agentId, result: buffer || errorMsg || "(no output)", status, attachments };
+  return {
+    agentId,
+    result: buffer || errorMsg || "(no output)",
+    status,
+    attachments,
+    ...(usageLimited ? { usageLimited } : {}),
+  };
 }
 
 export function cancelAgent(agentId: string): boolean {

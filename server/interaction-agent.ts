@@ -32,6 +32,11 @@ import {
 } from "./images/content-blocks.js";
 import { redactPhoneNumbers } from "./privacy.js";
 import { OutboundImageCollector, type OutboundImage } from "./images/outbound.js";
+import {
+  isUsageLimitError,
+  logSuppressedUsageLimit,
+  USAGE_LIMIT_DIRECT_REPLY,
+} from "./usage-limit.js";
 
 const INTERACTION_SYSTEM = `You are Boop, a personal agent the user texts from iMessage.
 
@@ -403,6 +408,11 @@ export interface InteractionTurnResult {
   reply: string;
   /** Images sub-agents attached this turn, to send alongside the reply. */
   attachments: OutboundImage[];
+  /**
+   * The model hit a spend/usage limit. Direct turns get one brief fixed reply;
+   * proactive turns get an empty reply and must not text the user.
+   */
+  usageLimited?: boolean;
 }
 
 export async function handleUserMessage(opts: HandleOpts): Promise<string> {
@@ -636,6 +646,7 @@ export async function handleUserMessageWithAttachments(
   ];
   let reply = "";
   let turnFailed = false;
+  let usageLimited = false;
   let usage: UsageTotals = { ...EMPTY_USAGE };
   try {
     const result = await runAgentRuntime(runtimeConfig, {
@@ -699,10 +710,29 @@ export async function handleUserMessageWithAttachments(
     });
     reply = result.text;
     usage = result.usage;
+    if (isUsageLimitError(reply, result.errorCode)) {
+      usageLimited = true;
+      turnFailed = true;
+    }
   } catch (err) {
-    console.error(`[turn ${tag}] query failed`, err);
     turnFailed = true;
-    reply = "Sorry — I hit an error processing that. Try again in a moment.";
+    if (isUsageLimitError(err)) {
+      usageLimited = true;
+    } else {
+      console.error(`[turn ${tag}] query failed`, err);
+      reply = "Sorry — I hit an error processing that. Try again in a moment.";
+    }
+  }
+
+  if (usageLimited) {
+    if (opts.kind === "proactive") {
+      // Background turn: log it (deduped) and stay silent.
+      logSuppressedUsageLimit("proactive-turn", reply);
+      reply = "";
+    } else {
+      log(`model spend/usage limit hit: ${JSON.stringify(reply.slice(0, 200))}`);
+      reply = USAGE_LIMIT_DIRECT_REPLY;
+    }
   }
 
   // Sometimes the model produces a placeholder string like "(no output)" or
@@ -715,7 +745,7 @@ export async function handleUserMessageWithAttachments(
   // output` or `no output)` with one stray paren from sneaking through.
   const placeholder =
     /^(?:\(\s*no (?:output|reply|response|content)\s*\)|no (?:output|reply|response|content))\.?$/i;
-  if (!reply || placeholder.test(reply)) {
+  if (!usageLimited && (!reply || placeholder.test(reply))) {
     console.warn(`[turn ${tag}] empty/placeholder reply (${JSON.stringify(reply)}) — using fallback`);
     // Frame as model-side hiccup, not user error — the placeholder fires
     // when the model loses the thread mid-tool-call, the user's phrasing
@@ -743,6 +773,10 @@ export async function handleUserMessageWithAttachments(
     });
   }
 
+  if (usageLimited && !reply) {
+    return { reply, attachments: [], usageLimited };
+  }
+
   broadcast("assistant_message", { conversationId: opts.conversationId, content: reply });
 
   if (opts.persistAssistantReply) {
@@ -761,7 +795,7 @@ export async function handleUserMessageWithAttachments(
   // facts ("Alice asked about Q4 report") as user preferences/memory — the
   // same store the classifier reads on the next event, creating a feedback
   // loop where surfaced emails reshape future classification.
-  if (opts.kind !== "proactive") {
+  if (opts.kind !== "proactive" && !usageLimited) {
     extractAndStore({
       conversationId: opts.conversationId,
       userMessage: opts.content,
@@ -773,5 +807,9 @@ export async function handleUserMessageWithAttachments(
   }
 
   // Don't send images under an error reply that can't describe them.
-  return { reply, attachments: turnFailed ? [] : turnAttachments.list };
+  return {
+    reply,
+    attachments: turnFailed ? [] : turnAttachments.list,
+    ...(usageLimited ? { usageLimited } : {}),
+  };
 }

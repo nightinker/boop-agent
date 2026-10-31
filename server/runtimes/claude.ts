@@ -83,6 +83,7 @@ export async function runClaudeAgent(request: RuntimeRunRequest): Promise<Runtim
 
   let text = "";
   let lastAssistantText = "";
+  let errorCode: string | undefined;
   let usage = { ...EMPTY_USAGE, model: request.model };
   const stderrTail: string[] = [];
   // The Claude account the owner picked (set_claude_account) is read per
@@ -112,6 +113,7 @@ export async function runClaudeAgent(request: RuntimeRunRequest): Promise<Runtim
     },
   })) {
     if (msg.type === "assistant") {
+      if (msg.error) errorCode = msg.error;
       let assistantText = "";
       for (const block of msg.message.content) {
         if (block.type === "text") {
@@ -145,5 +147,5 @@ export async function runClaudeAgent(request: RuntimeRunRequest): Promise<Runtim
     throw withClaudeStderr(err, stderrTail);
   }
 
-  return { text: lastAssistantText || text, usage };
+  return { text: lastAssistantText || text, usage, ...(errorCode ? { errorCode } : {}) };
 }
