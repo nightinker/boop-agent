@@ -8,6 +8,13 @@ Format:
 
 ---
 
+## Unreleased — Linux VPS deployment
+
+- Added: [docs/DEPLOY-VPS.md](docs/DEPLOY-VPS.md), a guide to running Boop headless on an Ubuntu server (Node install, env vars, one-time Claude login or API key, Convex, Caddy/nginx with TLS, Sendblue webhook, systemd service with automatic restart, updating, troubleshooting).
+- Added: `scripts/vps-setup.sh`, which automates the server setup on a fresh Ubuntu droplet (Node.js 22, swap, `boop` user, `npm ci --omit=dev`, Claude Code CLI, `.env.local` with `PUBLIC_URL`, Caddy or nginx+certbot exposing only Boop's public routes, ufw, and the `boop` systemd unit).
+- Added: optional `Dockerfile` and `docker-compose.yml` (port bound to localhost, volumes for the Claude login and model cache).
+- Changed: Apple data and local browser use are now macOS-only. On other platforms the `apple` and `browser` integrations are not registered, their settings read as off even if enabled from a Mac through shared Convex settings, their `/apple/*` and `/browser/*` actions answer 409 (status reports `supported: false`), the dashboard hides their settings and connection cards, and the dispatcher is told not to suggest enabling them.
+
 ## Unreleased — Sending images over iMessage
 
 - Added: sub-agents can attach images to Boop's iMessage reply with a new `attach_image` tool (`boop-attachments`), passing an absolute local file path or an http(s) URL. Images are delivered as real iMessage attachments after the reply text, via Sendblue's `upload-file` endpoint and a `media_url` send. Supported: png, jpg/jpeg, gif, heic; max 5 MB each and 5 per reply. Files are checked by their contents (magic bytes), not just the extension; private-network URLs are refused.

@@ -173,6 +173,10 @@ Boop synchronizes the signed Sendblue webhook on every boot, whether the public 
 
 Text your Sendblue-provisioned number from a **different** phone. The agent replies.
 
+### Running on a Linux server (VPS)
+
+Boop can also run headless on an Ubuntu server (2 GB+ RAM) as a systemd service behind Caddy or nginx with TLS, so it stays up when your Mac is asleep. `sudo bash scripts/vps-setup.sh --domain boop.example.com` automates most of it; [docs/DEPLOY-VPS.md](docs/DEPLOY-VPS.md) covers every step, Docker, and what changes on a server: Apple data and local browser use are Mac-only and switch themselves off, while iMessage chat via Sendblue, memory, automations and Composio integrations keep working. Run only one Boop against the Sendblue webhook at a time, or replies and automations happen twice.
+
 ### Native App
 
 <p align="center">
@@ -445,7 +449,7 @@ Everything lives in `.env.local` (auto-created by `npm run setup`). See `.env.ex
 
 ## Local browser use
 
-Local browser use is for cases where a normal API integration or web fetch is the wrong tool: login-required portals, visual browser workflows, JavaScript-heavy apps, or services that may detect bot-like automation. It is deliberately opt-in.
+Local browser use is for cases where a normal API integration or web fetch is the wrong tool: login-required portals, visual browser workflows, JavaScript-heavy apps, or services that may detect bot-like automation. It is deliberately opt-in, and only offered when Boop runs on macOS (on a Linux server it is hidden and stays off).
 
 How it works:
 

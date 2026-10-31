@@ -1,8 +1,15 @@
 import { createAppleMcp, createAppleTools } from "../apple/tools.js";
 import { getAppleSettings } from "../runtime-config.js";
+import { isAppleDataSupported } from "../platform-support.js";
 import { registerIntegration } from "./registry.js";
 
-export function registerAppleIntegration(): void {
+export function registerAppleIntegration(
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  if (!isAppleDataSupported(platform)) {
+    console.log(`[apple] skipped Apple data integration (macOS only; running on ${platform})`);
+    return false;
+  }
   registerIntegration({
     name: "apple",
     description:
@@ -12,4 +19,5 @@ export function registerAppleIntegration(): void {
     createTools: async () => createAppleTools(),
   });
   console.log("[apple] registered Apple data integration");
+  return true;
 }

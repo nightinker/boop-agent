@@ -22,6 +22,8 @@ interface AppleBridgeStatus {
 }
 
 interface AppleStatus {
+  /** False when the server is not on macOS (e.g. a Linux VPS). */
+  supported?: boolean;
   enabled: boolean;
   messagesEnabled: boolean;
   notesEnabled: boolean;
@@ -165,7 +167,8 @@ export function AppleSection({ isDark }: { isDark: boolean }) {
   const notesPermission = bridge?.permissions?.notes ?? "notDetermined";
   const remindersPermission = bridge?.permissions?.reminders ?? "notDetermined";
   const showAppleSection =
-    !loaded || bridge?.source === "local-server" || bridge?.source === "desktop-bridge";
+    status?.supported !== false &&
+    (!loaded || bridge?.source === "local-server" || bridge?.source === "desktop-bridge");
 
   if (!showAppleSection) return null;
 

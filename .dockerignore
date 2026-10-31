@@ -1,0 +1,14 @@
+.git
+.claude
+node_modules
+.env
+.env.local
+.env.*
+!.env.example
+.convex
+data
+debug/dist
+dist
+build
+*.log
+.DS_Store
