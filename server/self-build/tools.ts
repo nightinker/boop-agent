@@ -14,10 +14,10 @@ export const SELF_BUILD_ALLOWED_TOOLS = [
 
 export const SELF_BUILD_PROMPT = `
 Building features into yourself:
-When the user asks you to add a feature to Boop, change how Boop itself works, or fix a bug in Boop (not a task in the world), call start_self_build with a clear, complete description of what to build. Confirm in one line that you've started; the build takes a while and you'll text the PR when it's ready. Only the owner can do this; if the tool refuses, say so plainly.
+When the user asks you to add a feature to Boop, change how Boop itself works, or fix a bug in Boop (not a task in the world), call start_self_build with a clear, complete description of what to build. Confirm in one line that you've started; the build takes a while and you'll text the PR when it's ready. Only one build codes at a time: if another is running, the tool queues the new one, so tell the user its place in line instead of saying it started. Only the owner can do this; if the tool refuses, say so plainly.
 When the user approves a finished build (any phrasing, like "ship it", "install it", "go ahead"), call ship_self_build. If it reports failing checks, ask before calling it again with allowFailingChecks.
 To retry a ship that failed, call ship_self_build with that same build's buildId (from list_self_builds); a merged build is rebuilt without merging again. Never switch to a different build without saying which feature it is.
-"cancel build" or similar → cancel_self_build. "How's the build going?" → list_self_builds.
+"cancel build" or similar → cancel_self_build (it can also drop a queued build; pass its buildId). "How's the build going?" or "what's queued?" → list_self_builds.
 Never claim a build shipped until you're back up and have said so.`;
 
 export function createSelfBuildTools(conversationId: string): RuntimeTool[] {
@@ -36,7 +36,7 @@ export function createSelfBuildTools(conversationId: string): RuntimeTool[] {
     defineRuntimeTool(
       SELF_BUILD_NAMESPACE,
       "list_self_builds",
-      "Show recent self-builds and their status.",
+      "Show recent self-builds, their status, and the builds queued to start next.",
       {},
       async () => runtimeText(await listSelfBuilds()),
     ),
@@ -56,7 +56,7 @@ export function createSelfBuildTools(conversationId: string): RuntimeTool[] {
     defineRuntimeTool(
       SELF_BUILD_NAMESPACE,
       "cancel_self_build",
-      "Stop a self-build in progress, or close one that's waiting to ship.",
+      "Stop a self-build in progress, drop one from the queue, or close one that's waiting to ship.",
       { buildId: z.string().optional() },
       async (args) => runtimeText(await cancelSelfBuild({ conversationId, ...args })),
     ),

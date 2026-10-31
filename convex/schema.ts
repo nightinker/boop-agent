@@ -187,6 +187,33 @@ export default defineSchema({
     claimedAt: v.number(),
   }).index("by_handle", ["handle"]),
 
+  // Every inbound iMessage, saved before Boop answers it. Each conversation's
+  // texts are handled one at a time, oldest first. Rows come from the Sendblue
+  // webhook or from the poller that catches texts the webhook never delivered.
+  inboundMessages: defineTable({
+    handle: v.string(),
+    conversationId: v.string(),
+    fromNumber: v.string(),
+    content: v.string(),
+    mediaUrls: v.array(v.string()),
+    source: v.union(v.literal("webhook"), v.literal("poll")),
+    status: v.union(
+      v.literal("queued"),
+      v.literal("processing"),
+      v.literal("done"),
+      v.literal("failed"),
+    ),
+    attempts: v.number(),
+    error: v.optional(v.string()),
+    receivedAt: v.number(),
+    enqueuedAt: v.number(),
+    startedAt: v.optional(v.number()),
+    finishedAt: v.optional(v.number()),
+  })
+    .index("by_handle", ["handle"])
+    .index("by_status_and_enqueuedAt", ["status", "enqueuedAt"])
+    .index("by_conversationId_and_status_and_enqueuedAt", ["conversationId", "status", "enqueuedAt"]),
+
   drafts: defineTable({
     draftId: v.string(),
     conversationId: v.string(),
@@ -348,6 +375,7 @@ export default defineSchema({
     conversationId: v.string(),
     request: v.string(),
     status: v.union(
+      v.literal("queued"),
       v.literal("coding"),
       v.literal("testing"),
       v.literal("pr_open"),
@@ -369,5 +397,6 @@ export default defineSchema({
     updatedAt: v.number(),
   })
     .index("by_buildId", ["buildId"])
-    .index("by_createdAt", ["createdAt"]),
+    .index("by_createdAt", ["createdAt"])
+    .index("by_status_and_createdAt", ["status", "createdAt"]),
 });
