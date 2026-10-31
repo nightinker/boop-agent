@@ -20,6 +20,7 @@ import {
   restartScript,
   tail,
 } from "./plan.js";
+import { CANCELLABLE, formatBuildList, queuedMessage, shipBlocker } from "./queue.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -149,11 +150,6 @@ async function setStatus(
   await convex.mutation(api.selfBuilds.update, { buildId, ...patch });
 }
 
-async function activeBuild() {
-  const recent = await convex.query(api.selfBuilds.recent, { limit: 10 });
-  return recent.find((b) => ["coding", "testing", "shipping", "restarting"].includes(b.status)) ?? null;
-}
-
 function refuseUnlessOwner(conversationId: string): string | null {
   if (isOwnerConversation(conversationId, process.env.BOOP_OWNER_NUMBERS)) return null;
   return "Only Boop's owner can change Boop's code. Add your number to BOOP_OWNER_NUMBERS in .env.local to allow it.";
@@ -164,22 +160,45 @@ export async function startSelfBuild(input: { conversationId: string; request: s
   if (refused) return refused;
   const src = sourceDir();
   if (!src) return "Self-build isn't set up: set BOOP_SOURCE_DIR in .env.local to Boop's git checkout.";
-  const busy = await activeBuild();
-  if (busy) return `Build ${busy.buildId} is still ${busy.status}. Wait for it, or say "cancel build".`;
-
   const buildId = newBuildId();
-  await convex.mutation(api.selfBuilds.create, {
+  const slot = await convex.mutation(api.selfBuilds.enqueue, {
     buildId,
     conversationId: input.conversationId,
     request: input.request,
   });
-  void runBuild({ ...input, buildId, src }).catch(async (err) => {
-    const message = err instanceof Error ? err.message : String(err);
-    console.error(`[self-build ${buildId}] failed`, err);
-    await setStatus(buildId, { status: "failed", error: message.slice(0, 4000) }).catch(() => undefined);
-    await notify(input.conversationId, `Build ${buildId} failed: ${message.split("\n")[0]}`);
-  });
+  if (slot.status === "queued") {
+    return queuedMessage({ buildId, position: slot.position, blockedBy: slot.blockedBy });
+  }
+  launchBuild({ ...input, buildId, src });
   return `Started build ${buildId}. I'm coding it on its own branch and will text you the PR when it's ready (usually 5–30 minutes).`;
+}
+
+/** Runs a build in the background, then starts the next queued one. */
+function launchBuild(input: { conversationId: string; request: string; buildId: string; src: string }): void {
+  const { buildId } = input;
+  void runBuild(input)
+    .catch(async (err) => {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[self-build ${buildId}] failed`, err);
+      await setStatus(buildId, { status: "failed", error: message.slice(0, 4000) }).catch(() => undefined);
+      await notify(input.conversationId, `Build ${buildId} failed: ${message.split("\n")[0]}`);
+    })
+    .finally(() => void startNextQueuedBuild());
+}
+
+/** Starts the oldest queued build, if nothing else is building. */
+export async function startNextQueuedBuild(): Promise<void> {
+  const src = sourceDir();
+  if (!src) return;
+  try {
+    const next = await convex.mutation(api.selfBuilds.claimNextQueued, {});
+    if (!next) return;
+    console.log(`[self-build ${next.buildId}] starting from the queue`);
+    await notify(next.conversationId, `Starting queued build ${next.buildId}: ${next.request.slice(0, 120)}`);
+    launchBuild({ ...next, src });
+  } catch (err) {
+    console.error("[self-build] couldn't start the next queued build", err);
+  }
 }
 
 async function runBuild(input: {
@@ -199,6 +218,8 @@ async function runBuild(input: {
     await symlink(join(src, "node_modules"), join(worktree, "node_modules"), "dir");
   }
   await refreshGeneratedTypes(worktree, src);
+  // Cancelled while its worktree was being set up: don't bring it back.
+  if ((await convex.query(api.selfBuilds.get, { buildId }))?.status === "cancelled") return;
   await setStatus(buildId, { status: "coding", branch, worktreePath: worktree });
 
   const abort = new AbortController();
@@ -296,13 +317,16 @@ export async function cancelSelfBuild(input: { conversationId: string; buildId?:
   if (refused) return refused;
   const recent = await convex.query(api.selfBuilds.recent, { limit: 10 });
   const build = input.buildId
-    ? recent.find((b) => b.buildId === input.buildId)
-    : recent.find((b) => ["coding", "testing", "pr_open"].includes(b.status));
+    ? (recent.find((b) => b.buildId === input.buildId) ??
+      (await convex.query(api.selfBuilds.get, { buildId: input.buildId })))
+    : (recent.find((b) => ["coding", "testing", "pr_open"].includes(b.status)) ??
+      recent.find((b) => b.status === "queued"));
   if (!build) return "There's no build to cancel.";
-  if (!["coding", "testing", "pr_open"].includes(build.status)) {
+  if (!CANCELLABLE.includes(build.status)) {
     return `Build ${build.buildId} is ${build.status} and can't be cancelled now.`;
   }
   await setStatus(build.buildId, { status: "cancelled" });
+  if (build.status === "queued") return `Removed build ${build.buildId} from the queue.`;
   running.get(build.buildId)?.abort();
   if (build.prUrl) {
     const repo = parseGitHubRepo(build.prUrl.replace(/\/pull\/\d+$/, ""));
@@ -312,14 +336,11 @@ export async function cancelSelfBuild(input: { conversationId: string; buildId?:
 }
 
 export async function listSelfBuilds(): Promise<string> {
-  const recent = await convex.query(api.selfBuilds.recent, { limit: 5 });
-  if (recent.length === 0) return "No self-builds yet.";
-  return recent
-    .map(
-      (b) =>
-        `${b.buildId} · ${b.status}${b.testsPassed === false ? " (checks failing)" : ""} · ${b.request.slice(0, 80)}${b.prUrl ? ` · ${b.prUrl}` : ""}`,
-    )
-    .join("\n");
+  const [recent, queued] = await Promise.all([
+    convex.query(api.selfBuilds.recent, { limit: 5 }),
+    convex.query(api.selfBuilds.queued, {}),
+  ]);
+  return formatBuildList(recent, queued);
 }
 
 export async function shipSelfBuild(input: {
@@ -347,6 +368,8 @@ export async function shipSelfBuild(input: {
   if (!merged && !build.testsPassed && !input.allowFailingChecks) {
     return `Build ${build.buildId} has failing checks. Ask the owner to confirm shipping it anyway before calling this again with allowFailingChecks.`;
   }
+  const blocker = shipBlocker(recent, build.buildId, process.env.BOOP_DESKTOP === "1");
+  if (blocker) return blocker;
   await setStatus(build.buildId, { status: "shipping" });
   void shipBuild({ build: { buildId: build.buildId, prUrl: build.prUrl }, conversationId: build.conversationId, src }).catch(
     async (err) => {
@@ -354,6 +377,7 @@ export async function shipSelfBuild(input: {
       console.error(`[self-build ${build.buildId}] ship failed`, err);
       await setStatus(build.buildId, { status: "failed", error: message.slice(0, 4000) }).catch(() => undefined);
       await notify(build.conversationId, `Shipping build ${build.buildId} failed: ${message.split("\n")[0]}`);
+      await startNextQueuedBuild();
     },
   );
   return `Shipping build ${build.buildId}: merging, rebuilding and restarting. I'll be offline for a minute or two and text you when I'm back.`;
@@ -379,6 +403,7 @@ async function shipBuild(input: {
   if (process.env.BOOP_DESKTOP !== "1") {
     await setStatus(buildId, { status: "shipped" });
     await notify(input.conversationId, `Merged build ${buildId}. Restart Boop to load it.`);
+    await startNextQueuedBuild();
     return;
   }
 
@@ -426,6 +451,45 @@ async function shipBuild(input: {
     env: realNodeEnv(),
   });
   child.unref();
+}
+
+const RESTART_RESULT_WAIT_MS = 3 * 60_000;
+
+/**
+ * On startup: report how a ship-and-restart went, mark builds the restart cut
+ * off as failed (so they stop blocking the queue), then start the next queued
+ * build.
+ */
+export async function resumeSelfBuilds(): Promise<void> {
+  try {
+    const recent = await convex.query(api.selfBuilds.recent, { limit: 10 });
+    // The restart script writes its result only after this server answers
+    // its health check, so wait for it rather than treating it as stuck.
+    if (recent.some((b) => b.status === "restarting")) await waitForRestartResult();
+    await reportPendingRestart();
+
+    const interrupted = await convex.mutation(api.selfBuilds.failInterrupted, {});
+    for (const build of interrupted) {
+      console.warn(`[self-build ${build.buildId}] interrupted while ${build.status}`);
+      await notify(
+        build.conversationId,
+        build.status === "restarting"
+          ? `I couldn't tell whether build ${build.buildId} started after the restart. Its code is merged; ask me to check which version is running.`
+          : `Build ${build.buildId} stopped because I restarted while it was ${build.status}. Ask me to start it again if you still want it: ${build.request.slice(0, 120)}`,
+      );
+    }
+  } catch (err) {
+    console.error("[self-build] couldn't resume after restart", err);
+  }
+  await startNextQueuedBuild();
+}
+
+async function waitForRestartResult(): Promise<void> {
+  const resultPath = join(stateDir(), "pending-result.json");
+  const deadline = Date.now() + RESTART_RESULT_WAIT_MS;
+  while (!existsSync(resultPath) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 5_000));
+  }
 }
 
 /** After a restart, report how the swap went (the old process can't). */

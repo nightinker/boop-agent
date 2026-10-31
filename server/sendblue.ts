@@ -8,23 +8,13 @@ import type { OutboundImage } from "./images/outbound.js";
 import { redactContactHandle, redactPhoneNumbers } from "./privacy.js";
 import { maybeHandleScriptedDemoReply } from "./scripted-demo-replies.js";
 import { verifySendblueWebhookSecret } from "./sendblue-webhook-auth.js";
+import { createInboundQueue, inboundFromSendblue, type InboundItem } from "./inbound-queue.js";
+import { convexInboundStore } from "./inbound-store.js";
 
 const API_BASE = "https://api.sendblue.com/api";
 const MAX_CHUNK = 2900;
 
-export function extractSendblueMediaUrls(
-  mediaUrl: unknown,
-  mediaUrls: unknown,
-): string[] {
-  const urls = new Set<string>();
-  if (Array.isArray(mediaUrls)) {
-    for (const value of mediaUrls) {
-      if (typeof value === "string" && value.trim()) urls.add(value.trim());
-    }
-  }
-  if (typeof mediaUrl === "string" && mediaUrl.trim()) urls.add(mediaUrl.trim());
-  return [...urls];
-}
+export { extractSendblueMediaUrls } from "./inbound-queue.js";
 
 function stripMarkdown(text: string): string {
   return text
@@ -349,6 +339,85 @@ export async function ingestSendblueImage(
   }
 }
 
+/** Answers one queued text: the same work the webhook used to do inline. */
+export async function processInboundText(item: InboundItem): Promise<void> {
+  const { conversationId, fromNumber: from_number, handle } = item;
+  const ingestResults = await Promise.all(item.mediaUrls.map(ingestSendblueImage));
+  const ingested: IngestedImage[] = [];
+  const ingestErrors: string[] = [];
+  for (const r of ingestResults) {
+    if (r.ok) ingested.push(r.image);
+    else ingestErrors.push(r.reason);
+  }
+
+  const turnTag = Math.random().toString(36).slice(2, 8);
+  const textForLog = item.content;
+  const safeTextForLog = redactPhoneNumbers(textForLog);
+  const preview = safeTextForLog.length > 100 ? safeTextForLog.slice(0, 100) + "…" : safeTextForLog;
+  const via = item.source === "poll" ? " (caught by poll)" : "";
+  console.log(`[turn ${turnTag}] ← ${redactContactHandle(from_number)}${via}: ${JSON.stringify(preview)}`);
+  const start = Date.now();
+
+  broadcast("message_in", { conversationId, content: item.content, from_number, handle });
+
+  if (
+    await maybeHandleScriptedDemoReply(
+      {
+        conversationId,
+        content: textForLog,
+        fromNumber: from_number,
+        turnTag,
+      },
+      {
+        sendImessage: async (to, text) => {
+          await sendImessage(to, text);
+        },
+        sendTypingIndicator,
+      },
+    )
+  ) {
+    return;
+  }
+
+  const stopTyping = startTypingLoop(from_number);
+  try {
+    const { reply, attachments } = await handleUserMessageWithAttachments({
+      conversationId,
+      content: textForLog,
+      turnTag,
+      images: ingested,
+      mediaError: ingestErrors.length > 0 ? ingestErrors.join("; ") : undefined,
+      onThinking: (t) => broadcast("thinking", { conversationId, t }),
+    });
+    if (reply) {
+      const elapsed = ((Date.now() - start) / 1000).toFixed(1);
+      const safeReplyPreview = redactPhoneNumbers(reply);
+      const replyPreview = safeReplyPreview.length > 100 ? safeReplyPreview.slice(0, 100) + "…" : safeReplyPreview;
+      console.log(
+        `[turn ${turnTag}] → reply (${elapsed}s, ${reply.length} chars): ${JSON.stringify(replyPreview)}`,
+      );
+      const sent = await sendImessage(from_number, reply, attachments);
+      await convex.mutation(api.messages.send, {
+        conversationId,
+        role: "assistant",
+        content: withAttachmentNote(reply, sent),
+      });
+    } else {
+      console.log(`[turn ${turnTag}] → (no reply)`);
+    }
+  } catch (err) {
+    console.error(`[turn ${turnTag}] handler error`, err);
+    throw err;
+  } finally {
+    stopTyping();
+  }
+}
+
+export const inboundQueue = createInboundQueue({
+  store: convexInboundStore,
+  process: processInboundText,
+});
+
 export function createSendblueRouter(): express.Router {
   const router = express.Router();
 
@@ -358,92 +427,21 @@ export function createSendblueRouter(): express.Router {
       return;
     }
 
-    const { content, from_number, is_outbound, message_handle, media_url, media_urls } =
-      req.body ?? {};
-    const rawUrls = extractSendblueMediaUrls(media_url, media_urls);
-    if (is_outbound || !from_number || (!content && rawUrls.length === 0)) {
+    const input = inboundFromSendblue(req.body, "webhook");
+    if (!input) {
       res.json({ ok: true, skipped: true });
       return;
     }
 
-    if (message_handle) {
-      const { claimed } = await convex.mutation(api.sendblueDedup.claim, {
-        handle: message_handle,
-      });
-      if (!claimed) {
-        res.json({ ok: true, deduped: true });
-        return;
-      }
-    }
-
-    const ingestResults = await Promise.all(rawUrls.map(ingestSendblueImage));
-    const ingested: IngestedImage[] = [];
-    const ingestErrors: string[] = [];
-    for (const r of ingestResults) {
-      if (r.ok) ingested.push(r.image);
-      else ingestErrors.push(r.reason);
-    }
-
-    const conversationId = `sms:${from_number}`;
-    const turnTag = Math.random().toString(36).slice(2, 8);
-    const textForLog = typeof content === "string" ? content : "";
-    const safeTextForLog = redactPhoneNumbers(textForLog);
-    const preview = safeTextForLog.length > 100 ? safeTextForLog.slice(0, 100) + "…" : safeTextForLog;
-    console.log(`[turn ${turnTag}] ← ${redactContactHandle(from_number)}: ${JSON.stringify(preview)}`);
-    const start = Date.now();
-
-    broadcast("message_in", { conversationId, content, from_number, handle: message_handle });
-    res.json({ ok: true });
-
-    if (
-      await maybeHandleScriptedDemoReply(
-        {
-          conversationId,
-          content: textForLog,
-          fromNumber: from_number,
-          turnTag,
-        },
-        {
-          sendImessage: async (to, text) => {
-            await sendImessage(to, text);
-          },
-          sendTypingIndicator,
-        },
-      )
-    ) {
-      return;
-    }
-
-    const stopTyping = startTypingLoop(from_number);
+    // Saved before we answer 200, so a crash after this point can't lose the
+    // text. If saving fails, a 500 makes Sendblue retry and the poller is the
+    // backstop.
     try {
-      const { reply, attachments } = await handleUserMessageWithAttachments({
-        conversationId,
-        content: textForLog,
-        turnTag,
-        images: ingested,
-        mediaError: ingestErrors.length > 0 ? ingestErrors.join("; ") : undefined,
-        onThinking: (t) => broadcast("thinking", { conversationId, t }),
-      });
-      if (reply) {
-        const elapsed = ((Date.now() - start) / 1000).toFixed(1);
-        const safeReplyPreview = redactPhoneNumbers(reply);
-        const replyPreview = safeReplyPreview.length > 100 ? safeReplyPreview.slice(0, 100) + "…" : safeReplyPreview;
-        console.log(
-          `[turn ${turnTag}] → reply (${elapsed}s, ${reply.length} chars): ${JSON.stringify(replyPreview)}`,
-        );
-        const sent = await sendImessage(from_number, reply, attachments);
-        await convex.mutation(api.messages.send, {
-          conversationId,
-          role: "assistant",
-          content: withAttachmentNote(reply, sent),
-        });
-      } else {
-        console.log(`[turn ${turnTag}] → (no reply)`);
-      }
+      const enqueued = await inboundQueue.enqueue(input);
+      res.json(enqueued ? { ok: true } : { ok: true, deduped: true });
     } catch (err) {
-      console.error(`[turn ${turnTag}] handler error`, err);
-    } finally {
-      stopTyping();
+      console.error("[sendblue] couldn't queue inbound text", err);
+      res.status(500).json({ error: "couldn't queue message" });
     }
   });
 

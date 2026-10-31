@@ -4,7 +4,8 @@ import cors from "cors";
 import { createServer } from "node:http";
 import { WebSocketServer } from "ws";
 import { addClient } from "./broadcast.js";
-import { createSendblueRouter } from "./sendblue.js";
+import { createSendblueRouter, inboundQueue } from "./sendblue.js";
+import { startSendbluePoller } from "./sendblue-poller.js";
 import { handleUserMessage } from "./interaction-agent.js";
 import { loadIntegrations } from "./integrations/registry.js";
 import { startCleanupLoop } from "./memory/clean.js";
@@ -33,7 +34,7 @@ import {
 } from "./runtime-config.js";
 import { startImageCleanup } from "./images/clean.js";
 import { isPublicServerRequest, isTrustedLocalRequest } from "./local-access.js";
-import { reportPendingRestart } from "./self-build/run.js";
+import { resumeSelfBuilds } from "./self-build/run.js";
 import {
   checkCswapLogin,
   getClaudeAccount,
@@ -267,7 +268,16 @@ async function main() {
   const port = Number(process.env.PORT ?? 3456);
   server.listen(port, () => {
     console.log(`boop-agent server listening on :${port}`);
-    setTimeout(() => void reportPendingRestart(), 5_000);
+    setTimeout(() => void resumeSelfBuilds(), 5_000);
+    // Answer texts a crash or restart cut off, then keep checking Sendblue
+    // for texts its webhook never delivered.
+    inboundQueue
+      .recover()
+      .then(({ requeued, failed }) => {
+        if (requeued || failed) console.log(`[inbound] after restart: ${requeued} requeued, ${failed} given up`);
+      })
+      .catch((err) => console.error("[inbound] recovery failed", err))
+      .finally(() => startSendbluePoller(inboundQueue));
     console.log(`  health      GET  http://localhost:${port}/health`);
     console.log(`  chat        POST http://localhost:${port}/chat`);
     console.log(`  sendblue    POST http://localhost:${port}/sendblue/webhook`);
