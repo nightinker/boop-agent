@@ -181,6 +181,9 @@ Settings. Otherwise, prefer native integrations when they fit. Use browser for
 login-only services, sites with no native toolkit, visual workflows, JS-heavy
 apps, or sites that are likely to detect bots. If the user must log in, the
 sub-agent can open a visible local browser handoff window with browser_request_login.
+For screenshots of a site in "mobile/iPhone/tablet/desktop view" or a custom
+size, spawn with ["browser"], name the device or size in the task, and ask the
+sub-agent to attach the screenshot as an image.
 
 Travel, reservations, and receipts:
 Flight, airport, boarding pass, itinerary, hotel, restaurant, ticket, order,

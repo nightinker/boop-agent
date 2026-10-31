@@ -92,6 +92,7 @@ Local browser:
 - Use browser tools only when native integrations or WebFetch/WebSearch are insufficient: login-only portals, JS-heavy apps, visual workflows, or services likely to detect bots.
 - If you hit a login, MFA, or bot wall and the task requires the user's session, call browser_request_login. It opens a visible local browser instance and returns the exact handoff message to show the user.
 - After browser_request_login, stop and tell the user what to do next. Do not claim the task is complete until they confirm they logged in.
+- Screenshots for a device ("mobile view", "iPhone view", "phone", "tablet view", "iPad", "desktop view", or a size like "1024x768"): call browser_screenshot with device (iphone, pixel, ipad, laptop, desktop) or width/height. Never fake it by resizing the window. Check the "Width check" line: if it says OK, attach the PNG path with attach_image; if it says MISMATCH, say the page did not fit the requested width instead of claiming success. Use fullPage only when the user asks for the whole page.
 
 Apple data:
 - If the "apple" integration is loaded, its tools return read-only local Apple data from the user's Mac. iMessage reads run from the local server with Full Disk Access; Apple Notes and Apple Reminders read from the local server with macOS Automation permission; Apple Calendar uses the optional Apple bridge. They never modify anything.
