@@ -20,6 +20,7 @@ import {
   prBody,
   readyMessage,
   restartScript,
+  catchUpMessage,
   ROLLBACK_LOG_LINES,
   rollbackMessage,
   startupLogName,
@@ -98,6 +99,51 @@ export function sourceDir(): string | null {
 
 function stateDir(): string {
   return join(homedir(), "Library", "Application Support", "Boop", "self-build");
+}
+
+/**
+ * Which commit the Mac app runs. Saved when an install starts (installing)
+ * and confirmed when the restarted app reports in (installed), so the Mac can
+ * tell, when it comes back online, whether main moved on while it was off.
+ */
+interface Installing {
+  id: string;
+  commit: string;
+  conversationId: string | null;
+}
+
+async function writeInstalling(info: Installing): Promise<void> {
+  await mkdir(stateDir(), { recursive: true });
+  await writeFile(join(stateDir(), "installing.json"), JSON.stringify(info));
+}
+
+async function readInstalling(): Promise<Installing | null> {
+  try {
+    return JSON.parse(await readFile(join(stateDir(), "installing.json"), "utf8")) as Installing;
+  } catch {
+    return null;
+  }
+}
+
+export async function writeInstalledCommit(commit: string): Promise<void> {
+  await mkdir(stateDir(), { recursive: true });
+  await writeFile(join(stateDir(), "installed.json"), JSON.stringify({ commit, at: new Date().toISOString() }));
+}
+
+async function readInstalledCommit(): Promise<string | null> {
+  try {
+    const { commit } = JSON.parse(await readFile(join(stateDir(), "installed.json"), "utf8")) as { commit?: string };
+    return commit ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** The owner's iMessage conversation, for notices nobody asked for. */
+function ownerConversation(): string | null {
+  const first = (process.env.BOOP_OWNER_NUMBERS ?? "").split(",")[0]?.replace(/[^\d+]/g, "");
+  if (!first) return null;
+  return `sms:${first.startsWith("+") ? first : `+${first}`}`;
 }
 
 function currentAppPath(): string {
@@ -434,6 +480,31 @@ async function shipBuild(input: {
     return;
   }
 
+  await buildAndRestart({
+    id: buildId,
+    src: input.src,
+    healthTimeoutSec: input.healthTimeoutSec,
+    conversationId: input.conversationId,
+    beforeRestart: async () => {
+      await setStatus(buildId, { status: "restarting" });
+      await notify(input.conversationId, `Build ${buildId} is merged and built. Restarting now, back in a minute.`);
+    },
+  });
+}
+
+/**
+ * Builds the Mac app from origin/main and swaps it in with a detached restart
+ * script (which rolls back if the new app doesn't come up). Shared by "ship
+ * it" and by catching up on builds merged while the Mac was off.
+ */
+async function buildAndRestart(input: {
+  id: string;
+  src: string;
+  healthTimeoutSec: number;
+  conversationId: string | null;
+  beforeRestart: () => Promise<void>;
+}): Promise<void> {
+  const buildId = input.id;
   const release = join(input.src, ".claude", "worktrees", `self-build-release-${buildId}`);
   await must("git", ["fetch", "origin", "main"], { cwd: input.src });
   if (existsSync(release)) {
@@ -472,8 +543,9 @@ async function shipBuild(input: {
     }),
   );
   await chmod(script, 0o755);
-  await setStatus(buildId, { status: "restarting" });
-  await notify(input.conversationId, `Build ${buildId} is merged and built. Restarting now, back in a minute.`);
+  const commit = (await must("git", ["rev-parse", "HEAD"], { cwd: release })).trim();
+  await writeInstalling({ id: buildId, commit, conversationId: input.conversationId });
+  await input.beforeRestart();
   // `open` hands its environment to the app it launches, so ELECTRON_RUN_AS_NODE
   // must not reach the helper or the relaunched Boop starts as plain Node and exits.
   const child = spawn("/bin/bash", [script], {
@@ -492,7 +564,7 @@ const RESTART_RESULT_WAIT_MS = 3 * 60_000;
  * off as failed (so they stop blocking the queue), then start the next queued
  * build.
  */
-export async function resumeSelfBuilds(): Promise<void> {
+export async function resumeSelfBuilds(opts: { startQueued?: boolean } = {}): Promise<void> {
   try {
     const recent = await convex.query(api.selfBuilds.recent, { limit: 10 });
     // The restart script writes its result only after this server answers
@@ -513,7 +585,59 @@ export async function resumeSelfBuilds(): Promise<void> {
   } catch (err) {
     console.error("[self-build] couldn't resume after restart", err);
   }
-  await startNextQueuedBuild();
+  if (opts.startQueued !== false) await startNextQueuedBuild();
+}
+
+let catchingUp = false;
+
+/**
+ * When the Mac comes back online: if main moved on while it was off (PRs
+ * merged on GitHub, builds shipped from elsewhere), build and install it, the
+ * same way "ship it" does. Returns true when an install started; the restart
+ * reports back and texts the owner.
+ */
+export async function installMissedUpdates(): Promise<boolean> {
+  if (catchingUp || process.env.BOOP_DESKTOP !== "1") return false;
+  const src = sourceDir();
+  if (!src) return false;
+  try {
+    const installed = await readInstalledCommit();
+    if (!installed) {
+      console.log("[self-build] no record of the installed version yet; skipping the catch-up check");
+      return false;
+    }
+    const recent = await convex.query(api.selfBuilds.recent, { limit: 10 });
+    if (recent.some((b) => ["coding", "testing", "shipping", "restarting"].includes(b.status))) return false;
+    await must("git", ["fetch", "origin", "main"], { cwd: src });
+    const target = (await must("git", ["rev-parse", "origin/main"], { cwd: src })).trim();
+    if (target === installed) return false;
+    // Only move forward: a local build ahead of main is left alone.
+    if (!(await sh("git", ["merge-base", "--is-ancestor", installed, target], { cwd: src })).ok) return false;
+    const subjects = (await must("git", ["log", "--first-parent", "--format=%s", `${installed}..${target}`], { cwd: src }))
+      .split("\n")
+      .filter(Boolean);
+    const conversationId = ownerConversation();
+    const id = `update-${target.slice(0, 7)}`;
+    catchingUp = true;
+    console.log(`[self-build] main moved ${installed.slice(0, 7)} → ${target.slice(0, 7)} while offline; installing`);
+    if (conversationId) await notify(conversationId, catchUpMessage(subjects));
+    void buildAndRestart({
+      id,
+      src,
+      healthTimeoutSec: healthTimeoutSeconds(),
+      conversationId,
+      beforeRestart: async () => undefined,
+    }).catch(async (err) => {
+      catchingUp = false;
+      const message = err instanceof Error ? err.message : String(err);
+      console.error("[self-build] catch-up install failed", err);
+      if (conversationId) await notify(conversationId, `Installing the latest main failed: ${message.split("\n")[0]}`);
+    });
+    return true;
+  } catch (err) {
+    console.warn("[self-build] catch-up check failed", err instanceof Error ? err.message : err);
+    return false;
+  }
 }
 
 async function waitForRestartResult(): Promise<void> {
@@ -558,8 +682,28 @@ export async function reportPendingRestart(): Promise<void> {
       healthTimeoutSec?: number;
     };
     await rename(resultPath, join(stateDir(), `reported-${result.buildId}.json`));
+    const installing = await readInstalling();
+    const ours = installing?.id === result.buildId ? installing : null;
+    if (ours && result.status === "shipped") await writeInstalledCommit(ours.commit);
     const build = await convex.query(api.selfBuilds.get, { buildId: result.buildId });
-    if (!build) return;
+    if (!build) {
+      // A catch-up install of builds merged while the Mac was off.
+      if (ours?.conversationId) {
+        const logPath = result.startupLog && existsSync(result.startupLog) ? result.startupLog : undefined;
+        await notify(
+          ours.conversationId,
+          result.status === "shipped"
+            ? `I'm back, running the latest main (${ours.commit.slice(0, 7)}).`
+            : rollbackMessage({
+                buildId: result.buildId,
+                logPath,
+                logTail: await readLogTail(logPath),
+                healthTimeoutSec: logPath ? result.healthTimeoutSec : undefined,
+              }),
+        );
+      }
+      return;
+    }
     if (result.status === "shipped") {
       await setStatus(result.buildId, { status: "shipped" });
       await notify(build.conversationId, `I'm back, running build ${result.buildId}: ${build.request.slice(0, 120)}`);

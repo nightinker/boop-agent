@@ -308,6 +308,11 @@ turns instead of doing the work twice:
 - Boop knows which copy it is: its prompt says where it runs, whether it's
   active and how the other copy is doing. Self-builds asked for on the server
   are queued; the Mac starts them when it's back. Shipping happens on the Mac.
+- When the Mac comes back online and `main` has moved on (PRs merged on
+  GitHub, builds shipped from the server's queue), the desktop app builds and
+  installs it like "ship it" does, and texts you which PRs landed. It tracks
+  the installed commit in `~/Library/Application Support/Boop/self-build/installed.json`,
+  written after each successful install; until the first one it skips the check.
 
 To run only the server, quit the Mac app; to run only the Mac,
 `sudo systemctl disable --now boop`.

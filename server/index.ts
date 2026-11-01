@@ -38,7 +38,7 @@ import { startImageCleanup } from "./images/clean.js";
 import { isPublicServerRequest, isTrustedLocalRequest } from "./local-access.js";
 import { accessConfigFromEnv, isAccessAuthenticatedRequest } from "./cloudflare-access.js";
 import { mountDashboard } from "./dashboard.js";
-import { resumeSelfBuilds, startNextQueuedBuild } from "./self-build/run.js";
+import { installMissedUpdates, resumeSelfBuilds, startNextQueuedBuild } from "./self-build/run.js";
 import { instanceIdentity, resolvePublicUrl, startInstanceCoordinator } from "./instance.js";
 import { startSelfUpdateLoop } from "./self-update.js";
 import {
@@ -313,12 +313,15 @@ async function main() {
     // Self-builds run on the Mac. Only the first activation after this
     // process started cleans up builds a restart interrupted; later ones
     // (e.g. waking from sleep) just start whatever was queued meanwhile.
-    if (resumedSelfBuilds) {
-      void startNextQueuedBuild();
-    } else {
-      resumedSelfBuilds = true;
-      void resumeSelfBuilds();
-    }
+    // When the Mac comes back online it also installs whatever landed on main
+    // while it was off; queued builds wait until that restart is done.
+    void (async () => {
+      if (!resumedSelfBuilds) {
+        resumedSelfBuilds = true;
+        await resumeSelfBuilds({ startQueued: false });
+      }
+      if (!(await installMissedUpdates())) await startNextQueuedBuild();
+    })();
   };
 
   // A server copy follows main, so builds shipped from the Mac reach it too.
