@@ -312,6 +312,33 @@ turns instead of doing the work twice:
 To run only the server, quit the Mac app; to run only the Mac,
 `sudo systemctl disable --now boop`.
 
+## Claude accounts on the server
+
+If you switch between several Claude accounts on your Mac with
+[`cswap`](https://pypi.org/project/claude-swap/), the server can follow: when
+the Mac switches (through Boop, the dashboard or `cswap switch` in Terminal), it
+saves the account's email in Convex, and before each turn the server switches
+to its own login for that email. Only the email is shared; each machine keeps
+its own sign-ins. Sign in to each account on the server once:
+
+```bash
+sudo -iu boop
+curl -LsSf https://astral.sh/uv/install.sh | sh && ~/.local/bin/uv tool install claude-swap
+claude            # /login with the first account, then /exit
+cswap add
+claude            # /logout, /login with the next account, /exit
+cswap add         # repeat for each account
+```
+
+`~/.claude-<name>` config dirs work too. If the server has no login for the
+Mac's account, it keeps its current one and logs a warning. Set
+`BOOP_ACCOUNT_SYNC=off` to stop following (the Mac publishes, other copies
+follow, by default).
+
+When the current model can't answer (out of credit, rate-limited, broken),
+text `switch to <account>`, `switch to sonnet` or `status`: these short
+commands work without the model.
+
 ## Using the dashboard
 
 The dashboard is private by default. There are two ways to reach it.

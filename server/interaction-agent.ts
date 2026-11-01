@@ -17,6 +17,8 @@ import { COMPOSIO_ACCOUNT_INTEGRATION } from "./integrations/composio-account-lo
 import { createAutomationTools } from "./automation-tools.js";
 import { createDraftDecisionTools } from "./draft-tools.js";
 import { createSelfTools } from "./self-tools.js";
+import { recoveryHint, tryRescueCommand } from "./rescue-commands.js";
+import { otherAccountNames, rescueDeps, syncClaudeAccount } from "./rescue-wiring.js";
 import {
   getRuntimeConfig,
   resolveRuntimeInput,
@@ -37,7 +39,6 @@ import { OutboundImageCollector, type OutboundImage } from "./images/outbound.js
 import {
   isUsageLimitError,
   logSuppressedUsageLimit,
-  USAGE_LIMIT_DIRECT_REPLY,
 } from "./usage-limit.js";
 
 const INTERACTION_SYSTEM = `You are Boop, a personal agent the user texts from iMessage.
@@ -479,6 +480,9 @@ export async function handleUserMessageWithAttachments(
   const log = (msg: string) => console.log(`[turn ${tag}] ${msg}`);
 
   const turnStart = Date.now();
+  // Use the same Claude account as the other copies (Mac/server) before the
+  // turn starts, so switching on one carries over to the other.
+  await syncClaudeAccount();
   // Snapshot runtime for this top-level turn so same-turn set_runtime/set_model
   // changes do not split the dispatcher and any spawned execution agent.
   const runtimeConfig = await getRuntimeConfig();
@@ -503,6 +507,29 @@ export async function handleUserMessageWithAttachments(
       });
     }
     return { reply, attachments: [] };
+  }
+
+  // Switching model, runtime or account and asking for status work without
+  // the model, so they still work when it's out of credit or broken.
+  if (opts.kind !== "proactive") {
+    const rescued = await tryRescueCommand(opts.content, rescueDeps(opts.conversationId)).catch((err) => {
+      log(`model-free command failed: ${err instanceof Error ? err.message : String(err)}`);
+      return null;
+    });
+    if (rescued) {
+      log("handled without the model");
+      const reply = redactPhoneNumbers(rescued);
+      broadcast("assistant_message", { conversationId: opts.conversationId, content: reply });
+      if (opts.persistAssistantReply) {
+        await convex.mutation(api.messages.send, {
+          conversationId: opts.conversationId,
+          role: "assistant",
+          content: reply,
+          turnId,
+        });
+      }
+      return { reply, attachments: [] };
+    }
   }
 
   if (
@@ -723,7 +750,11 @@ export async function handleUserMessageWithAttachments(
       usageLimited = true;
     } else {
       console.error(`[turn ${tag}] query failed`, err);
-      reply = "Sorry — I hit an error processing that. Try again in a moment.";
+      reply = recoveryHint({
+        reason: "error",
+        otherAccounts: await otherAccountNames(),
+        model: runtimeConfig.model,
+      });
     }
   }
 
@@ -734,7 +765,11 @@ export async function handleUserMessageWithAttachments(
       reply = "";
     } else {
       log(`model spend/usage limit hit: ${JSON.stringify(reply.slice(0, 200))}`);
-      reply = USAGE_LIMIT_DIRECT_REPLY;
+      reply = recoveryHint({
+        reason: "limit",
+        otherAccounts: await otherAccountNames(),
+        model: runtimeConfig.model,
+      });
     }
   }
 
