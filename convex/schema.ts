@@ -409,6 +409,8 @@ export default defineSchema({
     // Failed-start diagnostics kept when a restart rolls back.
     startupLogPath: v.optional(v.string()),
     startupLogTail: v.optional(v.string()),
+    // Newest lines of what the build is doing, for the dashboard.
+    activity: v.optional(v.string()),
     createdAt: v.number(),
     updatedAt: v.number(),
   })
