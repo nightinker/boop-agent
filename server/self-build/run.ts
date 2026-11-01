@@ -10,8 +10,10 @@ import { notifyConversation } from "../notify.js";
 import { getRuntimeConfig, type RuntimeConfig } from "../runtime-config.js";
 import { runAgentRuntime } from "../runtimes/index.js";
 import {
+  appendActivity,
   branchName,
   codingPrompt,
+  describeToolUse,
   healthTimeoutSeconds,
   isOwnerConversation,
   logsToPrune,
@@ -201,6 +203,29 @@ async function setStatus(
   await convex.mutation(api.selfBuilds.update, { buildId, ...patch });
 }
 
+const ACTIVITY_FLUSH_MS = 3_000;
+const activityLogs = new Map<string, { text?: string; timer?: ReturnType<typeof setTimeout> }>();
+
+/**
+ * Notes what a build is doing so the dashboard can show it live. Writes are
+ * batched (at most one every few seconds) and never fail the build.
+ */
+function noteActivity(buildId: string, entry: string, opts: { flush?: boolean } = {}): Promise<void> {
+  const log = activityLogs.get(buildId) ?? {};
+  activityLogs.set(buildId, log);
+  log.text = appendActivity(log.text, entry);
+  const write = async () => {
+    log.timer = undefined;
+    await convex.mutation(api.selfBuilds.update, { buildId, activity: log.text }).catch(() => undefined);
+  };
+  if (opts.flush) {
+    if (log.timer) clearTimeout(log.timer);
+    return write();
+  }
+  if (!log.timer) log.timer = setTimeout(() => void write(), ACTIVITY_FLUSH_MS);
+  return Promise.resolve();
+}
+
 function refuseUnlessOwner(conversationId: string): string | null {
   if (isOwnerConversation(conversationId, process.env.BOOP_OWNER_NUMBERS)) return null;
   return "Only Boop's owner can change Boop's code. Add your number to BOOP_OWNER_NUMBERS in .env.local to allow it.";
@@ -243,10 +268,14 @@ function launchBuild(input: { conversationId: string; request: string; buildId: 
     .catch(async (err) => {
       const message = err instanceof Error ? err.message : String(err);
       console.error(`[self-build ${buildId}] failed`, err);
+      await noteActivity(buildId, `Failed: ${message.split("\n")[0]}`, { flush: true });
       await setStatus(buildId, { status: "failed", error: message.slice(0, 4000) }).catch(() => undefined);
       await notify(input.conversationId, `Build ${buildId} failed: ${message.split("\n")[0]}`);
     })
-    .finally(() => void startNextQueuedBuild());
+    .finally(() => {
+      activityLogs.delete(buildId);
+      void startNextQueuedBuild();
+    });
 }
 
 /** Starts the oldest queued build, if nothing else is building. */
@@ -274,6 +303,8 @@ async function runBuild(input: {
   const branch = branchName(input.request, buildId);
   const worktree = join(src, ".claude", "worktrees", `self-build-${buildId}`);
   console.log(`[self-build ${buildId}] ${branch} → ${worktree}`);
+  activityLogs.delete(buildId);
+  await noteActivity(buildId, `Setting up worktree on ${branch}`, { flush: true });
 
   await must("git", ["fetch", "origin", "main"], { cwd: src });
   await must("git", ["worktree", "add", "-b", branch, worktree, "origin/main"], { cwd: src });
@@ -284,6 +315,7 @@ async function runBuild(input: {
   // Cancelled while its worktree was being set up: don't bring it back.
   if ((await convex.query(api.selfBuilds.get, { buildId }))?.status === "cancelled") return;
   await setStatus(buildId, { status: "coding", branch, worktreePath: worktree });
+  await noteActivity(buildId, "Coding agent started", { flush: true });
 
   const abort = new AbortController();
   running.set(buildId, abort);
@@ -301,6 +333,7 @@ async function runBuild(input: {
       cwd: worktree,
       env: codingEnv(),
       abortController: abort,
+      onToolUse: (toolName, toolInput) => noteActivity(buildId, describeToolUse(toolName, toolInput, worktree)),
     });
     summary = result.text.trim();
     const usage = result.usage;
@@ -330,6 +363,7 @@ async function runBuild(input: {
   }
 
   await setStatus(buildId, { status: "testing", summary: summary.slice(0, 8000) });
+  await noteActivity(buildId, "Coding finished; committing and running checks", { flush: true });
   const dirty = await must("git", ["status", "--porcelain"], { cwd: worktree });
   if (dirty.trim()) {
     await must("git", ["add", "-A", "--", ".", ":!node_modules", ":!.env*"], { cwd: worktree });
@@ -339,13 +373,16 @@ async function runBuild(input: {
   if (!ahead) throw new Error("The coding run finished without changing anything.");
 
   await refreshGeneratedTypes(worktree, src);
+  await noteActivity(buildId, "Running npx tsc --noEmit", { flush: true });
   const typecheck = await sh("npx", ["tsc", "--noEmit"], { cwd: worktree, timeout: CHECK_TIMEOUT_MS });
+  await noteActivity(buildId, `Typecheck ${typecheck.ok ? "passed" : "failed"}; running npx vitest run`, { flush: true });
   const tests = await sh("npx", ["vitest", "run"], { cwd: worktree, timeout: CHECK_TIMEOUT_MS });
   const testsPassed = typecheck.ok && tests.ok;
   const testOutput = `$ npx tsc --noEmit\n${tail(typecheck.output, 20) || "(clean)"}\n\n$ npx vitest run\n${tail(tests.output, 20)}`;
 
   const repo = parseGitHubRepo(await must("git", ["remote", "get-url", "origin"], { cwd: src }));
   if (!repo) throw new Error("Couldn't tell which GitHub repo origin points at.");
+  await noteActivity(buildId, `Tests ${tests.ok ? "passed" : "failed"}; pushing ${branch} and opening a PR`, { flush: true });
   await must("git", ["push", "-u", "origin", branch], { cwd: worktree });
   const prUrl = (
     await must(
@@ -371,6 +408,7 @@ async function runBuild(input: {
     .split("\n")
     .pop()!;
 
+  await noteActivity(buildId, `PR open: ${prUrl}`, { flush: true });
   await setStatus(buildId, { status: "pr_open", prUrl, testsPassed, testOutput: testOutput.slice(0, 8000) });
   await notify(input.conversationId, readyMessage({ buildId, summary, prUrl, testsPassed }));
 }
@@ -438,6 +476,8 @@ export async function shipSelfBuild(input: {
   const blocker = shipBlocker(recent, build.buildId, process.env.BOOP_DESKTOP === "1");
   if (blocker) return blocker;
   await setStatus(build.buildId, { status: "shipping" });
+  activityLogs.set(build.buildId, { text: build.activity });
+  await noteActivity(build.buildId, "Shipping: merging the PR and rebuilding", { flush: true });
   void shipBuild({
     build: { buildId: build.buildId, prUrl: build.prUrl },
     conversationId: build.conversationId,
@@ -447,6 +487,8 @@ export async function shipSelfBuild(input: {
     async (err) => {
       const message = err instanceof Error ? err.message : String(err);
       console.error(`[self-build ${build.buildId}] ship failed`, err);
+      await noteActivity(build.buildId, `Ship failed: ${message.split("\n")[0]}`, { flush: true });
+      activityLogs.delete(build.buildId);
       await setStatus(build.buildId, { status: "failed", error: message.slice(0, 4000) }).catch(() => undefined);
       await notify(build.conversationId, `Shipping build ${build.buildId} failed: ${message.split("\n")[0]}`);
       await startNextQueuedBuild();
@@ -474,18 +516,23 @@ async function shipBuild(input: {
   }
 
   if (process.env.BOOP_DESKTOP !== "1") {
+    await noteActivity(buildId, "Merged; restart Boop to load it", { flush: true });
+    activityLogs.delete(buildId);
     await setStatus(buildId, { status: "shipped" });
     await notify(input.conversationId, `Merged build ${buildId}. Restart Boop to load it.`);
     await startNextQueuedBuild();
     return;
   }
 
+  await noteActivity(buildId, "PR merged; building the Mac app", { flush: true });
   await buildAndRestart({
     id: buildId,
     src: input.src,
     healthTimeoutSec: input.healthTimeoutSec,
     conversationId: input.conversationId,
     beforeRestart: async () => {
+      await noteActivity(buildId, "Built the new app; restarting into it", { flush: true });
+      activityLogs.delete(buildId);
       await setStatus(buildId, { status: "restarting" });
       await notify(input.conversationId, `Build ${buildId} is merged and built. Restarting now, back in a minute.`);
     },

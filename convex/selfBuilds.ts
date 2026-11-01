@@ -134,6 +134,7 @@ export const update = mutation({
     error: v.optional(v.string()),
     startupLogPath: v.optional(v.string()),
     startupLogTail: v.optional(v.string()),
+    activity: v.optional(v.string()),
   },
   handler: async (ctx, { buildId, ...patch }) => {
     const build = await ctx.db
@@ -175,5 +176,27 @@ export const queued = query({
       .query("selfBuilds")
       .withIndex("by_status_and_createdAt", (q) => q.eq("status", "queued"))
       .take(50);
+  },
+});
+
+/**
+ * The dashboard's Self-builds page: the same rows list_self_builds reads
+ * (recent builds plus the queue, oldest queued first), with more history.
+ */
+export const forDashboard = query({
+  args: { limit: v.optional(v.number()) },
+  handler: async (ctx, args) => {
+    const [recent, queued] = await Promise.all([
+      ctx.db
+        .query("selfBuilds")
+        .withIndex("by_createdAt")
+        .order("desc")
+        .take(Math.min(Math.max(args.limit ?? 25, 1), 100)),
+      ctx.db
+        .query("selfBuilds")
+        .withIndex("by_status_and_createdAt", (q) => q.eq("status", "queued"))
+        .take(50),
+    ]);
+    return { recent, queued };
   },
 });

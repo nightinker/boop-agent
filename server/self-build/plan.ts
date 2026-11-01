@@ -322,3 +322,34 @@ export function catchUpMessage(subjects: string[]): string {
       : `${subjects.length} change${subjects.length === 1 ? "" : "s"}`;
   return `While your Mac was off, ${what} landed on main. Installing now; I'll be back in a minute or two.`;
 }
+
+/** How many lines of recent activity a build keeps for the dashboard. */
+export const ACTIVITY_LINES = 30;
+const ACTIVITY_LINE_CHARS = 200;
+
+/** Adds a timestamped line to a build's activity log, keeping only the newest lines. */
+export function appendActivity(previous: string | undefined, entry: string, now = new Date()): string {
+  const time = now.toISOString().slice(11, 19);
+  const text = entry.replace(/\s+/g, " ").trim().slice(0, ACTIVITY_LINE_CHARS);
+  const lines = previous ? previous.split("\n").filter(Boolean) : [];
+  lines.push(`${time} ${text}`);
+  return lines.slice(-ACTIVITY_LINES).join("\n");
+}
+
+/** One readable line for a tool call the coding agent made ("Edit server/x.ts", "Bash: npx tsc"). */
+export function describeToolUse(toolName: string, input: unknown, cwd?: string): string {
+  const args = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
+  const str = (key: string) => (typeof args[key] === "string" ? (args[key] as string) : undefined);
+  const rel = (path?: string) => (path && cwd && path.startsWith(`${cwd}/`) ? path.slice(cwd.length + 1) : path);
+  const detail =
+    str("command") ??
+    rel(str("file_path")) ??
+    rel(str("notebook_path")) ??
+    str("pattern") ??
+    rel(str("path")) ??
+    str("description") ??
+    str("url") ??
+    str("query");
+  const name = toolName.replace(/^mcp__.+?__/, "");
+  return detail ? `${name}: ${detail}` : name;
+}

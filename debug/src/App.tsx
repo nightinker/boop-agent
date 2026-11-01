@@ -11,6 +11,7 @@ import {
   DashboardSquare01Icon,
   ArrowShrink02Icon,
   Settings01Icon,
+  SourceCodeIcon,
   Moon02Icon,
   Sun03Icon,
 } from "@hugeicons/core-free-icons";
@@ -25,9 +26,11 @@ import { EventsPanel } from "./components/EventsPanel.js";
 import { ConnectionsPanel } from "./components/ConnectionsPanel.js";
 import { ConsolidationPanel } from "./components/ConsolidationPanel.js";
 import { SettingsPanel } from "./components/SettingsPanel.js";
+import { SelfBuildsPanel } from "./components/SelfBuildsPanel.js";
 import { ChangelogDrawer } from "./components/ChangelogDrawer.js";
 import { RuntimeProviderLogo, type RuntimeProvider } from "./lib/branding.js";
 import { CLAUDE_ACCOUNT_CHANGED_EVENT } from "./components/ClaudeAccountRow.js";
+import { isActive as isSelfBuildActive } from "./lib/selfBuilds.js";
 import boopGif from "../../assets/boop.gif";
 
 type View =
@@ -39,6 +42,7 @@ type View =
   | "events"
   | "consolidation"
   | "connections"
+  | "selfBuilds"
   | "settings";
 
 type Theme = "dark" | "light";
@@ -97,6 +101,7 @@ const NAV_ICONS: Record<View, any> = {
   events: Activity01Icon,
   consolidation: ArrowShrink02Icon,
   connections: Link04Icon,
+  selfBuilds: SourceCodeIcon,
   settings: Settings01Icon,
 };
 
@@ -109,6 +114,7 @@ const NAV: { id: View; label: string }[] = [
   { id: "events", label: "Events" },
   { id: "consolidation", label: "Consolidation" },
   { id: "connections", label: "Connections" },
+  { id: "selfBuilds", label: "Self-builds" },
   { id: "settings", label: "Settings" },
 ];
 
@@ -151,6 +157,15 @@ export function App() {
   const activeAgentCount = (agents ?? []).filter(
     (a) => a.status === "running" || a.status === "spawned",
   ).length;
+  // Same args as the Self-builds page, so both share one live subscription.
+  const selfBuilds = useQuery(api.selfBuilds.forDashboard, { limit: 25 });
+  const pendingSelfBuildCount = selfBuilds
+    ? new Set(
+        [...selfBuilds.recent, ...selfBuilds.queued]
+          .filter((b) => b.status === "queued" || isSelfBuildActive(b.status))
+          .map((b) => b.buildId),
+      ).size
+    : 0;
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", theme === "dark");
@@ -307,6 +322,16 @@ export function App() {
                   {activeAgentCount}
                 </span>
               )}
+              {item.id === "selfBuilds" && pendingSelfBuildCount > 0 && (
+                <span
+                  className={`ml-auto flex h-4 min-w-4 items-center justify-center rounded-full px-1.5 text-[10px] font-medium ${
+                    isDark ? "bg-zinc-700 text-zinc-100" : "bg-zinc-200 text-zinc-800"
+                  }`}
+                  title="Self-builds running or queued"
+                >
+                  {pendingSelfBuildCount}
+                </span>
+              )}
             </button>
           ))}
         </div>
@@ -433,6 +458,7 @@ export function App() {
             {view === "events" && <EventsPanel isDark={isDark} />}
             {view === "consolidation" && <ConsolidationPanel isDark={isDark} />}
             {view === "connections" && <ConnectionsPanel isDark={isDark} />}
+            {view === "selfBuilds" && <SelfBuildsPanel isDark={isDark} />}
             {view === "settings" && (
               <SettingsPanel
                 isDark={isDark}
