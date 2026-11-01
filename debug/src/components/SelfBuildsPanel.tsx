@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { useQuery } from "convex/react";
 import { api } from "../../../convex/_generated/api.js";
+import { BrailleIndicator } from "../lib/branding.js";
 import {
   EmptyState,
   HeaderPill,
@@ -73,7 +74,11 @@ export function SelfBuildsPanel({ isDark }: { isDark: boolean }) {
       }
     >
       {data === undefined ? (
-        <EmptyState isDark={isDark}>Loading builds…</EmptyState>
+        <div className="space-y-3">
+          {[1, 2, 3].map((i) => (
+            <div key={i} className={panelCardClass(isDark, "h-28 shimmer")} />
+          ))}
+        </div>
       ) : builds.length === 0 ? (
         <EmptyState isDark={isDark}>
           No self-builds yet. Text Boop something like “add a feature that…” to start one.
@@ -110,7 +115,8 @@ function BuildCard({
   const meta = STATUS_META[build.status] ?? { label: build.status, tone: "muted" as StatusTone };
   const tone = TONE_CLASSES[meta.tone];
   const failure = failureDetails(build);
-  const activity = isActive(build.status) ? activityTail(build.activity) : [];
+  const running = isActive(build.status);
+  const activity = running ? activityTail(build.activity) : [];
   const muted = mutedTextClass(isDark);
   const ongoing = isOngoing(build.status);
   const pr = build.prUrl ? prNumber(build.prUrl) : null;
@@ -120,18 +126,19 @@ function BuildCard({
       data-current={highlighted || undefined}
       className={panelCardClass(
         isDark,
-        `min-w-0 p-4 ${highlighted ? (isDark ? "ring-1 ring-sky-400/60" : "ring-1 ring-sky-500/50") : ""}`,
+        `min-w-0 p-4 fade-in ${highlighted ? (isDark ? "ring-1 ring-sky-400/60" : "ring-1 ring-sky-500/50") : ""}`,
       )}
     >
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
         <span className={`flex items-center gap-1.5 text-xs font-medium ${tone.text}`}>
-          <span className="relative flex h-2 w-2 shrink-0">
-            {isActive(build.status) && (
+          <span className="relative flex h-2.5 w-2.5 shrink-0">
+            {running && (
               <span className={`absolute inline-flex h-full w-full rounded-full pulse-ring ${tone.dot}`} />
             )}
-            <span className={`relative inline-flex h-2 w-2 rounded-full ${tone.dot}`} />
+            <span className={`relative inline-flex h-2.5 w-2.5 rounded-full ${tone.dot}`} />
           </span>
           {meta.label}
+          {running && <BrailleIndicator className="ml-1" />}
           {build.status === "queued" && build.queuePosition !== undefined && (
             <span className={muted}>
               · {build.queuePosition === 1 ? "next up" : `#${build.queuePosition} in line`}
@@ -211,8 +218,15 @@ function BuildCard({
         )}
       </dl>
 
-      {activity.length > 0 && (
+      {activity.length > 0 ? (
         <LogBlock label="Latest activity" lines={activity.join("\n")} isDark={isDark} />
+      ) : (
+        running && (
+          <div className="mt-3 flex items-center gap-3">
+            <BrailleIndicator />
+            <span className={`text-xs ${muted}`}>Waiting for activity…</span>
+          </div>
+        )
       )}
 
       {failure && (
