@@ -494,13 +494,13 @@ function RangePicker({
 }) {
   return (
     <div
-      className={`segmented-control inline-flex h-9 items-center rounded-2xl border p-0.5 text-xs ${c.segment}`}
+      className={`segmented-control inline-flex h-9 items-center rounded-2xl border p-0.5 text-xs max-md:flex max-md:h-11 max-md:w-full ${c.segment}`}
     >
       {RANGES.map((r) => (
         <button
           key={r.id}
           onClick={() => onChange(r.id)}
-          className={`segmented-button h-7 min-w-[64px] rounded-xl px-2.5 ${
+          className={`segmented-button h-7 min-w-[64px] rounded-xl px-2.5 max-md:h-10 max-md:min-w-0 max-md:flex-1 ${
             value === r.id ? c.segmentActive : c.segmentInactive
           }`}
         >
@@ -535,7 +535,7 @@ function StatusPill({
 
   return (
     <div
-      className={`inline-flex h-9 items-center rounded-2xl border px-3 text-xs ${toneClass}`}
+      className={`inline-flex h-9 items-center rounded-2xl border px-3 text-xs max-md:h-auto max-md:min-h-9 max-md:py-1.5 max-md:leading-snug ${toneClass}`}
     >
       {label}
     </div>
@@ -644,7 +644,7 @@ function MetricTile({
               onClick={() => setOpen((v) => !v)}
               aria-label={`What does ${label} mean?`}
               aria-expanded={open}
-              className={`inline-flex h-5 w-5 items-center justify-center rounded-full border transition-colors ${
+              className={`touch-hit inline-flex h-5 w-5 items-center justify-center rounded-full border transition-colors ${
                 isDark
                   ? "border-slate-700 text-slate-500 hover:border-sky-400 hover:text-sky-400"
                   : "border-slate-300 text-slate-500 hover:border-sky-500 hover:text-sky-600"
@@ -656,7 +656,7 @@ function MetricTile({
               <div
                 role="dialog"
                 aria-label={info.title}
-                className={`pop-in absolute right-0 z-30 mt-1.5 w-64 rounded-2xl border px-3 py-2.5 text-[11px] leading-snug shadow-lg ${
+                className={`pop-in absolute right-0 z-30 mt-1.5 w-64 rounded-2xl max-md:fixed max-md:inset-x-4 max-md:w-auto border px-3 py-2.5 text-[11px] leading-snug shadow-lg ${
                   isDark
                     ? "border-slate-700 bg-slate-900 text-slate-200"
                     : "border-slate-200 bg-white text-slate-700"

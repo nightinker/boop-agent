@@ -615,7 +615,7 @@ export function AgentsPanel({ isDark }: { isDark: boolean }) {
                 onClick={() => setSelected(agent.agentId)}
                 className={`${panelCardClass(isDark, "cursor-pointer px-4 py-3.5 transition-colors fade-in")} ${hoverBg}`}
               >
-                <div className="flex items-center gap-2.5 mb-1.5">
+                <div className="flex items-center gap-2.5 mb-1.5 max-md:flex-wrap">
                   <span className="relative flex h-2.5 w-2.5 shrink-0">
                     {isActive && (
                       <span
@@ -654,7 +654,7 @@ export function AgentsPanel({ isDark }: { isDark: boolean }) {
                 </p>
 
                 {(agent.costUsd > 0 || totalTokens > 0) && (
-                  <div className="flex items-center gap-3 text-[10px] mono mb-2">
+                  <div className="flex items-center gap-3 text-[10px] mono mb-2 max-md:flex-wrap max-md:gap-y-1">
                     {agent.costUsd > 0 && (
                       <span
                         className="text-emerald-500 font-semibold"
@@ -754,7 +754,7 @@ function AgentDetail({
           {agent.name}
         </span>
         <span className={`text-xs ${cfg.color}`}>{cfg.label}</span>
-        <div className="ml-auto flex items-center gap-3 text-xs mono">
+        <div className="ml-auto flex items-center gap-3 text-xs mono max-md:flex-wrap">
           {agent.costUsd > 0 && (
             <span
               className="text-emerald-500 font-semibold"

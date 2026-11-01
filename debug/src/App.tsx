@@ -14,6 +14,8 @@ import {
   SourceCodeIcon,
   Moon02Icon,
   Sun03Icon,
+  Menu01Icon,
+  Cancel01Icon,
 } from "@hugeicons/core-free-icons";
 import { api } from "../../convex/_generated/api.js";
 import { useSocket } from "./lib/useSocket.js";
@@ -31,6 +33,7 @@ import { ChangelogDrawer } from "./components/ChangelogDrawer.js";
 import { RuntimeProviderLogo, type RuntimeProvider } from "./lib/branding.js";
 import { CLAUDE_ACCOUNT_CHANGED_EVENT } from "./components/ClaudeAccountRow.js";
 import { isActive as isSelfBuildActive } from "./lib/selfBuilds.js";
+import { navDrawerClasses, useMobileNav } from "./lib/mobileNav.js";
 import boopGif from "../../assets/boop.gif";
 
 type View =
@@ -136,6 +139,7 @@ export function App() {
   const [changelogOpen, setChangelogOpen] = useState(false);
   const [desktopStatus, setDesktopStatus] = useState<DesktopStatus | null>(null);
   const { connected } = useSocket();
+  const mobileNav = useMobileNav();
 
   const counts = useQuery(api.memoryRecords.countsByTier, {}) as
     | MemoryTierCounts
@@ -283,25 +287,52 @@ export function App() {
         isDark ? "bg-[#101012] text-zinc-100" : "bg-[#f7f7f5] text-zinc-900"
       }`}
     >
+      {mobileNav.open && (
+        <div
+          aria-hidden="true"
+          className="fixed inset-0 z-40 bg-black/50 md:hidden"
+          onClick={mobileNav.close}
+        />
+      )}
       <nav
+        id="boop-nav"
+        aria-label="Sections"
         className={`desktop-drag-region w-[244px] shrink-0 px-3 pb-3 ${inDesktopShell ? "pt-12" : "pt-3"} flex flex-col ${
           isDark ? "bg-[#101012]" : "bg-[#f7f7f5]"
-        }`}
+        } ${navDrawerClasses(mobileNav.open)}`}
       >
-        <ConnectionHeader
-          connected={displayConnected}
-          desktopStatus={displayDesktopStatus}
-          isDark={isDark}
-          onAction={sendDesktopAction}
-        />
+        <div className="flex items-start gap-1">
+          <div className="min-w-0 flex-1">
+            <ConnectionHeader
+              connected={displayConnected}
+              desktopStatus={displayDesktopStatus}
+              isDark={isDark}
+              onAction={sendDesktopAction}
+            />
+          </div>
+          <button
+            type="button"
+            onClick={mobileNav.close}
+            aria-label="Close menu"
+            className={`desktop-no-drag flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl md:hidden ${
+              isDark ? "text-zinc-400 hover:bg-white/5" : "text-zinc-500 hover:bg-white/70"
+            }`}
+          >
+            <HugeiconsIcon icon={Cancel01Icon} size={18} />
+          </button>
+        </div>
 
         <div className="mt-5 space-y-0.5">
           {NAV.map((item) => (
             <button
               key={item.id}
               data-active={view === item.id}
-              onClick={() => setView(item.id)}
-              className={`desktop-no-drag sidebar-nav-item flex h-8 w-full items-center gap-2 rounded-2xl px-2.5 text-left text-[12px] ${
+              onClick={() => {
+                setView(item.id);
+                mobileNav.close();
+              }}
+              aria-current={view === item.id ? "page" : undefined}
+              className={`desktop-no-drag sidebar-nav-item flex h-8 w-full items-center gap-2 rounded-2xl px-2.5 text-left text-[12px] max-md:h-11 max-md:gap-3 max-md:text-sm ${
                 view === item.id
                   ? isDark
                     ? "text-zinc-50"
@@ -361,9 +392,12 @@ export function App() {
           <div className="flex items-center justify-between px-1">
             <div className="flex items-center">
               <button
-                onClick={() => setChangelogOpen(true)}
+                onClick={() => {
+                  setChangelogOpen(true);
+                  mobileNav.close();
+                }}
                 aria-label="Open changelog"
-                className={`desktop-no-drag rounded-lg px-1.5 py-1 text-[11px] mono transition-colors ${
+                className={`desktop-no-drag rounded-lg px-1.5 py-1 text-[11px] mono transition-colors max-md:min-h-11 max-md:px-3 max-md:text-xs ${
                   isDark
                     ? "text-zinc-600 hover:bg-white/5 hover:text-zinc-300"
                     : "text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700"
@@ -375,7 +409,8 @@ export function App() {
             </div>
             <button
               onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
-              className={`desktop-no-drag p-1.5 rounded-xl transition-colors ${
+              aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
+              className={`desktop-no-drag p-1.5 rounded-xl transition-colors max-md:flex max-md:h-11 max-md:w-11 max-md:items-center max-md:justify-center ${
                 isDark
                   ? "text-zinc-500 hover:bg-zinc-800 hover:text-zinc-100"
                   : "text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900"
@@ -389,22 +424,40 @@ export function App() {
       </nav>
 
       <div
-        className={`relative flex flex-1 min-w-0 flex-col overflow-hidden rounded-l-[20px] border-y border-l shadow-sm ${
+        className={`relative flex flex-1 min-w-0 flex-col overflow-hidden rounded-l-[20px] border-y border-l shadow-sm max-md:rounded-none max-md:border-0 max-md:shadow-none ${
           isDark
             ? "border-white/10 bg-[#18181b] shadow-black/20"
             : "border-zinc-200 bg-[#fbfbfa] shadow-zinc-200/60"
         }`}
       >
         <header
-          className={`desktop-drag-region flex h-14 shrink-0 items-center justify-between border-b px-5 ${
+          className={`desktop-drag-region flex h-14 shrink-0 items-center justify-between border-b px-5 max-md:gap-2 max-md:px-2 ${
             isDark ? "border-white/10 bg-[#18181b]" : "border-zinc-200 bg-[#fbfbfa]"
           }`}
         >
-          <div>
+          <button
+            type="button"
+            onClick={mobileNav.toggle}
+            aria-label="Open menu"
+            aria-controls="boop-nav"
+            aria-expanded={mobileNav.open}
+            className={`desktop-no-drag relative flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl md:hidden ${
+              isDark ? "text-zinc-300 hover:bg-white/5" : "text-zinc-700 hover:bg-zinc-100"
+            }`}
+          >
+            <HugeiconsIcon icon={Menu01Icon} size={20} />
+            {(activeAgentCount > 0 || pendingSelfBuildCount > 0) && (
+              <span
+                className="absolute right-2 top-2 h-2 w-2 rounded-full bg-sky-400"
+                title="Agents or self-builds running"
+              />
+            )}
+          </button>
+          <div className="max-md:min-w-0 max-md:flex-1">
             <div className={`text-[11px] ${isDark ? "text-zinc-500" : "text-zinc-500"}`}>
               Boop Debug
             </div>
-            <h2 className={`text-sm font-medium ${isDark ? "text-zinc-100" : "text-zinc-950"}`}>
+            <h2 className={`text-sm font-medium max-md:truncate ${isDark ? "text-zinc-100" : "text-zinc-950"}`}>
               {currentView}
             </h2>
           </div>
@@ -447,7 +500,7 @@ export function App() {
         </header>
 
         <main className="flex-1 min-h-0 min-w-0 overflow-hidden">
-          <div key={view} className="h-full overflow-auto debug-scroll p-5 view-shell">
+          <div key={view} className="h-full overflow-auto debug-scroll p-5 view-shell max-md:pt-4">
             {view === "dashboard" && <DashboardPanel isDark={isDark} />}
             {view === "agents" && <AgentsPanel isDark={isDark} />}
             {view === "automations" && <AutomationsPanel isDark={isDark} />}
