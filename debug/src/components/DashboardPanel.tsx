@@ -12,6 +12,7 @@ import {
   WorkflowCircle03Icon,
 } from "@hugeicons/core-free-icons";
 import { api } from "../../../convex/_generated/api.js";
+import { keepAwakeLabel, keepAwakeTone, useKeepAwake } from "./KeepAwake.js";
 
 type TimeRange = "all" | "7d" | "30d" | "90d";
 
@@ -100,6 +101,7 @@ function plural(n: number, singular: string, pluralLabel = `${singular}s`) {
 }
 
 export function DashboardPanel({ isDark }: { isDark: boolean }) {
+  const { status: keepAwake } = useKeepAwake();
   const data = useQuery(api.dashboard.metrics, {}) as DashboardMetrics | undefined;
   const [range, setRange] = useState<TimeRange>("all");
 
@@ -209,6 +211,13 @@ export function DashboardPanel({ isDark }: { isDark: boolean }) {
           </div>
 
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+            {keepAwake?.supported && (
+              <StatusPill
+                label={keepAwakeLabel(keepAwake)}
+                tone={keepAwakeTone(keepAwake)}
+                isDark={isDark}
+              />
+            )}
             {data.truncated && (
               <StatusPill
                 label={`Latest ${fmt(data.scanLimit)} rows`}

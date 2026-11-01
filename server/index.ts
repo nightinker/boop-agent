@@ -41,6 +41,8 @@ import { mountDashboard } from "./dashboard.js";
 import { installMissedUpdates, resumeSelfBuilds, startNextQueuedBuild } from "./self-build/run.js";
 import { instanceIdentity, resolvePublicUrl, startInstanceCoordinator } from "./instance.js";
 import { startSelfUpdateLoop } from "./self-update.js";
+import { keepAwake } from "./keep-awake.js";
+import { createKeepAwakeRouter, startKeepAwakeSettingLoop } from "./keep-awake-routes.js";
 import {
   checkCswapLogin,
   getClaudeAccount,
@@ -61,7 +63,10 @@ async function main() {
   // local BGE-large model in the background so the first user-facing
   // recall() doesn't pay the model-load cost.
   preloadLocalModel();
-
+  // Keep the Mac awake (caffeinate) while this copy is the active one. A no-op
+  // off macOS. It only starts once the coordinator says this copy is active.
+  const awake = keepAwake();
+  startKeepAwakeSettingLoop(awake);
 
   const app = express();
   // Behind Cloudflare Access (CF_ACCESS_TEAM_DOMAIN + CF_ACCESS_AUD), a visitor
@@ -221,6 +226,7 @@ async function main() {
   app.use("/browser", createBrowserRouter());
   app.use("/apple", createAppleRouter());
   app.use("/changelog", createChangelogRouter());
+  app.use("/keep-awake", createKeepAwakeRouter(awake));
 
   app.post("/agents/:id/cancel", (req, res) => {
     const ok = cancelAgent(req.params.id);
@@ -293,6 +299,7 @@ async function main() {
   let stopPoller: (() => void) | null = null;
   let resumedSelfBuilds = false;
   const onActivate = async (othersOnline: boolean) => {
+    awake.setActiveCopy(true);
     // Texts a crash cut off are only re-answered when no other copy is up;
     // otherwise one stepping down may still be answering them.
     if (!othersOnline) {
@@ -341,6 +348,8 @@ async function main() {
       publicUrl: () => resolvePublicUrl(),
       onActivate: ({ othersOnline }) => onActivate(othersOnline),
       onDeactivate: () => {
+        // Standing by: let this machine sleep; the active copy keeps answering.
+        awake.setActiveCopy(false);
         stopPoller?.();
         stopPoller = null;
       },
@@ -357,6 +366,8 @@ async function main() {
     process.on(sig, () => {
       if (shuttingDown) return;
       shuttingDown = true;
+      // Release the wake lock first so no caffeinate outlives this process.
+      awake.stop();
       // Hand over to another copy right away instead of after a timeout.
       const leaving = coordinator?.stop() ?? Promise.resolve();
       Promise.allSettled([closeLocalBrowser(), Promise.race([leaving, new Promise((r) => setTimeout(r, 3_000))])])

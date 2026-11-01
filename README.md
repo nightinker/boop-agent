@@ -437,6 +437,7 @@ Everything lives in `.env.local` (auto-created by `npm run setup`). See `.env.ex
 | `BOOP_BROWSER_EXTRA_ARGS` | no | Optional newline-separated Chrome flags. Only `--flag` lines are used. |
 | `BOOP_APPLE_ENABLED` | no | Fallback master switch for optional local Apple data. Default `false`. Once changed in the dashboard, the Convex `settings` row takes precedence over this env var. |
 | `BOOP_APPLE_MESSAGES_ENABLED` / `BOOP_APPLE_NOTES_ENABLED` / `BOOP_APPLE_REMINDERS_ENABLED` | no | Per-source fallbacks for local iMessage, Apple Notes, and Apple Reminders. Each defaults to `false`, so enabling one source does not implicitly enable the others. |
+| `BOOP_KEEP_AWAKE` | no | Fallback for **Keep Mac awake** (runs `caffeinate -dimsu -w <boop pid>` while this copy is the active one). Default `true`. The Settings toggle (Convex `settings.keep_awake_enabled`) takes precedence. Ignored off macOS. Closing a MacBook's lid still sleeps it unless it's on AC power with an external display. |
 | `BOOP_UPSTREAM_CHECK` | no | Set to `false` to disable the new-version banner on `npm run dev`. Default: on. |
 | `PORT` | no | Default `3456`. |
 | `PUBLIC_URL` | no | Base URL used in the Sendblue webhook. Composio handles its own OAuth callbacks on `platform.composio.dev`, so this is just for inbound iMessage. |

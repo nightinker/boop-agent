@@ -8,6 +8,12 @@ Format:
 
 ---
 
+## Unreleased — Keep Mac awake
+
+- Added: **Keep Mac awake** (on by default). On macOS, while this copy of Boop is the active one, it runs `caffeinate -dimsu -w <boop pid>` (no display, idle, disk or AC system sleep; declares user activity), restarts it with backoff if it exits, and kills it on shutdown, when stepping down to standby, or when the setting is turned off. `-w` makes it exit on its own if Boop dies. No-op on other platforms.
+- Added: a Settings toggle with a live status (active since when / standby / off), a status pill on the debug dashboard, `GET/POST /keep-awake`, the `keep_awake_enabled` setting with a `BOOP_KEEP_AWAKE` fallback, and a `keepAwake` block in `get_config`.
+- Note: closing a MacBook's lid still sleeps it unless it's on AC power with an external display; caffeinate can't override that.
+
 ## Unreleased — Linux VPS deployment
 
 - Added: [docs/DEPLOY-VPS.md](docs/DEPLOY-VPS.md), a guide to running Boop headless on an Ubuntu server (Node install, env vars, one-time Claude login or API key, Convex, Caddy/nginx with TLS, Sendblue webhook, systemd service with automatic restart, updating, troubleshooting).

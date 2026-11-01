@@ -34,6 +34,7 @@ import {
   setUserTimezone,
 } from "./timezone-config.js";
 import { formatUptime, serverUptimeSeconds } from "./uptime.js";
+import { describeKeepAwake, keepAwake } from "./keep-awake.js";
 import {
   checkCswapLogin,
   getClaudeAccount,
@@ -200,13 +201,14 @@ export function createSelfTools(conversationId?: string): RuntimeTool[] {
     defineRuntimeTool(
       NAMESPACE,
       "get_config",
-      "Return Boop's runtime configuration: active provider, model, billing mode, user's timezone, current local time, loaded integrations, and basic env info. Use when the user asks what model/provider/runtime Boop is using, what time it is, what timezone is active, or anything about the agent itself.",
+      "Return Boop's runtime configuration: active provider, model, billing mode, user's timezone, current local time, loaded integrations, whether Boop is keeping the Mac awake (keepAwake: caffeinate -dimsu while this copy is active, and since when), and basic env info. Use when the user asks what model/provider/runtime Boop is using, what time it is, what timezone is active, or anything about the agent itself.",
       {},
       async () => {
         const integrations = (await listEnabledIntegrations()).map((i) => i.name);
         const tzInfo = await describeUserNow();
         const runtime = await getRuntimeConfig();
         const browser = await getBrowserSettings();
+        const awake = keepAwake().status();
         const config = {
           runtime: runtime.runtime,
           model: runtime.model,
@@ -230,6 +232,18 @@ export function createSelfTools(conversationId?: string): RuntimeTool[] {
             channel: browser.channel,
             executablePath: browser.executablePath || null,
             extraArgs: browser.extraArgs,
+          },
+          keepAwake: {
+            supported: awake.supported,
+            enabled: awake.enabled,
+            active: awake.active,
+            state: awake.state,
+            since: awake.since ? new Date(awake.since).toISOString() : null,
+            summary: describeKeepAwake(awake),
+            command: awake.command,
+            restarts: awake.restarts,
+            lastError: awake.lastError,
+            caveat: awake.caveat,
           },
           composioEnabled: Boolean(process.env.COMPOSIO_API_KEY),
           embeddingsEnabled: true,
