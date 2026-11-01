@@ -44,8 +44,21 @@ export interface InboundStore {
   pendingConversations(): Promise<string[]>;
 }
 
+/** Extra facts about a text that aren't saved with it. */
+export interface InboundMeta {
+  /**
+   * How the text arrived ("iMessage", "SMS", "RCS"). Only iMessage has typing
+   * indicators, so after an SMS/RCS text the conversation ignores them and
+   * keeps the plain quiet period. Unknown counts as iMessage.
+   */
+  service?: string;
+}
+
+/** What a typing signal did: held or restarted an open quiet period, or nothing. */
+export type TypingOutcome = "held" | "restarted" | "ignored";
+
 export interface InboundQueue {
-  enqueue(input: InboundInput): Promise<boolean>;
+  enqueue(input: InboundInput, meta?: InboundMeta): Promise<boolean>;
   /** Answers every queued text in one conversation; resolves when it's empty. */
   drain(conversationId: string): Promise<void>;
   /** Safety net: drain every conversation that has texts waiting. */
@@ -54,9 +67,12 @@ export interface InboundQueue {
   recover(): Promise<{ requeued: number; failed: number }>;
   /**
    * The sender started or stopped typing. While they type, an open quiet
-   * period is held open (up to maxTypingWaitMs); when they stop, it restarts.
+   * period is held open (at most maxTypingWaitMs after typing first started
+   * since their last text); when they stop, the quiet period restarts.
+   * Ignored when no text is waiting (unknown numbers, idle conversations) and
+   * after an SMS/RCS text. Never throws.
    */
-  noteTyping(conversationId: string, isTyping: boolean): void;
+  noteTyping(conversationId: string, isTyping: boolean): TypingOutcome;
   /** True while this copy is answering texts or waiting out a quiet period. */
   isBusy(): boolean;
   /**
@@ -77,6 +93,19 @@ export function debounceMsFromEnv(value: string | undefined): number {
   if (value === undefined || value.trim() === "") return DEFAULT_DEBOUNCE_MS;
   const ms = Number(value);
   return Number.isFinite(ms) && ms >= 0 ? ms : DEFAULT_DEBOUNCE_MS;
+}
+
+/** BOOP_MAX_TYPING_HOLD_MS: longest "typing…" can hold replies back; 0 = ignore typing. */
+export function maxTypingHoldMsFromEnv(value: string | undefined): number {
+  if (value === undefined || value.trim() === "") return DEFAULT_MAX_TYPING_WAIT_MS;
+  const ms = Number(value);
+  return Number.isFinite(ms) && ms >= 0 ? ms : DEFAULT_MAX_TYPING_WAIT_MS;
+}
+
+/** True unless the service is known and isn't iMessage (SMS, RCS, …). */
+export function supportsTyping(service: string | undefined): boolean {
+  if (!service || !service.trim()) return true;
+  return service.trim().toLowerCase() === "imessage";
 }
 
 /** Folds a burst of texts into one: contents joined by newlines, in order, with every image. */
@@ -110,7 +139,10 @@ export function createInboundQueue(deps: {
   isActive?: () => boolean;
   /** Quiet period before a conversation's texts are answered together. 0 = answer each at once. */
   debounceMs?: number;
-  /** Longest a "typing…" signal can hold a quiet period open without a new text. */
+  /**
+   * Longest a "typing…" signal can hold a quiet period open without a new
+   * text, counted from when typing first started. 0 = ignore typing.
+   */
   maxTypingWaitMs?: number;
 }): InboundQueue {
   const { store, process } = deps;
@@ -122,18 +154,32 @@ export function createInboundQueue(deps: {
   // running loop checks once more before it stops.
   const again = new Set<string>();
   const debounceMs = Math.max(0, deps.debounceMs ?? 0);
-  const maxTypingWaitMs = deps.maxTypingWaitMs ?? DEFAULT_MAX_TYPING_WAIT_MS;
+  const maxTypingWaitMs = Math.max(0, deps.maxTypingWaitMs ?? DEFAULT_MAX_TYPING_WAIT_MS);
   // Open quiet periods: a conversation in here isn't answered until it fires.
   const timers = new Map<string, ReturnType<typeof setTimeout>>();
   const typing = new Set<string>();
+  // When typing first held each open quiet period; the hard cap counts from here.
+  const holdStartedAt = new Map<string, number>();
+  // Conversations whose latest text came over SMS/RCS: no typing indicators there.
+  const noTyping = new Set<string>();
 
   function startQuietPeriod(conversationId: string): void {
     const pending = timers.get(conversationId);
     if (pending) clearTimeout(pending);
-    const wait = typing.has(conversationId) ? maxTypingWaitMs : debounceMs;
+    let wait = debounceMs;
+    if (typing.has(conversationId)) {
+      // Hold until they stop typing, but never past the cap: a lost
+      // is_typing=false (or a stream of is_typing=true) can't stall replies.
+      const started = holdStartedAt.get(conversationId) ?? Date.now();
+      holdStartedAt.set(conversationId, started);
+      wait = Math.max(0, started + maxTypingWaitMs - Date.now());
+    }
     const timer = setTimeout(() => {
       timers.delete(conversationId);
-      typing.delete(conversationId);
+      if (typing.delete(conversationId)) {
+        log.warn(`[inbound] still "typing" after ${maxTypingWaitMs}ms; answering anyway`);
+      }
+      holdStartedAt.delete(conversationId);
       void drain(conversationId);
     }, wait);
     timer.unref?.();
@@ -144,6 +190,8 @@ export function createInboundQueue(deps: {
     const pending = timers.get(conversationId);
     if (pending) clearTimeout(pending);
     timers.delete(conversationId);
+    typing.delete(conversationId);
+    holdStartedAt.delete(conversationId);
   }
 
   async function claim(conversationId: string): Promise<InboundItem[]> {
@@ -216,8 +264,10 @@ export function createInboundQueue(deps: {
   }
 
   return {
-    async enqueue(input) {
+    async enqueue(input, meta) {
       const { conversationId } = input;
+      if (supportsTyping(meta?.service)) noTyping.delete(conversationId);
+      else noTyping.add(conversationId);
       if (debounceMs <= 0) {
         const enqueued = await store.enqueue(input);
         if (enqueued) void drain(conversationId);
@@ -226,7 +276,10 @@ export function createInboundQueue(deps: {
       // Open (or restart) the quiet period before saving, so a drain already
       // in flight can't claim this text and answer it before the burst ends.
       const wasWaiting = timers.has(conversationId);
-      typing.delete(conversationId); // a text arriving means they stopped typing
+      // A text arriving means they stopped typing; a later "typing…" starts
+      // a fresh hold.
+      typing.delete(conversationId);
+      holdStartedAt.delete(conversationId);
       startQuietPeriod(conversationId);
       const timer = timers.get(conversationId);
       let enqueued = false;
@@ -242,11 +295,27 @@ export function createInboundQueue(deps: {
     drain,
     drainAll,
     noteTyping(conversationId, isTyping) {
-      if (debounceMs <= 0) return;
-      if (isTyping) typing.add(conversationId);
-      else typing.delete(conversationId);
-      // Typing only matters while texts are waiting to be answered.
-      if (timers.has(conversationId)) startQuietPeriod(conversationId);
+      try {
+        if (debounceMs <= 0 || maxTypingWaitMs <= 0) return "ignored";
+        // Typing only matters while texts are waiting to be answered; that also
+        // drops signals from numbers that never texted (or were already answered).
+        if (!timers.has(conversationId)) return "ignored";
+        // SMS/RCS keep the plain quiet period.
+        if (noTyping.has(conversationId)) return "ignored";
+        if (isTyping) {
+          // Already holding: a repeat "typing…" doesn't extend the cap.
+          if (typing.has(conversationId)) return "held";
+          typing.add(conversationId);
+          startQuietPeriod(conversationId);
+          return "held";
+        }
+        typing.delete(conversationId);
+        startQuietPeriod(conversationId);
+        return "restarted";
+      } catch (err) {
+        log.warn("[inbound] couldn't apply a typing signal", err);
+        return "ignored";
+      }
     },
     isBusy: () => draining.size > 0 || timers.size > 0,
     stop() {
@@ -254,6 +323,8 @@ export function createInboundQueue(deps: {
       for (const timer of timers.values()) clearTimeout(timer);
       timers.clear();
       typing.clear();
+      holdStartedAt.clear();
+      noTyping.clear();
       return waiting;
     },
     async recover() {
@@ -308,6 +379,12 @@ export function inboundFromSendblue(
     source,
     receivedAt: Number.isFinite(sentAt) ? sentAt : now,
   };
+}
+
+/** The service a Sendblue message came over ("iMessage", "SMS", "RCS"), if it says. */
+export function serviceFromSendblue(payload: unknown): string | undefined {
+  if (!payload || typeof payload !== "object") return undefined;
+  return str((payload as Record<string, unknown>).service) || undefined;
 }
 
 /**

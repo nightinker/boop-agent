@@ -8,6 +8,13 @@ Format:
 
 ---
 
+## Unreleased — Wait while you're typing
+
+- Added: a dedicated `POST /sendblue/typing` route for Sendblue's `typing_indicator` webhook (the old `/sendblue/webhook` URL still accepts them). Junk or failing typing events are acknowledged and ignored; they can never break the webhook or hold up a reply.
+- Added: `npm run sendblue:webhook` (run automatically on start) now also registers the `typing_indicator` webhook through Sendblue's webhooks API, next to the inbound one, and cleans up stale tunnel copies. Best effort; `SENDBLUE_TYPING_WEBHOOK=false` skips it.
+- Changed: the typing hold now has a hard cap, `BOOP_MAX_TYPING_HOLD_MS` (default 60s), counted from when typing first started since your last text, so repeated "typing…" events or a missed "stopped typing" can't stall replies. A new text or "stopped typing" restarts the normal quiet period.
+- Changed: typing events are ignored for numbers with no waiting text and for conversations whose latest text came over SMS/RCS, which keep the plain quiet period.
+
 ## Unreleased — Answer bursts of texts once
 
 - Added: a **quiet period** for incoming iMessages (default 5s, `BOOP_MESSAGE_DEBOUNCE_MS`, `0` turns it off). Each new text in a conversation restarts the wait; once the sender has been quiet that long, every waiting text (joined by newlines, in order, with all images) is answered as one turn. Nothing is sent, not even a typing bubble, while the wait is open. Texts that arrive while Boop is still answering form the next batch. Conversations never mix.

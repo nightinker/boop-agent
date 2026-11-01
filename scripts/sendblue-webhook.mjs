@@ -12,6 +12,10 @@
 //   2. Removes any stale *.ngrok-free.app / *.ngrok-free.dev / *.ngrok.app / trycloudflare.com
 //      webhooks of type=receive that don't match the new URL.
 //   3. Adds the new URL as type=receive (unless already registered).
+//   4. Does the same for Sendblue's typing_indicator webhook, pointed at
+//      <base>/sendblue/typing, so Boop can wait while you're still typing.
+//      Best effort: a failure here only logs a warning. Set
+//      SENDBLUE_TYPING_WEBHOOK=false to skip it.
 
 import { spawn } from "node:child_process";
 import { createHmac } from "node:crypto";
@@ -193,7 +197,7 @@ function parseWebhookLines(output) {
   for (const line of clean.split(/\r?\n/)) {
     const urlMatch = line.match(/(https?:\/\/[^\s)]+)/);
     const typeMatch = line.match(
-      /\b(receive|outbound|call_log|line_blocked|line_assigned|contact_created)\b/,
+      /\b(receive|outbound|call_log|line_blocked|line_assigned|contact_created|typing_indicator)\b/,
     );
     if (urlMatch && typeMatch) {
       hooks.push({ url: urlMatch[1], type: typeMatch[1] });
@@ -207,6 +211,11 @@ const STALE_DOMAIN_RE = /(ngrok-free\.(app|dev)|ngrok\.app|trycloudflare\.com|lo
 function normalizeWebhookUrl(value) {
   const trimmed = value.replace(/\/$/, "");
   return trimmed.endsWith("/sendblue/webhook") ? trimmed : `${trimmed}/sendblue/webhook`;
+}
+
+/** Where Sendblue's typing_indicator webhook goes, next to the inbound one. */
+export function typingWebhookUrl(webhookUrl) {
+  return normalizeWebhookUrl(webhookUrl).replace(/\/sendblue\/webhook$/, "/sendblue/typing");
 }
 
 async function readActiveTunnelUrl() {
@@ -279,22 +288,22 @@ async function apiListWebhooks(env) {
   return parseApiWebhookListing(raw.webhooks);
 }
 
-async function apiAddWebhook(env, url) {
+async function apiAddWebhook(env, url, type = "receive") {
   const secret = deriveWebhookSecret(env.SENDBLUE_API_SECRET);
   await sendblueJson(env, "/api/account/webhooks", {
     method: "POST",
     body: JSON.stringify({
       webhooks: [{ url, secret }],
       globalSecret: secret,
-      type: "receive",
+      type,
     }),
   });
 }
 
-async function apiRemoveWebhook(env, url) {
+async function apiRemoveWebhook(env, url, type = "receive") {
   await sendblueJson(env, "/api/account/webhooks", {
     method: "DELETE",
-    body: JSON.stringify({ webhooks: [url], type: "receive" }),
+    body: JSON.stringify({ webhooks: [url], type }),
   });
 }
 
@@ -412,15 +421,15 @@ function printWebhookCheck(check) {
   console.log(`[webhook] details: ${check.details}`);
 }
 
-export async function syncWebhooks(url, current, removeWebhook, addWebhook) {
-  const hasTarget = current.some((wh) => wh.type === "receive" && wh.url === url);
+export async function syncWebhooks(url, current, removeWebhook, addWebhook, type = "receive") {
+  const hasTarget = current.some((wh) => wh.type === type && wh.url === url);
 
   // 1. Remove stale ngrok/tunnel URLs so we don't accumulate zombie hooks.
   // Keep duplicate copies of the current URL. Sendblue's delete endpoint is
   // URL-based and may remove every matching row, which would turn a harmless
   // duplicate into a missing webhook during app restart.
   for (const wh of current) {
-    if (wh.type !== "receive") continue;
+    if (wh.type !== type) continue;
     if (wh.url === url) continue;
     if (!STALE_DOMAIN_RE.test(wh.url)) continue;
     try {
@@ -440,9 +449,30 @@ export async function syncWebhooks(url, current, removeWebhook, addWebhook) {
   // 3. Register new.
   try {
     await addWebhook(url);
-    console.log(`[webhook] registered ${url} (type=receive)`);
+    console.log(`[webhook] registered ${url} (type=${type})`);
   } catch (err) {
     console.error(`[webhook] failed to register ${url}: ${err.message}`);
+  }
+}
+
+/**
+ * Registers the typing_indicator webhook. Typing is only a hint for the quiet
+ * period, so this never throws: without it Boop just uses the plain wait.
+ */
+export async function syncTypingWebhook(
+  env,
+  webhookUrl,
+  current,
+  removeWebhook = (hookUrl) => apiRemoveWebhook(env, hookUrl, "typing_indicator"),
+  addWebhook = (hookUrl) => apiAddWebhook(env, hookUrl, "typing_indicator"),
+) {
+  if (String(env.SENDBLUE_TYPING_WEBHOOK ?? "").toLowerCase() === "false") return "disabled";
+  try {
+    await syncWebhooks(typingWebhookUrl(webhookUrl), current, removeWebhook, addWebhook, "typing_indicator");
+    return "synchronized";
+  } catch (err) {
+    console.warn(`[webhook] typing indicator webhook not registered: ${err.message}`);
+    return "failed";
   }
 }
 
@@ -538,6 +568,7 @@ async function main() {
         (hookUrl) => apiRemoveWebhook(env, hookUrl),
         (hookUrl) => apiAddWebhook(env, hookUrl),
       );
+      await syncTypingWebhook(env, webhookUrl, listing.current);
       return;
     } catch (err) {
       throw new Error(`Sendblue API registration failed: ${err.message}`);

@@ -96,7 +96,8 @@ describe("Sendblue webhook with the inbound queue", () => {
 
   it("accepts Sendblue typing indicators without queuing a text", async () => {
     const res = await post({ number: "+15551234567", is_typing: true, from_number: "+15550000000" });
-    expect(await res.json()).toEqual({ ok: true, typing: true });
+    // Nothing is waiting for this number, so the signal changes nothing.
+    expect(await res.json()).toEqual({ ok: true, typing: true, outcome: "ignored" });
     expect(memory.current!.rows).toHaveLength(2);
   });
 
@@ -109,5 +110,25 @@ describe("Sendblue webhook with the inbound queue", () => {
   it("skips outbound echoes", async () => {
     const res = await post({ ...textFrom("h3", "my own reply"), is_outbound: true });
     expect(await res.json()).toEqual({ ok: true, skipped: true });
+  });
+
+  it("serves the dedicated /sendblue/typing route and holds a waiting text", async () => {
+    const typing = (body: Record<string, unknown>, secret = deriveSendblueWebhookSecret("test-secret")) =>
+      realFetch(`${base}/sendblue/typing`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "sb-signing-secret": secret },
+        body: JSON.stringify(body),
+      });
+    expect((await typing({ number: "+15557654321", is_typing: true }, "wrong")).status).toBe(401);
+    // Junk payloads are acknowledged, never an error.
+    expect(await (await typing({ hello: "world" })).json()).toEqual({ ok: true, typing: false });
+
+    await post({ ...textFrom("t1", "typing test"), from_number: "+15557654321", service: "iMessage" });
+    const held = await typing({ number: "+15557654321", is_typing: true, timestamp: new Date().toISOString() });
+    expect(await held.json()).toEqual({ ok: true, typing: true, outcome: "held" });
+    expect(inboundQueue.isBusy()).toBe(true);
+    const stopped = await typing({ number: "+15557654321", is_typing: false });
+    expect(await stopped.json()).toEqual({ ok: true, typing: true, outcome: "restarted" });
+    await vi.waitFor(() => expect(memory.current!.rows.find((r) => r.handle === "t1")?.status).toBe("done"));
   });
 });
