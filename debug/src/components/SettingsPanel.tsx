@@ -895,10 +895,12 @@ function KeepAwakeRow({ isDark }: { isDark: boolean }) {
   return (
     <SettingShell
       label="Keep Mac awake"
-      description={`Runs caffeinate -dimsu while Boop is running so the Mac doesn't sleep and Boop keeps answering texts. Only the active copy holds it: if the server copy takes over, the Mac is allowed to sleep. Note: closing a MacBook's lid still puts it to sleep unless it's on AC power with an external display connected; caffeinate can't override that.`}
+      description={`Runs caffeinate -dimsu while Boop is running so the Mac doesn't sleep and Boop keeps answering texts. Only the active copy holds it: if the server copy takes over, the Mac is allowed to sleep. While a self-build is in progress (queued through the restart after shipping), the self-build agent keeps the Mac awake even with this off, and lets it sleep again when the build is done. Note: closing a MacBook's lid still puts it to sleep unless it's on AC power with an external display connected; caffeinate can't override that.`}
       debugLine={`settings.keep_awake_enabled · ${status?.command ?? "caffeinate -dimsu"}${
         status?.pid ? ` · pid ${status.pid}` : ""
-      }${status?.restarts ? ` · ${status.restarts} restarts` : ""}`}
+      }${status?.restarts ? ` · ${status.restarts} restarts` : ""}${
+        status?.heldBy ? ` · held by ${status.heldBy}` : ""
+      }${status?.buildIds?.length ? ` · builds ${status.buildIds.join(", ")}` : ""}`}
       isDark={isDark}
       control={
         <div className="flex flex-col items-start gap-2 lg:items-end">

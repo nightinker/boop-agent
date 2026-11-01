@@ -42,7 +42,7 @@ import { installMissedUpdates, resumeSelfBuilds, startNextQueuedBuild } from "./
 import { instanceIdentity, resolvePublicUrl, startInstanceCoordinator } from "./instance.js";
 import { startSelfUpdateLoop } from "./self-update.js";
 import { keepAwake } from "./keep-awake.js";
-import { createKeepAwakeRouter, startKeepAwakeSettingLoop } from "./keep-awake-routes.js";
+import { createKeepAwakeRouter, startBuildWakeLockLoop, startKeepAwakeSettingLoop } from "./keep-awake-routes.js";
 import {
   checkCswapLogin,
   getClaudeAccount,
@@ -67,6 +67,8 @@ async function main() {
   // off macOS. It only starts once the coordinator says this copy is active.
   const awake = keepAwake();
   startKeepAwakeSettingLoop(awake);
+  // A self-build in progress also holds it, toggle or not, until it's done.
+  startBuildWakeLockLoop(awake);
 
   const app = express();
   // Behind Cloudflare Access (CF_ACCESS_TEAM_DOMAIN + CF_ACCESS_AUD), a visitor

@@ -29,6 +29,8 @@ import {
   tail,
 } from "./plan.js";
 import { CANCELLABLE, formatBuildList, queuedMessage, shipBlocker } from "./queue.js";
+import { restartCommand } from "../keep-awake.js";
+import { syncBuildWakeLock } from "../keep-awake-routes.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -200,7 +202,12 @@ async function setStatus(
   buildId: string,
   patch: Omit<Parameters<typeof convex.mutation<typeof api.selfBuilds.update>>[1], "buildId">,
 ) {
-  await convex.mutation(api.selfBuilds.update, { buildId, ...patch });
+  try {
+    await convex.mutation(api.selfBuilds.update, { buildId, ...patch });
+  } finally {
+    // Take or release the build's wake lock right away, not at the next poll.
+    syncBuildWakeLock();
+  }
 }
 
 const ACTIVITY_FLUSH_MS = 3_000;
@@ -254,6 +261,7 @@ export async function startSelfBuild(input: { conversationId: string; request: s
     conversationId: input.conversationId,
     request: input.request,
   });
+  syncBuildWakeLock();
   if (slot.status === "queued") {
     return queuedMessage({ buildId, position: slot.position, blockedBy: slot.blockedBy });
   }
@@ -595,7 +603,9 @@ async function buildAndRestart(input: {
   await input.beforeRestart();
   // `open` hands its environment to the app it launches, so ELECTRON_RUN_AS_NODE
   // must not reach the helper or the relaunched Boop starts as plain Node and exits.
-  const child = spawn("/bin/bash", [script], {
+  // Wrapped in caffeinate on macOS: the Mac stays awake until the restart is done.
+  const restart = restartCommand(script);
+  const child = spawn(restart.command, restart.args, {
     detached: true,
     stdio: "ignore",
     cwd: dirname(script),
@@ -620,6 +630,7 @@ export async function resumeSelfBuilds(opts: { startQueued?: boolean } = {}): Pr
     await reportPendingRestart();
 
     const interrupted = await convex.mutation(api.selfBuilds.failInterrupted, {});
+    if (interrupted.length > 0) syncBuildWakeLock();
     for (const build of interrupted) {
       console.warn(`[self-build ${build.buildId}] interrupted while ${build.status}`);
       await notify(

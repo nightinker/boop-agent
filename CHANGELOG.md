@@ -12,6 +12,8 @@ Format:
 
 - Added: **Keep Mac awake** (on by default). On macOS, while this copy of Boop is the active one, it runs `caffeinate -dimsu -w <boop pid>` (no display, idle, disk or AC system sleep; declares user activity), restarts it with backoff if it exits, and kills it on shutdown, when stepping down to standby, or when the setting is turned off. `-w` makes it exit on its own if Boop dies. No-op on other platforms.
 - Added: a Settings toggle with a live status (active since when / standby / off), a status pill on the debug dashboard, `GET/POST /keep-awake`, the `keep_awake_enabled` setting with a `BOOP_KEEP_AWAKE` fallback, and a `keepAwake` block in `get_config`.
+- Added: **build wake lock**. While any self-build is in progress (queued, coding, testing, shipping, restarting), Boop holds the same caffeinate even with the toggle off, and releases it when no build is in progress any more (finished, failed, cancelled, shipped, rolled back) unless the toggle wants it. The ship restart script runs under `caffeinate -dimsu`, so the Mac stays awake through the restart until the relaunched Boop takes over. No-op off macOS.
+- Added: the status line in Settings, the dashboard pill and `get_config` say who holds the wake lock: you (the toggle), the self-build agent (with the build ids), or both.
 - Note: closing a MacBook's lid still sleeps it unless it's on AC power with an external display; caffeinate can't override that.
 
 ## Unreleased — Linux VPS deployment

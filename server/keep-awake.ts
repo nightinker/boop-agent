@@ -1,4 +1,6 @@
 import { spawn as nodeSpawn, type ChildProcess } from "node:child_process";
+import { existsSync } from "node:fs";
+import { wakeLockHolderPhrase, wakeLockSource, wakeLockSourceLabel, type WakeLockSource } from "./keep-awake-labels.js";
 
 /**
  * Keeps the Mac awake while Boop runs, like ChatGPT's desktop app, so it stays
@@ -7,8 +9,13 @@ import { spawn as nodeSpawn, type ChildProcess } from "node:child_process";
  * `-w` makes caffeinate exit by itself if Boop dies without cleaning up, so no
  * orphans pile up.
  *
- * Only the active copy holds the wake lock (see instance.ts): a Mac standing by
- * while the server is active lets itself sleep. Off macOS it does nothing.
+ * Two things can ask for the wake lock, and one caffeinate serves both:
+ * - the owner's toggle, honoured only on the active copy (see instance.ts): a
+ *   Mac standing by while the server is active lets itself sleep;
+ * - a self-build in progress (queued through restarting), whatever the toggle
+ *   says, so the Mac can't sleep in the middle of Boop changing itself. When
+ *   the last build ends, caffeinate stops unless the toggle still wants it.
+ * Off macOS it does nothing.
  *
  * Caveat: closing a MacBook's lid still sleeps it unless it's on AC power with
  * an external display (clamshell mode). caffeinate can't override that.
@@ -36,6 +43,14 @@ export interface KeepAwakeStatus {
   activeCopy: boolean;
   /** True while caffeinate is running. */
   active: boolean;
+  /** The owner's toggle is asking for the wake lock (enabled on the active copy). */
+  userHold: boolean;
+  /** A self-build in progress is asking for the wake lock. */
+  buildHold: boolean;
+  /** Self-builds in progress, oldest first. */
+  buildIds: string[];
+  /** Who wants the wake lock right now, or null when nobody does. */
+  heldBy: WakeLockSource | null;
   state: KeepAwakeState;
   /** When the current caffeinate started (ms since epoch), or null. */
   since: number | null;
@@ -62,8 +77,10 @@ export interface KeepAwakeDeps {
 export interface KeepAwakeController {
   /** Applies the owner's setting. */
   setEnabled(enabled: boolean): void;
-  /** Applies whether this copy is active; standby releases the wake lock. */
+  /** Applies whether this copy is active; standby releases the owner's wake lock. */
   setActiveCopy(active: boolean): void;
+  /** The self-builds in progress; any of them holds the wake lock regardless of the toggle. */
+  setBuilds(buildIds: string[]): void;
   status(): KeepAwakeStatus;
   /** Releases the wake lock for good (shutdown/restart). */
   stop(): void;
@@ -86,6 +103,7 @@ export function createKeepAwake(deps: KeepAwakeDeps = {}): KeepAwakeController {
 
   let enabled = false;
   let activeCopy = false;
+  let builds: string[] = [];
   let stopped = false;
   let child: ChildProcess | null = null;
   let since: number | null = null;
@@ -94,7 +112,9 @@ export function createKeepAwake(deps: KeepAwakeDeps = {}): KeepAwakeController {
   let restarts = 0;
   let lastError: string | null = null;
 
-  const wanted = () => supported && enabled && activeCopy && !stopped;
+  const userHold = () => supported && enabled && activeCopy;
+  const buildHold = () => supported && builds.length > 0;
+  const wanted = () => !stopped && (userHold() || buildHold());
 
   const clearRestart = () => {
     if (restartTimer !== null) {
@@ -183,24 +203,40 @@ export function createKeepAwake(deps: KeepAwakeDeps = {}): KeepAwakeController {
       activeCopy = value;
       sync();
     },
+    setBuilds(ids) {
+      const next = [...new Set(ids)];
+      if (next.length === builds.length && next.every((id, i) => id === builds[i])) return;
+      const had = builds.length > 0;
+      builds = next;
+      if (supported && !had && next.length > 0) {
+        log.log(`[keep-awake] self-build ${next.join(", ")} in progress; holding the wake lock`);
+        restartDelay = MIN_RESTART_DELAY_MS;
+      } else if (supported && had && next.length === 0) {
+        log.log(`[keep-awake] no self-build in progress${userHold() ? "; keeping the wake lock for the toggle" : ""}`);
+      }
+      sync();
+    },
     status() {
       const running = child !== null;
+      const holders = { userHold: userHold(), buildHold: buildHold(), buildIds: supported ? [...builds] : [] };
       const state: KeepAwakeState = !supported
         ? "unsupported"
         : stopped
           ? "stopped"
-          : !enabled
-            ? "disabled"
-            : !activeCopy
-              ? "standby"
-              : running
-                ? "active"
-                : "starting";
+          : wanted()
+            ? running
+              ? "active"
+              : "starting"
+            : !enabled
+              ? "disabled"
+              : "standby";
       return {
         supported,
         enabled: supported && enabled,
         activeCopy,
         active: running,
+        ...holders,
+        heldBy: stopped ? null : wakeLockSource(holders),
         state,
         since: running ? since : null,
         pid: running ? (child?.pid ?? null) : null,
@@ -215,6 +251,25 @@ export function createKeepAwake(deps: KeepAwakeDeps = {}): KeepAwakeController {
       release();
     },
   };
+}
+
+/**
+ * How to launch the ship restart script. On macOS it runs under
+ * `caffeinate -dimsu`, so the Mac stays awake through the restart even though
+ * this process, and the caffeinate it holds, quit partway through. caffeinate
+ * exits as soon as the script does (shipped or rolled back, or failed), so
+ * nothing is left behind; the relaunched Boop takes over the lock from there
+ * until it marks the build done.
+ */
+export function restartCommand(
+  script: string,
+  platform: NodeJS.Platform = process.platform,
+  exists: (path: string) => boolean = existsSync,
+): { command: string; args: string[] } {
+  if (platform === "darwin" && exists(KEEP_AWAKE_CAFFEINATE)) {
+    return { command: KEEP_AWAKE_CAFFEINATE, args: [KEEP_AWAKE_FLAGS, "/bin/bash", script] };
+  }
+  return { command: "/bin/bash", args: [script] };
 }
 
 let shared: KeepAwakeController | null = null;
@@ -240,10 +295,10 @@ export function describeKeepAwake(status: KeepAwakeStatus): string {
     case "standby":
       return "Standing by: another copy of Boop is active, so this Mac may sleep.";
     case "starting":
-      return "Starting caffeinate…";
+      return `Starting caffeinate ${wakeLockHolderPhrase(status)}…`.replace(" …", "…");
     case "stopped":
       return "Released: Boop is shutting down.";
     case "active":
-      return `Keeping the Mac awake since ${new Date(status.since ?? Date.now()).toISOString()}.`;
+      return `${wakeLockSourceLabel(status) ?? "Awake"} (since ${new Date(status.since ?? Date.now()).toISOString()}).`;
   }
 }

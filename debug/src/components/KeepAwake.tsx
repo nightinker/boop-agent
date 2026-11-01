@@ -1,10 +1,22 @@
 import { useCallback, useEffect, useState } from "react";
+import {
+  formatBuildIds,
+  wakeLockHolderPhrase,
+  wakeLockSourceLabel,
+  type WakeLockSource,
+} from "../../../server/keep-awake-labels.js";
 
 export interface KeepAwakeStatus {
   supported: boolean;
   enabled: boolean;
   activeCopy: boolean;
   active: boolean;
+  /** The owner's toggle is asking for the wake lock. */
+  userHold: boolean;
+  /** A self-build in progress is asking for it. */
+  buildHold: boolean;
+  buildIds: string[];
+  heldBy: WakeLockSource | null;
   state: "unsupported" | "disabled" | "standby" | "starting" | "active" | "stopped";
   since: number | null;
   pid: number | null;
@@ -71,10 +83,16 @@ export function formatSince(since: number | null): string {
 /** One-line description of the current state, for the settings row and the pill. */
 export function keepAwakeLabel(status: KeepAwakeStatus): string {
   switch (status.state) {
-    case "active":
-      return `Keeping Mac awake since ${formatSince(status.since)}`;
-    case "starting":
-      return status.lastError ? `Restarting caffeinate (${status.lastError})` : "Starting caffeinate…";
+    case "active": {
+      const since = formatSince(status.since);
+      return `${wakeLockSourceLabel(status) ?? "Awake"}${since ? ` · since ${since}` : ""}`;
+    }
+    case "starting": {
+      const who = wakeLockHolderPhrase(status);
+      return status.lastError
+        ? `Restarting caffeinate${who ? ` ${who}` : ""} (${status.lastError})`
+        : `Starting caffeinate${who ? ` ${who}` : ""}…`;
+    }
     case "standby":
       return "Standing by: another copy is active, so this Mac may sleep";
     case "disabled":
@@ -83,6 +101,22 @@ export function keepAwakeLabel(status: KeepAwakeStatus): string {
       return "Released: Boop is shutting down";
     case "unsupported":
       return "Only available on macOS";
+  }
+}
+
+/** Short label for the dashboard pill, naming who holds the lock. */
+export function keepAwakePillLabel(status: KeepAwakeStatus): string {
+  if (status.state !== "active") return keepAwakeLabel(status);
+  const builds = formatBuildIds(status.buildIds ?? []);
+  switch (status.heldBy) {
+    case "both":
+      return `Awake: you + self-build agent${builds ? ` ${builds}` : ""}`;
+    case "build":
+      return `Awake: self-build agent${builds ? ` ${builds}` : ""}`;
+    case "user":
+      return "Awake: you turned this on";
+    default:
+      return keepAwakeLabel(status);
   }
 }
 

@@ -201,7 +201,7 @@ export function createSelfTools(conversationId?: string): RuntimeTool[] {
     defineRuntimeTool(
       NAMESPACE,
       "get_config",
-      "Return Boop's runtime configuration: active provider, model, billing mode, user's timezone, current local time, loaded integrations, whether Boop is keeping the Mac awake (keepAwake: caffeinate -dimsu while this copy is active, and since when), and basic env info. Use when the user asks what model/provider/runtime Boop is using, what time it is, what timezone is active, or anything about the agent itself.",
+      "Return Boop's runtime configuration: active provider, model, billing mode, user's timezone, current local time, loaded integrations, whether Boop is keeping the Mac awake (keepAwake: caffeinate -dimsu, since when, and who holds it: heldBy is user when the owner turned it on, build when the self-build agent holds it while a build is in progress (buildIds), or both), and basic env info. Use when the user asks what model/provider/runtime Boop is using, what time it is, what timezone is active, or anything about the agent itself.",
       {},
       async () => {
         const integrations = (await listEnabledIntegrations()).map((i) => i.name);
@@ -238,6 +238,10 @@ export function createSelfTools(conversationId?: string): RuntimeTool[] {
             enabled: awake.enabled,
             active: awake.active,
             state: awake.state,
+            heldBy: awake.heldBy,
+            userHold: awake.userHold,
+            buildHold: awake.buildHold,
+            buildIds: awake.buildIds,
             since: awake.since ? new Date(awake.since).toISOString() : null,
             summary: describeKeepAwake(awake),
             command: awake.command,
