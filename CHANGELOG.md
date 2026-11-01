@@ -8,6 +8,13 @@ Format:
 
 ---
 
+## Unreleased — Answer bursts of texts once
+
+- Added: a **quiet period** for incoming iMessages (default 5s, `BOOP_MESSAGE_DEBOUNCE_MS`, `0` turns it off). Each new text in a conversation restarts the wait; once the sender has been quiet that long, every waiting text (joined by newlines, in order, with all images) is answered as one turn. Nothing is sent, not even a typing bubble, while the wait is open. Texts that arrive while Boop is still answering form the next batch. Conversations never mix.
+- Added: Sendblue `typing_indicator` webhooks sent to the existing `/sendblue/webhook` URL hold the wait open while the sender types (capped at 60s), and restart it when they stop.
+- Added: the `inboundMessages.claimQueued` Convex mutation, which claims a conversation's whole batch at once.
+- Texts are saved before the wait starts, so a shutdown or restart mid-wait loses nothing: they're answered together when Boop (or the copy that takes over) starts. Self-update also waits while a quiet period is open.
+
 ## Unreleased — Secrets without chat
 
 - Added: a **secret store** on the Mac. Values live in the macOS login Keychain (service `boop-secrets`, written through `security -i` on stdin so they never appear in process arguments), falling back to a chmod 600 `~/.config/boop/secrets.env` written atomically. A chmod 600 `secrets.index.json` keeps names and last-updated times. Nothing goes to Convex, memory, transcripts or logs.

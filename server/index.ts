@@ -397,6 +397,10 @@ async function main() {
       shuttingDown = true;
       // Release the wake lock first so no caffeinate outlives this process.
       awake.stop();
+      // Texts still in their quiet period are already saved as queued; they
+      // are answered after the restart or by the copy that takes over.
+      const waiting = inboundQueue.stop();
+      if (waiting) console.log(`[inbound] ${waiting} conversation(s) left queued for the next start`);
       // Hand over to another copy right away instead of after a timeout.
       const leaving = coordinator?.stop() ?? Promise.resolve();
       Promise.allSettled([closeLocalBrowser(), Promise.race([leaving, new Promise((r) => setTimeout(r, 3_000))])])

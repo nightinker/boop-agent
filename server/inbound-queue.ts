@@ -7,6 +7,14 @@ import { scanForSecrets } from "./secrets/redact.js";
  * first, so a second text sent while Boop is still answering the first waits
  * for that reply and sees it in the history. Different conversations still
  * run side by side.
+ *
+ * With a quiet period (debounceMs > 0) Boop doesn't answer straight away:
+ * each new text restarts a per-conversation timer, and only once the sender
+ * has been silent that long (and isn't typing) are all waiting texts claimed
+ * together and answered as one turn. Texts that arrive while Boop is still
+ * answering wait for the next batch. The texts themselves are saved before
+ * the timer starts, so a restart mid-wait loses nothing: they're answered
+ * when the queue recovers.
  */
 
 export interface InboundInput {
@@ -29,6 +37,8 @@ export interface InboundStore {
   enqueue(input: InboundInput): Promise<boolean>;
   /** The oldest queued text, or null if none or one is already being answered. */
   claimNext(conversationId: string): Promise<InboundItem | null>;
+  /** Every queued text, oldest first; empty if none or one is already being answered. */
+  claimQueued(conversationId: string): Promise<InboundItem[]>;
   finish(id: string, status: "done" | "failed", error?: string): Promise<void>;
   recoverInterrupted(): Promise<{ requeued: number; failed: number }>;
   pendingConversations(): Promise<string[]>;
@@ -42,11 +52,50 @@ export interface InboundQueue {
   drainAll(): Promise<void>;
   /** On startup: requeue texts a crash cut off, then answer everything waiting. */
   recover(): Promise<{ requeued: number; failed: number }>;
-  /** True while this copy is answering texts. */
+  /**
+   * The sender started or stopped typing. While they type, an open quiet
+   * period is held open (up to maxTypingWaitMs); when they stop, it restarts.
+   */
+  noteTyping(conversationId: string, isTyping: boolean): void;
+  /** True while this copy is answering texts or waiting out a quiet period. */
   isBusy(): boolean;
+  /**
+   * On shutdown: cancel the quiet-period timers. The waiting texts stay
+   * saved as queued and are answered after the restart (or by the copy that
+   * takes over). Returns how many conversations were still waiting.
+   */
+  stop(): number;
 }
 
 const FINISH_RETRIES = 3;
+
+export const DEFAULT_DEBOUNCE_MS = 5_000;
+export const DEFAULT_MAX_TYPING_WAIT_MS = 60_000;
+
+/** BOOP_MESSAGE_DEBOUNCE_MS: quiet period before answering; 0 turns it off. */
+export function debounceMsFromEnv(value: string | undefined): number {
+  if (value === undefined || value.trim() === "") return DEFAULT_DEBOUNCE_MS;
+  const ms = Number(value);
+  return Number.isFinite(ms) && ms >= 0 ? ms : DEFAULT_DEBOUNCE_MS;
+}
+
+/** Folds a burst of texts into one: contents joined by newlines, in order, with every image. */
+export function combineInbound(items: InboundItem[]): InboundItem {
+  if (items.length === 1) return items[0];
+  const last = items[items.length - 1];
+  return {
+    ...last,
+    _id: items[0]._id,
+    content: items
+      .map((item) => item.content)
+      .filter((content) => content.length > 0)
+      .join("\n"),
+    mediaUrls: items.flatMap((item) => item.mediaUrls),
+    source: items.some((item) => item.source === "webhook") ? "webhook" : "poll",
+    receivedAt: items[0].receivedAt,
+    attempts: Math.max(...items.map((item) => item.attempts)),
+  };
+}
 
 export function createInboundQueue(deps: {
   store: InboundStore;
@@ -59,6 +108,10 @@ export function createInboundQueue(deps: {
    * active one.
    */
   isActive?: () => boolean;
+  /** Quiet period before a conversation's texts are answered together. 0 = answer each at once. */
+  debounceMs?: number;
+  /** Longest a "typing…" signal can hold a quiet period open without a new text. */
+  maxTypingWaitMs?: number;
 }): InboundQueue {
   const { store, process } = deps;
   const isActive = deps.isActive ?? (() => true);
@@ -68,6 +121,36 @@ export function createInboundQueue(deps: {
   // Set when a text arrives while its conversation is draining, so the
   // running loop checks once more before it stops.
   const again = new Set<string>();
+  const debounceMs = Math.max(0, deps.debounceMs ?? 0);
+  const maxTypingWaitMs = deps.maxTypingWaitMs ?? DEFAULT_MAX_TYPING_WAIT_MS;
+  // Open quiet periods: a conversation in here isn't answered until it fires.
+  const timers = new Map<string, ReturnType<typeof setTimeout>>();
+  const typing = new Set<string>();
+
+  function startQuietPeriod(conversationId: string): void {
+    const pending = timers.get(conversationId);
+    if (pending) clearTimeout(pending);
+    const wait = typing.has(conversationId) ? maxTypingWaitMs : debounceMs;
+    const timer = setTimeout(() => {
+      timers.delete(conversationId);
+      typing.delete(conversationId);
+      void drain(conversationId);
+    }, wait);
+    timer.unref?.();
+    timers.set(conversationId, timer);
+  }
+
+  function cancelQuietPeriod(conversationId: string): void {
+    const pending = timers.get(conversationId);
+    if (pending) clearTimeout(pending);
+    timers.delete(conversationId);
+  }
+
+  async function claim(conversationId: string): Promise<InboundItem[]> {
+    if (debounceMs > 0) return store.claimQueued(conversationId);
+    const item = await store.claimNext(conversationId);
+    return item ? [item] : [];
+  }
 
   async function finish(item: InboundItem, status: "done" | "failed", error?: string) {
     for (let attempt = 1; attempt <= FINISH_RETRIES; attempt++) {
@@ -91,14 +174,18 @@ export function createInboundQueue(deps: {
         // Stop claiming new texts once this copy stands down; the active
         // copy picks up the rest.
         if (!isActive()) break;
-        const item = await store.claimNext(conversationId);
-        if (!item) break;
+        // The sender is still mid-burst; the quiet-period timer drains later.
+        if (timers.has(conversationId)) break;
+        const batch = await claim(conversationId);
+        if (batch.length === 0) break;
+        const item = combineInbound(batch);
         try {
           await process(item);
-          await finish(item, "done");
+          for (const claimed of batch) await finish(claimed, "done");
         } catch (err) {
           log.error(`[inbound] answering ${item._id} failed`, err);
-          await finish(item, "failed", err instanceof Error ? err.message : String(err));
+          const message = err instanceof Error ? err.message : String(err);
+          for (const claimed of batch) await finish(claimed, "failed", message);
         }
       }
     } while (again.has(conversationId));
@@ -130,13 +217,45 @@ export function createInboundQueue(deps: {
 
   return {
     async enqueue(input) {
-      const enqueued = await store.enqueue(input);
-      if (enqueued) void drain(input.conversationId);
-      return enqueued;
+      const { conversationId } = input;
+      if (debounceMs <= 0) {
+        const enqueued = await store.enqueue(input);
+        if (enqueued) void drain(conversationId);
+        return enqueued;
+      }
+      // Open (or restart) the quiet period before saving, so a drain already
+      // in flight can't claim this text and answer it before the burst ends.
+      const wasWaiting = timers.has(conversationId);
+      typing.delete(conversationId); // a text arriving means they stopped typing
+      startQuietPeriod(conversationId);
+      const timer = timers.get(conversationId);
+      let enqueued = false;
+      try {
+        enqueued = await store.enqueue(input);
+        return enqueued;
+      } finally {
+        // A duplicate (or a failed save) for an idle conversation shouldn't
+        // hold it up; the timer would only drain nothing new anyway.
+        if (!enqueued && !wasWaiting && timers.get(conversationId) === timer) cancelQuietPeriod(conversationId);
+      }
     },
     drain,
     drainAll,
-    isBusy: () => draining.size > 0,
+    noteTyping(conversationId, isTyping) {
+      if (debounceMs <= 0) return;
+      if (isTyping) typing.add(conversationId);
+      else typing.delete(conversationId);
+      // Typing only matters while texts are waiting to be answered.
+      if (timers.has(conversationId)) startQuietPeriod(conversationId);
+    },
+    isBusy: () => draining.size > 0 || timers.size > 0,
+    stop() {
+      const waiting = timers.size;
+      for (const timer of timers.values()) clearTimeout(timer);
+      timers.clear();
+      typing.clear();
+      return waiting;
+    },
     async recover() {
       const result = await store.recoverInterrupted();
       void drainAll().catch((err) => log.error("[inbound] drain after restart failed", err));
@@ -189,4 +308,17 @@ export function inboundFromSendblue(
     source,
     receivedAt: Number.isFinite(sentAt) ? sentAt : now,
   };
+}
+
+/**
+ * Reads a Sendblue typing-indicator webhook ({ number, is_typing, ... }).
+ * There `number` is the contact and `from_number` is Boop's own line.
+ */
+export function typingFromSendblue(payload: unknown): { conversationId: string; isTyping: boolean } | null {
+  if (!payload || typeof payload !== "object") return null;
+  const body = payload as Record<string, unknown>;
+  if (typeof body.is_typing !== "boolean") return null;
+  const number = str(body.number);
+  if (!number) return null;
+  return { conversationId: `sms:${number}`, isTyping: body.is_typing };
 }

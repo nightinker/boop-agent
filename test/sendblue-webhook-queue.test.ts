@@ -6,6 +6,10 @@ import { memoryInboundStore } from "./memory-inbound-store.js";
 
 const memory = vi.hoisted(() => ({ current: null as ReturnType<typeof memoryInboundStore> | null }));
 const turns = vi.hoisted(() => ({ log: [] as string[], active: 0, maxActive: 0 }));
+// A short quiet period keeps the test quick; the queue reads it at import.
+vi.hoisted(() => {
+  process.env.BOOP_MESSAGE_DEBOUNCE_MS = "50";
+});
 
 vi.mock("../server/inbound-store.js", async () => {
   const { memoryInboundStore } = await import("./memory-inbound-store.js");
@@ -50,6 +54,8 @@ beforeAll(async () => {
 });
 
 afterAll(() => {
+  inboundQueue.stop();
+  delete process.env.BOOP_MESSAGE_DEBOUNCE_MS;
   server.close();
   vi.unstubAllGlobals();
 });
@@ -74,16 +80,24 @@ describe("Sendblue webhook with the inbound queue", () => {
     expect((await post(textFrom("x", "hi"), "wrong")).status).toBe(401);
   });
 
-  it("answers two quick texts one after the other, in order", async () => {
-    const [a, b] = await Promise.all([post(textFrom("h1", "first text")), post(textFrom("h2", "second text"))]);
+  it("answers two quick texts once, as one combined turn", async () => {
+    const a = await post(textFrom("h1", "first text"));
+    const b = await post(textFrom("h2", "second text"));
     expect(await a.json()).toEqual({ ok: true });
     expect(await b.json()).toEqual({ ok: true });
+    // Nothing is answered while the quiet period is still open.
+    expect(turns.log).toEqual([]);
 
-    await inboundQueue.drain("sms:+15551234567");
+    await vi.waitFor(() => expect(memory.current!.rows.map((r) => r.status)).toEqual(["done", "done"]));
 
     expect(turns.maxActive).toBe(1);
-    expect(turns.log).toEqual(["start first text", "end first text", "start second text", "end second text"]);
-    expect(memory.current!.rows.map((r) => r.status)).toEqual(["done", "done"]);
+    expect(turns.log).toEqual(["start first text\nsecond text", "end first text\nsecond text"]);
+  });
+
+  it("accepts Sendblue typing indicators without queuing a text", async () => {
+    const res = await post({ number: "+15551234567", is_typing: true, from_number: "+15550000000" });
+    expect(await res.json()).toEqual({ ok: true, typing: true });
+    expect(memory.current!.rows).toHaveLength(2);
   });
 
   it("ignores a duplicate delivery of a text it already has", async () => {
