@@ -9,6 +9,9 @@ const MAX_ATTEMPTS = 3;
 // restarting (a dropped status update). It stops blocking its conversation.
 const STALE_PROCESSING_MS = 30 * 60_000;
 
+// Most texts one batched turn takes; anything past this waits for the next.
+const MAX_BATCH = 50;
+
 /**
  * Saves an inbound text unless one with the same Sendblue handle was already
  * saved, or already answered by the older dedup table (texts handled before
@@ -85,6 +88,49 @@ export const claimNext = mutation({
       startedAt: now,
     });
     return { ...next, status: "processing" as const, attempts: next.attempts + 1, startedAt: now };
+  },
+});
+
+/**
+ * Hands out every queued text in a conversation (oldest first, up to a cap)
+ * as one batch, under the same one-at-a-time rule as claimNext. Used when
+ * Boop waits for a quiet period and answers a burst of texts in one turn.
+ */
+export const claimQueued = mutation({
+  args: { conversationId: v.string() },
+  handler: async (ctx, args) => {
+    const busy = await ctx.db
+      .query("inboundMessages")
+      .withIndex("by_conversationId_and_status_and_enqueuedAt", (q) =>
+        q.eq("conversationId", args.conversationId).eq("status", "processing"),
+      )
+      .first();
+    if (busy) {
+      if (Date.now() - (busy.startedAt ?? busy.enqueuedAt) < STALE_PROCESSING_MS) return [];
+      await ctx.db.patch("inboundMessages", busy._id, {
+        status: "failed",
+        finishedAt: Date.now(),
+        error: "Answering it never finished.",
+      });
+    }
+
+    const queued = await ctx.db
+      .query("inboundMessages")
+      .withIndex("by_conversationId_and_status_and_enqueuedAt", (q) =>
+        q.eq("conversationId", args.conversationId).eq("status", "queued"),
+      )
+      .take(MAX_BATCH);
+    const now = Date.now();
+    const claimed = [];
+    for (const row of queued) {
+      await ctx.db.patch("inboundMessages", row._id, {
+        status: "processing",
+        attempts: row.attempts + 1,
+        startedAt: now,
+      });
+      claimed.push({ ...row, status: "processing" as const, attempts: row.attempts + 1, startedAt: now });
+    }
+    return claimed;
   },
 });
 

@@ -8,7 +8,13 @@ import type { OutboundImage } from "./images/outbound.js";
 import { redactContactHandle, redactPhoneNumbers } from "./privacy.js";
 import { maybeHandleScriptedDemoReply } from "./scripted-demo-replies.js";
 import { verifySendblueWebhookSecret } from "./sendblue-webhook-auth.js";
-import { createInboundQueue, inboundFromSendblue, type InboundItem } from "./inbound-queue.js";
+import {
+  createInboundQueue,
+  debounceMsFromEnv,
+  inboundFromSendblue,
+  typingFromSendblue,
+  type InboundItem,
+} from "./inbound-queue.js";
 import { convexInboundStore } from "./inbound-store.js";
 import { isActiveInstance } from "./instance.js";
 
@@ -418,6 +424,8 @@ export const inboundQueue = createInboundQueue({
   store: convexInboundStore,
   process: processInboundText,
   isActive: isActiveInstance,
+  // Wait for a quiet period so a burst of texts gets one answer.
+  debounceMs: debounceMsFromEnv(process.env.BOOP_MESSAGE_DEBOUNCE_MS),
 });
 
 export function createSendblueRouter(): express.Router {
@@ -426,6 +434,15 @@ export function createSendblueRouter(): express.Router {
   router.post("/webhook", async (req, res) => {
     if (!verifySendblueWebhookSecret(req.get("sb-signing-secret"))) {
       res.status(401).json({ error: "invalid webhook signature" });
+      return;
+    }
+
+    // A typing_indicator webhook pointed at this URL holds the quiet period
+    // open while the sender is still typing.
+    const typing = typingFromSendblue(req.body);
+    if (typing) {
+      inboundQueue.noteTyping(typing.conversationId, typing.isTyping);
+      res.json({ ok: true, typing: true });
       return;
     }
 

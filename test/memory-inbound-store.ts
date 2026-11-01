@@ -21,6 +21,16 @@ export function memoryInboundStore() {
       row.attempts++;
       return { ...row };
     },
+    async claimQueued(conversationId) {
+      const mine = rows.filter((r) => r.conversationId === conversationId);
+      if (mine.some((r) => r.status === "processing")) return [];
+      const claimed = mine.filter((r) => r.status === "queued");
+      for (const row of claimed) {
+        row.status = "processing";
+        row.attempts++;
+      }
+      return claimed.map((row) => ({ ...row }));
+    },
     async finish(id, status, error) {
       const row = rows.find((r) => r._id === id)!;
       row.status = status;
@@ -43,13 +53,18 @@ export function memoryInboundStore() {
   return { store, rows };
 }
 
-export function text(conversation: string, content: string, handle = `h-${conversation}-${content}`): InboundInput {
+export function text(
+  conversation: string,
+  content: string,
+  handle = `h-${conversation}-${content}`,
+  mediaUrls: string[] = [],
+): InboundInput {
   return {
     handle,
     conversationId: `sms:${conversation}`,
     fromNumber: conversation,
     content,
-    mediaUrls: [],
+    mediaUrls,
     source: "webhook",
     receivedAt: Date.now(),
   };
