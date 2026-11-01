@@ -15,7 +15,7 @@ reverse proxy with TLS, and Sendblue sends your iMessages to the server.
 | Texting Boop over iMessage via Sendblue | Apple data: iMessage history, Apple Calendar, Notes, Reminders (they read your Mac's databases and apps) |
 | Memory, recall and consolidation (stored in Convex) | Local browser use (Patchright Chrome; it needs a screen for login handoff) |
 | Automations and heartbeats | The desktop app and its "ship it" self-build restart (Mac only) |
-| Composio integrations (Gmail, Google Calendar, Slack, …) and proactive email/Slack | Dashboard over the internet (it stays private; use an SSH tunnel, below) |
+| Composio integrations (Gmail, Google Calendar, Slack, …) and proactive email/Slack | Dashboard over the internet without a login (use Cloudflare Access or an SSH tunnel, below) |
 | Claude or Codex runtime, sub-agents, skills | |
 
 On Linux, Boop turns the Mac-only features off by itself: the `apple` and
@@ -309,8 +309,39 @@ that off).
 
 ## Using the dashboard
 
-The dashboard is not exposed publicly. To use it, run the Vite dashboard on the
-server and reach it through an SSH tunnel:
+The dashboard is private by default. There are two ways to reach it.
+
+**At your public URL, behind Cloudflare Access (recommended).** Put the site
+behind a [Cloudflare Access](https://developers.cloudflare.com/cloudflare-one/applications/configure-apps/self-hosted-public-app/)
+login, and Boop trusts visitors who passed it:
+
+1. In Cloudflare Zero Trust, add two self-hosted applications for your domain:
+   - **Boop webhooks**: paths `sendblue/webhook`, `composio/webhook` and
+     `health`, with a **Bypass / Everyone** policy, so Sendblue and Composio
+     can reach Boop without a login.
+   - **Boop**: the domain with no path, with an **Allow** policy for your email.
+2. In `.env.local`, set your team domain and the **Boop** application's
+   Audience (AUD) tag (Access → Applications → Boop → Basic information):
+
+   ```bash
+   CF_ACCESS_TEAM_DOMAIN=your-team.cloudflareaccess.com
+   CF_ACCESS_AUD=<the AUD tag>
+   ```
+
+3. Build the dashboard once, and again after each update:
+
+   ```bash
+   npm run dashboard:build    # needs dev dependencies: plain `npm ci`, not --omit=dev
+   ```
+
+4. `sudo systemctl restart boop`, then open `https://boop.example.com`.
+
+Boop checks the signed token Cloudflare adds to every request from a logged-in
+visitor (signature, audience, team and expiry) and only trusts requests that
+come from the site itself, so other websites can't use your login to call it.
+Without both settings nothing changes: only `/health` and the webhooks answer.
+
+**Over an SSH tunnel.** Run the Vite dashboard on the server and forward it:
 
 ```bash
 # on the server, as boop, in the checkout
