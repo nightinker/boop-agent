@@ -289,7 +289,8 @@ function launchBuild(input: { conversationId: string; request: string; buildId: 
 /** Starts the oldest queued build, if nothing else is building. */
 export async function startNextQueuedBuild(): Promise<void> {
   const src = sourceDir();
-  if (!src) return;
+  // A catch-up install is about to restart Boop; queued builds wait for it.
+  if (!src || catchingUp) return;
   try {
     const next = await convex.mutation(api.selfBuilds.claimNextQueued, {});
     if (!next) return;
