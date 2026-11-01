@@ -1,5 +1,6 @@
 import { api } from "../../convex/_generated/api.js";
 import { convex } from "../convex-client.js";
+import { isActiveInstance } from "../instance.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const PRUNE_THRESHOLD = 0.05;
@@ -83,6 +84,7 @@ export async function cleanMemories(): Promise<{
 
 export function startCleanupLoop(intervalMs = 6 * 60 * 60 * 1000): () => void {
   const timer = setInterval(() => {
+    if (!isActiveInstance()) return;
     cleanMemories().catch((err) => console.error("[memory.clean] loop error", err));
   }, intervalMs);
   return () => clearInterval(timer);

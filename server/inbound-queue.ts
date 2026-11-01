@@ -41,6 +41,8 @@ export interface InboundQueue {
   drainAll(): Promise<void>;
   /** On startup: requeue texts a crash cut off, then answer everything waiting. */
   recover(): Promise<{ requeued: number; failed: number }>;
+  /** True while this copy is answering texts. */
+  isBusy(): boolean;
 }
 
 const FINISH_RETRIES = 3;
@@ -50,8 +52,15 @@ export function createInboundQueue(deps: {
   process: (item: InboundItem) => Promise<void>;
   log?: Pick<Console, "error" | "warn">;
   retryDelayMs?: number;
+  /**
+   * Whether this copy of Boop answers texts. A standby copy still saves every
+   * text (so nothing is lost if it takes over) but leaves answering to the
+   * active one.
+   */
+  isActive?: () => boolean;
 }): InboundQueue {
   const { store, process } = deps;
+  const isActive = deps.isActive ?? (() => true);
   const log = deps.log ?? console;
   const retryDelayMs = deps.retryDelayMs ?? 1_000;
   const draining = new Map<string, Promise<void>>();
@@ -78,6 +87,9 @@ export function createInboundQueue(deps: {
     do {
       again.delete(conversationId);
       for (;;) {
+        // Stop claiming new texts once this copy stands down; the active
+        // copy picks up the rest.
+        if (!isActive()) break;
         const item = await store.claimNext(conversationId);
         if (!item) break;
         try {
@@ -92,6 +104,7 @@ export function createInboundQueue(deps: {
   }
 
   function drain(conversationId: string): Promise<void> {
+    if (!isActive()) return Promise.resolve();
     const running = draining.get(conversationId);
     if (running) {
       again.add(conversationId);
@@ -122,6 +135,7 @@ export function createInboundQueue(deps: {
     },
     drain,
     drainAll,
+    isBusy: () => draining.size > 0,
     async recover() {
       const result = await store.recoverInterrupted();
       void drainAll().catch((err) => log.error("[inbound] drain after restart failed", err));

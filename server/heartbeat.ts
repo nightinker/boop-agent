@@ -2,6 +2,7 @@ import { api } from "../convex/_generated/api.js";
 import { convex } from "./convex-client.js";
 import { cancelAgent, runningAgentIds } from "./execution-agent.js";
 import { broadcast } from "./broadcast.js";
+import { isActiveInstance } from "./instance.js";
 
 const STALE_MS = 15 * 60 * 1000;
 const ORPHANED_MS = 90 * 1000;
@@ -36,6 +37,7 @@ export async function sweepStaleAgents(): Promise<void> {
 
 export function startHeartbeatLoop(intervalMs = 60_000): () => void {
   const timer = setInterval(() => {
+    if (!isActiveInstance()) return;
     sweepStaleAgents().catch((err) => console.error("[heartbeat] sweep error", err));
   }, intervalMs);
   return () => clearInterval(timer);

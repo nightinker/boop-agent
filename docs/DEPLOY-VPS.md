@@ -4,9 +4,9 @@ This guide runs Boop **headless on a Linux server** (for example a DigitalOcean
 droplet) instead of on your Mac. Boop runs as a `systemd` service behind a
 reverse proxy with TLS, and Sendblue sends your iMessages to the server.
 
-> **One instance at a time.** Only one Boop should receive the Sendblue
-> webhook. If your Mac and the server both run, every text is answered twice and
-> every automation fires twice. See [Run only one Boop](#run-only-one-boop).
+> **Mac and server together.** Your Mac and the server can both run: the Mac
+> is the active copy while it's online, and the server takes over when it isn't.
+> See [Running on your Mac and a server together](#running-on-your-mac-and-a-server-together).
 
 ## What works on the server and what doesn't
 
@@ -284,28 +284,33 @@ that points at your Mac in the Sendblue dashboard. Text Boop to test.
 The Composio webhook (proactive Gmail/Slack) is pointed at
 `PUBLIC_URL/composio/webhook` automatically when the server starts.
 
-## Run only one Boop
+## Running on your Mac and a server together
 
-Sendblue delivers each text to **every** registered receive webhook, and every
-running Boop runs the automations and heartbeats it finds in the shared Convex
-deployment. Two running instances therefore mean double replies and
-automations that fire twice. Composio also keeps a single webhook URL, so
-whichever instance started last receives proactive email/Slack events.
+The Mac and the server can both run, sharing one Convex deployment. They take
+turns instead of doing the work twice:
 
-While the server is live:
+- Every copy checks in every 15 seconds (the `instances` table). The online
+  copy with the highest priority is **active**: by default the Mac (100), then
+  the server (10). Override with `BOOP_INSTANCE_PRIORITY`.
+- Only the active copy answers texts and runs automations, heartbeats,
+  consolidation, the skills curator, cleanups and the Gmail/Slack watchers.
+  The other copy stands by and spends no tokens.
+- Keep **both** Sendblue receive webhooks registered (the Mac's tunnel and the
+  server's domain). Every copy saves each text to the shared inbox, which
+  skips duplicates, so a text that arrives during a handover is answered by
+  whichever copy takes over.
+- When the Mac quits, the server takes over within about 15 seconds; if the
+  Mac sleeps or loses its connection, within about 45. When the Mac comes
+  back, the server steps down within one check-in, and the Mac waits 20
+  seconds before starting so the two never overlap.
+- The active copy points Composio's webhook (one address per account) at
+  itself when it takes over.
+- Boop knows which copy it is: its prompt says where it runs, whether it's
+  active and how the other copy is doing. Self-builds asked for on the server
+  are queued; the Mac starts them when it's back. Shipping happens on the Mac.
 
-- Quit Boop on your Mac (desktop app and `npm run dev`). If you do start it
-  locally for development, set `SENDBLUE_AUTO_WEBHOOK=false` and
-  `COMPOSIO_AUTO_WEBHOOK=false` and keep `PUBLIC_URL` at `http://localhost:3456`
-  in the Mac's `.env.local` first, so starting it does not take the webhooks
-  back from the server — and still stop the server
-  (`sudo systemctl stop boop`) if the local copy uses the same Convex
-  deployment, because automations would otherwise run in both places.
-- Keep exactly one receive webhook in Sendblue: the server's.
-
-To move back to the Mac: `sudo systemctl disable --now boop`, then start Boop
-on the Mac (its `npm run dev` re-registers its own webhooks unless you turned
-that off).
+To run only the server, quit the Mac app; to run only the Mac,
+`sudo systemctl disable --now boop`.
 
 ## Using the dashboard
 
@@ -355,6 +360,17 @@ Settings show no Local browser or Apple data sections on the server; that's expe
 
 ## Updating
 
+With `BOOP_AUTO_UPDATE=true` in `.env.local`, the server follows `main` by
+itself: every 5 minutes it checks GitHub, and when a build has shipped (its PR
+merged) it fast-forwards, reinstalls dependencies and rebuilds the dashboard
+only if they changed, then restarts (systemd starts it again). It waits while
+it's answering a text, never overwrites local changes, and goes back to the old
+code if a step fails. Install the dev dependencies once so it can build the
+dashboard: `ELECTRON_SKIP_BINARY_DOWNLOAD=1 npm install`. Convex functions are
+pushed by the Mac app when it ships.
+
+By hand:
+
 ```bash
 sudo -iu boop
 cd ~/boop-agent
@@ -393,5 +409,5 @@ systemd service, not both.
   embedding model.
 - **No replies** — `npm run sendblue:webhook:check -- https://boop.example.com/sendblue/webhook`,
   and `curl https://boop.example.com/health` from outside the server.
-- **Double replies** — another instance (usually the Mac) is still receiving
-  the webhook. See [Run only one Boop](#run-only-one-boop).
+- **Double replies** — another copy running older code that doesn't take turns.
+  Update both. See [Running on your Mac and a server together](#running-on-your-mac-and-a-server-together).
