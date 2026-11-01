@@ -8,6 +8,16 @@ Format:
 
 ---
 
+## Unreleased — Secrets without chat
+
+- Added: a **secret store** on the Mac. Values live in the macOS login Keychain (service `boop-secrets`, written through `security -i` on stdin so they never appear in process arguments), falling back to a chmod 600 `~/.config/boop/secrets.env` written atomically. A chmod 600 `secrets.index.json` keeps names and last-updated times. Nothing goes to Convex, memory, transcripts or logs.
+- Added: dispatcher tools `request_secret(name, description)` (a one-time, ~10-minute link to a local password page; the only way to set or change a secret), `list_secrets` (names, set/unset, last updated), `delete_secret` (needs the owner's confirmation) and `import_secrets_from_file` (moves an env file such as `~/.config/boop/r2.env` into the store and can delete it). Also `npm run secrets:import -- <file> [--remove]`.
+- Added: sub-agent tools `run_with_secrets(command, secretNames)` (runs bash with the named secrets as env vars; output comes back with values and their base64/base64url/URL-encoded/hex forms redacted) and `list_secrets`. Sub-agents are told never to print or write secret values and not to source credential env files.
+- Added: known secret values are redacted from sub-agent logs, tool results, replies and spawn results. A text that looks like a credential (AWS/GitHub/Slack/OpenAI-style keys, private keys, `*_SECRET=…`, 64-hex or long random tokens) is cut out before it's saved, gets a fixed "rotate it and use the secure link" reply, and is not offered to memory.
+- Added: a Secrets card in Settings on the debug dashboard (names and status only, with Delete).
+- Secrets are Mac-only: on a server copy the tools and routes refuse with a clear message.
+- Note: Boop skills that source an env file (e.g. a video skill reading `r2.env`) live in Convex, not the repo; after importing the file, ask Boop to update that skill to use `run_with_secrets`.
+
 ## Unreleased — Keep Mac awake
 
 - Added: **Keep Mac awake** (on by default). On macOS, while this copy of Boop is the active one, it runs `caffeinate -dimsu -w <boop pid>` (no display, idle, disk or AC system sleep; declares user activity), restarts it with backoff if it exits, and kills it on shutdown, when stepping down to standby, or when the setting is turned off. `-w` makes it exit on its own if Boop dies. No-op on other platforms.

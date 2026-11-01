@@ -17,6 +17,17 @@ import { COMPOSIO_ACCOUNT_INTEGRATION } from "./integrations/composio-account-lo
 import { createAutomationTools } from "./automation-tools.js";
 import { createDraftDecisionTools } from "./draft-tools.js";
 import { createSelfTools } from "./self-tools.js";
+import {
+  SECRETS_DISPATCHER_ALLOWED_TOOLS,
+  SECRETS_DISPATCHER_PROMPT,
+  createSecretDispatcherTools,
+} from "./secrets/tools.js";
+import {
+  PASTED_SECRET_REPLY,
+  hadSecretRemoved,
+  redactSecrets,
+  scanForSecrets,
+} from "./secrets/redact.js";
 import { recoveryHint, tryRescueCommand } from "./rescue-commands.js";
 import { otherAccountNames, rescueDeps, syncClaudeAccount } from "./rescue-wiring.js";
 import {
@@ -59,6 +70,7 @@ Your only tools:
 - get_config / uptime / list_skills / set_runtime / set_model / set_codex_reasoning_effort / set_timezone / list_claude_accounts / set_claude_account / list_integrations / search_composio_catalog / inspect_toolkit (self-inspection)
 - start_self_build / list_self_builds / ship_self_build / cancel_self_build (changing Boop's own code)
 - learn_skill (teach Boop a skill from a link, file, notes or what you just did)
+- request_secret / list_secrets / delete_secret / import_secrets_from_file (credentials, kept out of chat)
 
 You cannot answer factual questions from your own knowledge. Not allowed.
 You have NO browser, NO WebSearch, NO WebFetch, NO file access, NO APIs.
@@ -169,6 +181,7 @@ version, never mind, etc.), call reject_draft.
 Never claim something was sent unless send_draft returned success.
 ${SELF_BUILD_PROMPT}
 ${LEARN_INSTRUCTIONS}
+${SECRETS_DISPATCHER_PROMPT}
 
 Integration capabilities — IMPORTANT:
 You only know integration NAMES, not their actual tool surface. Composio's
@@ -426,6 +439,17 @@ export async function handleUserMessageWithAttachments(
   opts: HandleOpts,
 ): Promise<InteractionTurnResult> {
   const turnId = randomId("turn");
+  // A credential pasted into chat is cut out before the text is saved, shown
+  // to the model or offered to memory. (iMessage texts were already scrubbed
+  // when queued; this also covers the dashboard chat.)
+  let pastedSecret = false;
+  if (opts.kind !== "proactive") {
+    const scan = scanForSecrets(opts.content);
+    if (scan.found || hadSecretRemoved(opts.content)) {
+      pastedSecret = true;
+      opts = { ...opts, content: scan.redacted };
+    }
+  }
   const enabledIntegrations = await listEnabledIntegrations();
   const integrations = enabledIntegrations.map((i) => i.name);
   const integrationSummary = describeIntegrationsForPrompt(enabledIntegrations);
@@ -447,6 +471,22 @@ export async function handleUserMessageWithAttachments(
     conversationId: opts.conversationId,
     content: opts.content,
   });
+
+  if (pastedSecret) {
+    const reply = PASTED_SECRET_REPLY;
+    console.log(`[turn ${opts.turnTag ?? turnId.slice(-6)}] pasted secret removed; warned the user`);
+    broadcast("assistant_message", { conversationId: opts.conversationId, content: reply });
+    if (opts.persistAssistantReply) {
+      await convex.mutation(api.messages.send, {
+        conversationId: opts.conversationId,
+        role: "assistant",
+        content: reply,
+        turnId,
+      });
+    }
+    // No model turn and no memory extraction for this message.
+    return { reply, attachments: [] };
+  }
 
   const history =
     opts.kind === "proactive"
@@ -559,7 +599,7 @@ export async function handleUserMessageWithAttachments(
     opts.conversationId.startsWith("sms:") && opts.kind !== "proactive";
 
   const sendAck = async (message: string): Promise<void> => {
-    const text = redactPhoneNumbers(message.trim());
+    const text = redactSecrets(redactPhoneNumbers(message.trim()));
     if (!text) return;
     if (opts.conversationId.startsWith("sms:") && opts.kind !== "proactive") {
       const number = opts.conversationId.slice(4);
@@ -598,6 +638,7 @@ export async function handleUserMessageWithAttachments(
     ...createSelfTools(opts.conversationId),
     ...createSelfBuildTools(opts.conversationId),
     ...createLearnTools(opts.conversationId),
+    ...createSecretDispatcherTools(opts.conversationId),
     defineRuntimeTool(
       "boop-ack",
       "send_ack",
@@ -668,7 +709,7 @@ export async function handleUserMessageWithAttachments(
           log(`attachments: +${attached.length} (dropped ${dropped.length})`);
         }
         return runtimeText(
-          `[agent ${res.agentId} ${res.status}]\n\n${redactPhoneNumbers(res.result)}` +
+          `[agent ${res.agentId} ${res.status}]\n\n${redactSecrets(redactPhoneNumbers(res.result))}` +
             describeSpawnAttachments(attached, dropped),
         );
       },
@@ -699,6 +740,7 @@ export async function handleUserMessageWithAttachments(
               "mcp__boop-draft-decisions__send_draft",
               ...SELF_BUILD_ALLOWED_TOOLS,
               ...LEARN_ALLOWED_TOOLS,
+              ...SECRETS_DISPATCHER_ALLOWED_TOOLS,
               "mcp__boop-draft-decisions__reject_draft",
               "mcp__boop-ack__send_ack",
               "mcp__boop-self__get_config",
@@ -732,7 +774,7 @@ export async function handleUserMessageWithAttachments(
       onText: (chunk) => opts.onThinking?.(chunk),
       onToolUse: (toolName, input) => {
         const name = toolName.replace(/^mcp__boop-[a-z-]+__/, "");
-        const inputPreview = JSON.stringify(input);
+        const inputPreview = redactSecrets(JSON.stringify(input));
         log(
           `tool: ${name}(${inputPreview.length > 90 ? inputPreview.slice(0, 90) + "…" : inputPreview})`,
         );
@@ -777,7 +819,7 @@ export async function handleUserMessageWithAttachments(
   // "(no reply)" instead of composing a real reply — usually after a tool
   // call cycle where it lost the thread of what to say. Treat those as
   // empty so the user gets a real fallback they can act on.
-  reply = redactPhoneNumbers(reply.trim());
+  reply = redactSecrets(redactPhoneNumbers(reply.trim()));
   // Match "(no output)" / "no reply." / "(No Response)" etc. Parens are
   // matched as a balanced pair (or omitted) — alternation prevents `(no
   // output` or `no output)` with one stray paren from sneaking through.

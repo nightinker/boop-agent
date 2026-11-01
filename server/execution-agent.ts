@@ -26,6 +26,12 @@ import {
 } from "./images/attach-tool.js";
 import { OutboundImageCollector, type OutboundImage } from "./images/outbound.js";
 import { isUsageLimitError } from "./usage-limit.js";
+import { redactSecrets, redactSecretsDeep } from "./secrets/redact.js";
+import {
+  SECRETS_EXECUTION_PROMPT,
+  SECRETS_NAMESPACE,
+  createSecretExecutionTools,
+} from "./secrets/tools.js";
 
 const running = new Map<string, AbortController>();
 
@@ -68,6 +74,7 @@ function isBrowserFillTool(toolName: string): boolean {
 }
 
 export function redactToolInputForLog(toolName: string, input: unknown): unknown {
+  input = redactSecretsDeep(input);
   if (!isBrowserFillTool(toolName)) return input;
   if (!input || typeof input !== "object" || Array.isArray(input)) return input;
   return {
@@ -186,14 +193,14 @@ export async function spawnExecutionAgent(opts: SpawnExecutionAgentOpts): Promis
     agentId,
     conversationId: opts.conversationId,
     name,
-    task: opts.task,
+    task: redactSecrets(opts.task),
     runtime: runtimeConfig.runtime,
     model: runtimeConfig.model,
     reasoningEffort: runtimeConfig.reasoningEffort,
     billingMode: runtimeConfig.billingMode,
     mcpServers: opts.integrations,
   });
-  broadcast("agent_spawned", { agentId, name, task: opts.task });
+  broadcast("agent_spawned", { agentId, name, task: redactSecrets(opts.task) });
 
   await convex.mutation(api.agents.update, { agentId, status: "running" });
 
@@ -218,7 +225,8 @@ export async function spawnExecutionAgent(opts: SpawnExecutionAgentOpts): Promis
       ? await buildRuntimeToolsForIntegrations(opts.integrations, opts.conversationId)
       : [];
   const mcpServers = integrationServers;
-  const runtimeTools = [...draftTools, ...attachmentTools, ...skillTools, ...integrationTools];
+  const secretTools = createSecretExecutionTools();
+  const runtimeTools = [...draftTools, ...attachmentTools, ...skillTools, ...secretTools, ...integrationTools];
   const runtimeToolNamespaces = [...new Set(integrationTools.map((tool) => tool.namespace))];
   const allowedTools = [
     "WebSearch",
@@ -228,6 +236,7 @@ export async function spawnExecutionAgent(opts: SpawnExecutionAgentOpts): Promis
     ...(draftTools.length ? ["mcp__boop-drafts__*"] : []),
     ...(attachmentTools.length ? [`mcp__${ATTACHMENTS_NAMESPACE}__*`] : []),
     `mcp__${SKILLS_NAMESPACE}__*`,
+    `mcp__${SECRETS_NAMESPACE}__*`,
     ...runtimeToolNamespaces.flatMap((n) => [`mcp__${n}__*`]),
   ];
 
@@ -248,6 +257,7 @@ export async function spawnExecutionAgent(opts: SpawnExecutionAgentOpts): Promis
       systemPrompt:
         EXECUTION_SYSTEM +
         (attachmentTools.length ? IMAGE_ATTACHMENTS_PROMPT : "") +
+        SECRETS_EXECUTION_PROMPT +
         buildSkillsSection(skillIndex),
       claudeMcpServers: mcpServers,
       tools: runtimeTools,
@@ -259,7 +269,7 @@ export async function spawnExecutionAgent(opts: SpawnExecutionAgentOpts): Promis
         await convex.mutation(api.agents.addLog, {
           agentId,
           logType: "text",
-          content: text,
+          content: redactSecrets(text),
         });
       },
       onToolUse: async (toolName, input) => {
@@ -278,7 +288,8 @@ export async function spawnExecutionAgent(opts: SpawnExecutionAgentOpts): Promis
         });
         broadcast("agent_tool", { agentId, toolName, accounts });
       },
-      onToolResult: async (_toolName, text) => {
+      onToolResult: async (_toolName, rawText) => {
+        const text = redactSecrets(rawText);
         const last = toolCalls[toolCalls.length - 1];
         if (last && last.result === undefined) last.result = text.slice(0, 300);
         await convex.mutation(api.agents.addLog, {
@@ -289,6 +300,7 @@ export async function spawnExecutionAgent(opts: SpawnExecutionAgentOpts): Promis
       },
     });
     if (!buffer) buffer = result.text;
+    buffer = redactSecrets(buffer);
     usage = result.usage;
     if (isUsageLimitError(buffer, result.errorCode) || isUsageLimitError(result.text)) {
       usageLimited = true;
@@ -303,7 +315,7 @@ export async function spawnExecutionAgent(opts: SpawnExecutionAgentOpts): Promis
     }
   } catch (err) {
     status = abort.signal.aborted ? "cancelled" : "failed";
-    errorMsg = String(err);
+    errorMsg = redactSecrets(String(err));
     if (isUsageLimitError(err)) usageLimited = true;
     await convex.mutation(api.agents.addLog, {
       agentId,

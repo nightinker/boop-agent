@@ -5,8 +5,8 @@ import { convex } from "./convex-client.js";
 import cors from "cors";
 import { createServer } from "node:http";
 import { WebSocketServer } from "ws";
-import { addClient } from "./broadcast.js";
-import { createSendblueRouter, inboundQueue } from "./sendblue.js";
+import { addClient, broadcast } from "./broadcast.js";
+import { createSendblueRouter, inboundQueue, sendImessage } from "./sendblue.js";
 import { startSendbluePoller } from "./sendblue-poller.js";
 import { handleUserMessage } from "./interaction-agent.js";
 import { loadIntegrations } from "./integrations/registry.js";
@@ -25,6 +25,8 @@ import { createBrowserRouter } from "./browser-routes.js";
 import { createAppleRouter } from "./apple-routes.js";
 import { closeLocalBrowser } from "./browser/launcher.js";
 import { createChangelogRouter } from "./changelog.js";
+import { createSecretsRouter } from "./secrets/routes.js";
+import { secretStore, secretsSupported } from "./secrets/store.js";
 import {
   getRuntimeConfig,
   resolveModelInput,
@@ -63,6 +65,13 @@ async function main() {
   // local BGE-large model in the background so the first user-facing
   // recall() doesn't pay the model-load cost.
   preloadLocalModel();
+  // Load stored secret values into the redactor so logs and replies are
+  // scrubbed from the first turn. Secrets only exist on the Mac.
+  if (secretsSupported()) {
+    secretStore()
+      .refreshRedactor()
+      .catch((err) => console.warn("[secrets] couldn't load the redactor", err instanceof Error ? err.message : err));
+  }
   // Keep the Mac awake (caffeinate) while this copy is the active one. A no-op
   // off macOS. It only starts once the coordinator says this copy is active.
   const awake = keepAwake();
@@ -229,6 +238,24 @@ async function main() {
   app.use("/apple", createAppleRouter());
   app.use("/changelog", createChangelogRouter());
   app.use("/keep-awake", createKeepAwakeRouter(awake));
+  app.use(
+    "/secrets",
+    createSecretsRouter({
+      onChanged: () => broadcast("secrets_changed", {}),
+      // Tell the owner it's done (name only), so the chat can pick up again.
+      onSaved: async (request) => {
+        const text = `🔐 Saved ${request.name} securely on your Mac. Tell me when you want me to carry on.`;
+        if (!request.conversationId) return;
+        if (request.conversationId.startsWith("sms:")) await sendImessage(request.conversationId.slice(4), text);
+        await convex.mutation(api.messages.send, {
+          conversationId: request.conversationId,
+          role: "assistant",
+          content: text,
+        });
+        broadcast("assistant_message", { conversationId: request.conversationId, content: text });
+      },
+    }),
+  );
 
   app.post("/agents/:id/cancel", (req, res) => {
     const ok = cancelAgent(req.params.id);

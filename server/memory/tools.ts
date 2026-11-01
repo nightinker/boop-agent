@@ -2,6 +2,7 @@ import { z } from "zod";
 import { api } from "../../convex/_generated/api.js";
 import { convex } from "../convex-client.js";
 import { embed, embeddingsAvailable } from "../embeddings.js";
+import { scanForSecrets } from "../secrets/redact.js";
 import { createClaudeMcpServer } from "../runtimes/claude.js";
 import { defineRuntimeTool } from "../runtimes/tool.js";
 import { runtimeText, type RuntimeTool } from "../runtimes/types.js";
@@ -38,6 +39,11 @@ export function createMemoryTools(conversationId: string): RuntimeTool[] {
           .describe("memoryId(s) this replaces (will be archived)."),
       },
       async (args) => {
+        // Secrets never go into memory, stored or pasted.
+        const scan = scanForSecrets(args.content);
+        if (scan.found) {
+          return runtimeText("Not stored: that looks like it contains a secret. Secrets never go into memory.", false);
+        }
         const tier = args.tier ?? SEGMENT_PREFERRED_TIER[args.segment];
         const memoryId = makeMemoryId();
         const embedding = (await embed(args.content)) ?? undefined;
