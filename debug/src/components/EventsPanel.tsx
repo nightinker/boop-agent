@@ -47,13 +47,13 @@ export function EventsPanel({ isDark }: { isDark: boolean }) {
         <div className="space-y-2">
           {events.map((e) => (
             <div key={e._id} className={panelCardClass(isDark, "px-3 py-2.5")}>
-              <div className="flex items-center gap-2 text-[10px] mono">
+              <div className="flex items-center gap-2 text-[10px] mono max-md:flex-wrap max-md:gap-y-1">
                 <span
                   className={`rounded-full px-1.5 py-0.5 ${EVENT_COLOR[e.eventType] ?? "bg-zinc-500/10 text-zinc-400"}`}
                 >
                   {e.eventType}
                 </span>
-                {e.conversationId && <span className={muted}>{e.conversationId}</span>}
+                {e.conversationId && <span className={`${muted} max-md:min-w-0 max-md:break-all`}>{e.conversationId}</span>}
                 {e.memoryId && <span className={muted}>mem:{e.memoryId.slice(-6)}</span>}
                 {e.agentId && <span className={muted}>agent:{e.agentId.slice(-6)}</span>}
                 <span className={`${muted} ml-auto`}>

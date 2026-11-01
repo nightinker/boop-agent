@@ -189,7 +189,7 @@ export function ConsolidationPanel({ isDark }: { isDark: boolean }) {
                 onClick={() => setSelectedId(run.runId)}
                 className={`${panelCardClass(isDark, "cursor-pointer px-4 py-3.5 transition-colors fade-in")} ${hoverBg}`}
               >
-                <div className="flex items-center gap-2.5 mb-1.5">
+                <div className="flex items-center gap-2.5 mb-1.5 max-md:flex-wrap">
                   <span className="relative flex h-2.5 w-2.5 shrink-0">
                     {isActive && (
                       <span
@@ -215,7 +215,7 @@ export function ConsolidationPanel({ isDark }: { isDark: boolean }) {
                   </span>
                 </div>
 
-                <div className="flex items-center gap-4 ml-5 text-[11px] mono">
+                <div className="flex items-center gap-4 ml-5 text-[11px] mono max-md:flex-wrap max-md:gap-x-3 max-md:gap-y-1">
                   <Metric
                     label="proposals"
                     value={run.proposalsCount}
@@ -368,7 +368,7 @@ function ConsolidationDetail({
         </span>
       </div>
 
-      <div className={panelCardClass(isDark, "grid grid-cols-4 gap-4 px-5 py-3 text-center")}>
+      <div className={panelCardClass(isDark, "grid grid-cols-4 gap-4 px-5 py-3 text-center max-sm:grid-cols-2 max-sm:px-4")}>
         <SummaryStat
           label="proposals"
           value={run.proposalsCount}
@@ -569,7 +569,7 @@ function ReasoningSection({ run, isDark }: { run: any; isDark: boolean }) {
                   : "bg-slate-50 border-slate-200"
               }`}
             >
-              <div className="flex items-center gap-2 mb-1.5">
+              <div className="flex items-center gap-2 mb-1.5 max-md:flex-wrap">
                 <span
                   className={`text-[10px] px-1.5 py-0.5 rounded border font-semibold mono ${outcome.color} ${outcome.bg} ${outcome.border}`}
                 >

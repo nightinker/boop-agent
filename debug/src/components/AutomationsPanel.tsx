@@ -76,7 +76,7 @@ export function AutomationsPanel({ isDark }: { isDark: boolean }) {
               className={`${panelCardClass(isDark, "cursor-pointer px-4 py-3.5 transition-colors fade-in")} ${hoverBg}`}
               onClick={() => setSelectedId(auto.automationId)}
             >
-              <div className="flex items-center gap-2.5 mb-1.5">
+              <div className="flex items-center gap-2.5 mb-1.5 max-md:flex-wrap">
                 <button
                   onClick={(e) => {
                     e.stopPropagation();

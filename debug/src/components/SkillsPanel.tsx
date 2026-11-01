@@ -588,18 +588,18 @@ export function SkillsPanel({ isDark }: { isDark: boolean }) {
                 </button>
               ))}
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 max-md:w-full">
               <input
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 placeholder="Search skills"
                 aria-label="Search skills"
-                className={`h-8 w-48 rounded-xl border px-2.5 text-xs outline-none ${control}`}
+                className={`h-8 w-48 rounded-xl border px-2.5 text-xs outline-none max-md:h-10 max-md:w-auto max-md:min-w-0 max-md:flex-1 ${control}`}
               />
               <button
                 type="button"
                 onClick={() => setCreating(true)}
-                className={`h-8 rounded-xl px-3 text-xs font-medium ${
+                className={`h-8 rounded-xl px-3 text-xs font-medium max-md:h-10 max-md:shrink-0 ${
                   isDark ? "bg-zinc-100 text-zinc-950 hover:bg-white" : "bg-zinc-900 text-white hover:bg-zinc-800"
                 }`}
               >

@@ -352,3 +352,51 @@ button.toggle-switch {
     animation: none;
   }
 }
+
+/* ── Phone layout (< 768px, Tailwind's `md`) ──
+   Everything phone-only lives in this query or in `max-md:` classes, so the
+   desktop layout is untouched. Keep the breakpoint in sync with lib/mobileNav.ts. */
+@media (max-width: 767px) {
+  /* 16px side gutters instead of the desktop clamp(). */
+  .view-shell {
+    padding-inline: 1rem;
+    overflow-wrap: break-word;
+  }
+
+  /* iOS Safari zooms the page when focusing a field under 16px. */
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+  textarea,
+  select {
+    font-size: 16px;
+  }
+
+  /* Code, logs and tables scroll inside their own box, never the page. */
+  .view-shell pre,
+  .changelog-drawer pre {
+    max-width: 100%;
+    overflow-x: auto;
+  }
+
+  .view-shell table {
+    display: block;
+    max-width: 100%;
+    overflow-x: auto;
+  }
+
+  /* Small toggles and icon buttons keep their look but get a ~44px tap area. */
+  .toggle-switch,
+  .touch-hit {
+    position: relative;
+  }
+
+  .toggle-switch::after,
+  .touch-hit::after {
+    content: "";
+    position: absolute;
+    inset: -10px;
+  }
+
+  .view-shell summary {
+    padding-block: 0.375rem;
+  }
+}

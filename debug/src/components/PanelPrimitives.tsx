@@ -50,7 +50,7 @@ export function PanelPage({
           <p className="mt-1 text-sm text-zinc-500">{description}</p>
         </div>
         {(stat || action) && (
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 max-md:flex-wrap">
             {stat}
             {action}
           </div>

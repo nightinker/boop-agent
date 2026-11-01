@@ -929,10 +929,10 @@ function KeepAwakeRow({ isDark }: { isDark: boolean }) {
             />
           </button>
           <div
-            className={`flex items-center gap-1.5 text-[11px] ${isDark ? "text-zinc-400" : "text-zinc-500"}`}
+            className={`flex items-center gap-1.5 text-[11px] max-md:items-start max-md:text-xs ${isDark ? "text-zinc-400" : "text-zinc-500"}`}
             role="status"
           >
-            <span className={`inline-block h-2 w-2 rounded-full ${dot}`} />
+            <span className={`inline-block h-2 w-2 rounded-full ${dot} max-md:mt-1 max-md:shrink-0`} />
             {status ? keepAwakeLabel(status) : "Checking…"}
           </div>
           {error && <div className="text-[11px] text-rose-400">{error}</div>}

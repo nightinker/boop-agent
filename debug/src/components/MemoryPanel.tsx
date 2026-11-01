@@ -192,7 +192,7 @@ export function MemoryPanel({
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder="Search memories…"
-              className={`min-w-[200px] flex-1 rounded-xl border px-3 py-1.5 text-sm focus:outline-none ${
+              className={`min-w-[200px] flex-1 rounded-xl max-md:min-w-0 max-md:basis-full border px-3 py-1.5 text-sm focus:outline-none ${
                 isDark
                   ? "border-white/10 bg-[#17171a] text-zinc-300 placeholder:text-zinc-600"
                   : "border-zinc-200 bg-white text-zinc-700 placeholder:text-zinc-400"
@@ -248,7 +248,7 @@ export function MemoryPanel({
                       setExpandedId(isExpanded ? null : r.memoryId)
                     }
                   >
-                    <div className="flex items-center gap-2 mb-1">
+                    <div className="flex items-center gap-2 mb-1 max-md:flex-wrap">
                       <span
                         className={`text-[10px] px-1.5 py-0.5 rounded border font-medium ${
                           isDark ? tierBadge.dark : tierBadge.light

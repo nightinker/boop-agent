@@ -150,7 +150,7 @@ function BuildCard({
         {build.testsPassed === false && (
           <span className="text-[11px] text-amber-500">checks failing</span>
         )}
-        <span className={`mono text-[11px] ${muted} sm:ml-auto`}>{build.buildId}</span>
+        <span className={`mono text-[11px] ${muted} sm:ml-auto max-md:break-all`}>{build.buildId}</span>
       </div>
 
       <p
@@ -165,7 +165,7 @@ function BuildCard({
         <button
           type="button"
           onClick={() => setExpanded((v) => !v)}
-          className={`mt-1 text-[11px] ${muted} hover:underline`}
+          className={`mt-1 text-[11px] ${muted} hover:underline max-md:min-h-10 max-md:text-xs`}
         >
           {expanded ? "Show less" : "Show full request"}
         </button>
@@ -194,7 +194,7 @@ function BuildCard({
               href={build.prUrl}
               target="_blank"
               rel="noreferrer"
-              className={isDark ? "text-sky-300 hover:underline" : "text-sky-700 hover:underline"}
+              className={`${isDark ? "text-sky-300 hover:underline" : "text-sky-700 hover:underline"} max-md:-my-2 max-md:inline-block max-md:py-2`}
             >
               {pr ? `#${pr}` : "Open PR"}
             </a>
@@ -269,7 +269,7 @@ function LogBlock({
         type="button"
         onClick={() => collapsible && setOpen((v) => !v)}
         className={`mb-1 block max-w-full truncate text-left text-[11px] ${mutedTextClass(isDark)} ${
-          collapsible ? "hover:underline" : "cursor-default"
+          collapsible ? "hover:underline max-md:min-h-10 max-md:text-xs" : "cursor-default"
         }`}
       >
         {collapsible ? (open ? "▾ " : "▸ ") : ""}
@@ -279,7 +279,7 @@ function LogBlock({
         <pre
           className={subtlePanelClass(
             isDark,
-            `debug-scroll max-h-64 overflow-auto whitespace-pre-wrap break-words px-3 py-2 text-[11px] leading-relaxed mono ${
+            `debug-scroll max-h-64 overflow-auto whitespace-pre-wrap break-words px-3 py-2 text-[11px] leading-relaxed mono max-md:max-h-80 max-md:text-xs ${
               isDark ? "text-zinc-300" : "text-zinc-700"
             }`,
           )}
