@@ -3,6 +3,9 @@ import {
   combineInbound,
   createInboundQueue,
   debounceMsFromEnv,
+  maxTypingHoldMsFromEnv,
+  serviceFromSendblue,
+  supportsTyping,
   typingFromSendblue,
   type InboundItem,
 } from "../server/inbound-queue.js";
@@ -248,7 +251,164 @@ describe("inbound queue with a quiet period", () => {
   });
 });
 
+describe("quiet period with Sendblue typing indicators", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  function typingQueue() {
+    const { store, rows } = memoryInboundStore();
+    const worker = recorder();
+    const queue = createInboundQueue({
+      store,
+      process: worker.process,
+      log: quiet,
+      debounceMs: 5_000,
+      maxTypingWaitMs: 45_000,
+    });
+    return { queue, rows, turns: worker.turns };
+  }
+
+  it("holds the window open while the sender is typing", async () => {
+    const { queue, turns } = typingQueue();
+    await queue.enqueue(text("a", "one"), { service: "iMessage" });
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(queue.noteTyping("sms:a", true)).toBe("held");
+    // Well past the 5s quiet period: still holding.
+    await vi.advanceTimersByTimeAsync(30_000);
+    await settle();
+    expect(turns).toHaveLength(0);
+    expect(queue.isBusy()).toBe(true);
+  });
+
+  it("restarts the full 5s window when they stop typing", async () => {
+    const { queue, turns } = typingQueue();
+    await queue.enqueue(text("a", "one"), { service: "iMessage" });
+    queue.noteTyping("sms:a", true);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(queue.noteTyping("sms:a", false)).toBe("restarted");
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(turns).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(1);
+    await settle();
+    expect(turns.map((t) => t.content)).toEqual(["one"]);
+  });
+
+  it("a new text while typing ends the hold and restarts the 5s window", async () => {
+    const { queue, turns } = typingQueue();
+    await queue.enqueue(text("a", "one"));
+    queue.noteTyping("sms:a", true);
+    await vi.advanceTimersByTimeAsync(8_000);
+    await queue.enqueue(text("a", "two"));
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(turns).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(1);
+    await settle();
+    expect(turns.map((t) => t.content)).toEqual(["one\ntwo"]);
+  });
+
+  it("answers once the max hold passes if is_typing=false never arrives", async () => {
+    const { queue, turns } = typingQueue();
+    await queue.enqueue(text("a", "one"));
+    await vi.advanceTimersByTimeAsync(1_000);
+    queue.noteTyping("sms:a", true);
+    await vi.advanceTimersByTimeAsync(44_999);
+    expect(turns).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(1);
+    await settle();
+    expect(turns.map((t) => t.content)).toEqual(["one"]);
+    expect(queue.isBusy()).toBe(false);
+  });
+
+  it("repeated is_typing=true signals don't push the max hold out", async () => {
+    const { queue, turns } = typingQueue();
+    await queue.enqueue(text("a", "one"));
+    queue.noteTyping("sms:a", true);
+    for (let i = 0; i < 8; i++) {
+      await vi.advanceTimersByTimeAsync(5_000);
+      queue.noteTyping("sms:a", true);
+    }
+    // 40s in: still holding; the cap is counted from the first signal.
+    expect(turns).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await settle();
+    expect(turns.map((t) => t.content)).toEqual(["one"]);
+  });
+
+  it("ignores typing from a number with nothing waiting", async () => {
+    const { queue, turns } = typingQueue();
+    expect(queue.noteTyping("sms:+15559999999", true)).toBe("ignored");
+    expect(queue.isBusy()).toBe(false);
+    // ...and it doesn't leak into that number's next text.
+    await queue.enqueue(text("+15559999999", "hi"));
+    await vi.advanceTimersByTimeAsync(5_000);
+    await settle();
+    expect(turns.map((t) => t.content)).toEqual(["hi"]);
+  });
+
+  it("SMS and RCS texts ignore typing and keep the plain 5s wait", async () => {
+    for (const service of ["SMS", "RCS"]) {
+      const { queue, turns } = typingQueue();
+      await queue.enqueue(text("a", "one"), { service });
+      expect(queue.noteTyping("sms:a", true)).toBe("ignored");
+      expect(queue.noteTyping("sms:a", false)).toBe("ignored");
+      await vi.advanceTimersByTimeAsync(5_000);
+      await settle();
+      expect(turns.map((t) => t.content)).toEqual(["one"]);
+    }
+  });
+
+  it("without typing signals the timing is exactly the plain quiet period", async () => {
+    const { queue, turns } = typingQueue();
+    await queue.enqueue(text("a", "one"), { service: "iMessage" });
+    await vi.advanceTimersByTimeAsync(3_000);
+    await queue.enqueue(text("a", "two"), { service: "iMessage" });
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(turns).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(1);
+    await settle();
+    expect(turns.map((t) => t.content)).toEqual(["one\ntwo"]);
+  });
+
+  it("typing is ignored when the quiet period or the max hold is 0", async () => {
+    const { store } = memoryInboundStore();
+    const worker = recorder();
+    const queue = createInboundQueue({
+      store,
+      process: worker.process,
+      log: quiet,
+      debounceMs: 5_000,
+      maxTypingWaitMs: 0,
+    });
+    await queue.enqueue(text("a", "one"));
+    expect(queue.noteTyping("sms:a", true)).toBe("ignored");
+    await vi.advanceTimersByTimeAsync(5_000);
+    await settle();
+    expect(worker.turns.map((t) => t.content)).toEqual(["one"]);
+
+    const instant = createInboundQueue({ store, process: async () => undefined, log: quiet, debounceMs: 0 });
+    expect(instant.noteTyping("sms:a", true)).toBe("ignored");
+  });
+});
+
 describe("quiet period helpers", () => {
+  it("reads BOOP_MAX_TYPING_HOLD_MS with a 60s default", () => {
+    expect(maxTypingHoldMsFromEnv(undefined)).toBe(60_000);
+    expect(maxTypingHoldMsFromEnv(" ")).toBe(60_000);
+    expect(maxTypingHoldMsFromEnv("30000")).toBe(30_000);
+    expect(maxTypingHoldMsFromEnv("0")).toBe(0);
+    expect(maxTypingHoldMsFromEnv("soon")).toBe(60_000);
+    expect(maxTypingHoldMsFromEnv("-5")).toBe(60_000);
+  });
+
+  it("only iMessage (or an unstated service) supports typing", () => {
+    expect(supportsTyping("iMessage")).toBe(true);
+    expect(supportsTyping(undefined)).toBe(true);
+    expect(supportsTyping("SMS")).toBe(false);
+    expect(supportsTyping("RCS")).toBe(false);
+    expect(serviceFromSendblue({ service: "SMS" })).toBe("SMS");
+    expect(serviceFromSendblue({ content: "hi" })).toBeUndefined();
+  });
+
   it("reads BOOP_MESSAGE_DEBOUNCE_MS with a 5s default", () => {
     expect(debounceMsFromEnv(undefined)).toBe(5_000);
     expect(debounceMsFromEnv("")).toBe(5_000);

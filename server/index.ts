@@ -386,6 +386,7 @@ async function main() {
     console.log(`  health      GET  http://localhost:${port}/health`);
     console.log(`  chat        POST http://localhost:${port}/chat`);
     console.log(`  sendblue    POST http://localhost:${port}/sendblue/webhook`);
+    console.log(`  typing      POST http://localhost:${port}/sendblue/typing`);
     console.log(`  websocket   WS   ws://localhost:${port}/ws`);
   });
 

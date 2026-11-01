@@ -12,6 +12,8 @@ import {
   createInboundQueue,
   debounceMsFromEnv,
   inboundFromSendblue,
+  maxTypingHoldMsFromEnv,
+  serviceFromSendblue,
   typingFromSendblue,
   type InboundItem,
 } from "./inbound-queue.js";
@@ -426,10 +428,38 @@ export const inboundQueue = createInboundQueue({
   isActive: isActiveInstance,
   // Wait for a quiet period so a burst of texts gets one answer.
   debounceMs: debounceMsFromEnv(process.env.BOOP_MESSAGE_DEBOUNCE_MS),
+  // While the sender is typing the wait is held open, but never longer than this.
+  maxTypingWaitMs: maxTypingHoldMsFromEnv(process.env.BOOP_MAX_TYPING_HOLD_MS),
 });
+
+/**
+ * Applies a Sendblue typing_indicator webhook to the quiet period. Typing is
+ * only a hint, so a bad payload or a failure is logged and swallowed: it must
+ * never break the webhook or hold up a reply.
+ */
+function handleTypingWebhook(body: unknown): { ok: true; typing: boolean; outcome?: string } {
+  try {
+    const typing = typingFromSendblue(body);
+    if (!typing) return { ok: true, typing: false };
+    return { ok: true, typing: true, outcome: inboundQueue.noteTyping(typing.conversationId, typing.isTyping) };
+  } catch (err) {
+    console.warn("[sendblue] ignored a typing indicator", err);
+    return { ok: true, typing: false };
+  }
+}
 
 export function createSendblueRouter(): express.Router {
   const router = express.Router();
+
+  // Sendblue's typing_indicator webhook (iMessage only). Always answers 200 to
+  // a signed request so Sendblue doesn't retry a hint that's already stale.
+  router.post("/typing", (req, res) => {
+    if (!verifySendblueWebhookSecret(req.get("sb-signing-secret"))) {
+      res.status(401).json({ error: "invalid webhook signature" });
+      return;
+    }
+    res.json(handleTypingWebhook(req.body));
+  });
 
   router.post("/webhook", async (req, res) => {
     if (!verifySendblueWebhookSecret(req.get("sb-signing-secret"))) {
@@ -437,12 +467,10 @@ export function createSendblueRouter(): express.Router {
       return;
     }
 
-    // A typing_indicator webhook pointed at this URL holds the quiet period
-    // open while the sender is still typing.
-    const typing = typingFromSendblue(req.body);
-    if (typing) {
-      inboundQueue.noteTyping(typing.conversationId, typing.isTyping);
-      res.json({ ok: true, typing: true });
+    // A typing_indicator webhook pointed at this URL (older setups) works the
+    // same as one pointed at /sendblue/typing.
+    if (typingFromSendblue(req.body)) {
+      res.json(handleTypingWebhook(req.body));
       return;
     }
 
@@ -456,7 +484,7 @@ export function createSendblueRouter(): express.Router {
     // text. If saving fails, a 500 makes Sendblue retry and the poller is the
     // backstop.
     try {
-      const enqueued = await inboundQueue.enqueue(input);
+      const enqueued = await inboundQueue.enqueue(input, { service: serviceFromSendblue(req.body) });
       res.json(enqueued ? { ok: true } : { ok: true, deduped: true });
     } catch (err) {
       console.error("[sendblue] couldn't queue inbound text", err);
