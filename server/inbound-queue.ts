@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { scanForSecrets } from "./secrets/redact.js";
 
 /**
  * Inbound iMessage queue. Every text is saved (by the store) before Boop
@@ -181,7 +182,9 @@ export function inboundFromSendblue(
     handle: str(body.message_handle) || `local:${randomUUID()}`,
     conversationId: `sms:${fromNumber}`,
     fromNumber,
-    content,
+    // Anything that looks like a credential is cut out before the text is
+    // saved; the turn then warns the owner to rotate it.
+    content: scanForSecrets(content).redacted,
     mediaUrls,
     source,
     receivedAt: Number.isFinite(sentAt) ? sentAt : now,

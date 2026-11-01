@@ -6,6 +6,7 @@ import { runAgentRuntime } from "../runtimes/index.js";
 import { EMPTY_USAGE, type UsageTotals } from "../usage.js";
 import { SEGMENT_DEFAULTS, makeMemoryId, type MemorySegment } from "./types.js";
 import { buildPromptWithImages, fetchStoredBytes } from "../images/content-blocks.js";
+import { scanForSecrets } from "../secrets/redact.js";
 import { reviewSkillsForCorrection } from "../skills/review.js";
 
 const EXTRACTION_PROMPT = `You are a memory-extraction subagent.
@@ -101,6 +102,7 @@ export async function extractAndStore(opts: {
     for (const f of facts) {
       const defaults = SEGMENT_DEFAULTS[f.segment];
       if (!defaults) continue; // skip unknown segment rather than crashing
+      if (typeof f.content !== "string" || scanForSecrets(f.content).found) continue; // never store secrets
       // Clamp importance to [0, 1]; fall back to segment default when the
       // LLM omits it or returns garbage.
       const rawImportance =

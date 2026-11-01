@@ -9,6 +9,7 @@ import {
   type RuntimeProvider,
 } from "../lib/branding.js";
 import { AppleSection } from "./AppleSection.js";
+import { SecretsSection } from "./SecretsSection.js";
 import { Select } from "./Select.js";
 import { ClaudeAccountRow } from "./ClaudeAccountRow.js";
 import { BrowserSection } from "./BrowserSection.js";
@@ -239,6 +240,7 @@ export function SettingsPanel({
         <KeepAwakeRow isDark={isDark} />
         <BrowserSection isDark={isDark} />
         <AppleSection isDark={isDark} />
+        <SecretsSection isDark={isDark} />
         <DemoModeRow isDark={isDark} />
       </div>
     </div>
