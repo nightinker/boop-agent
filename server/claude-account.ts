@@ -4,7 +4,7 @@ import { access } from "node:fs/promises";
 import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
 import { promisify } from "node:util";
-import { activeClaudeConfigDir, envWithClaudeConfigDir } from "./claude-profiles.js";
+import { activeClaudeConfigDir, envWithClaudeConfigDir, recordSharedAccount } from "./claude-profiles.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -220,7 +220,9 @@ export async function switchCswapAccount(accountNumber: number): Promise<ClaudeA
     throw new Error(`cswap has no account ${accountNumber}`);
   }
   await runCswap(["switch", String(accountNumber)]);
-  return getClaudeAccount({ fresh: true });
+  const account = await getClaudeAccount({ fresh: true });
+  await recordSharedAccount(account.email);
+  return account;
 }
 
 export interface LoginCheck {

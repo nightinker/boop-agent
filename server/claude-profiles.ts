@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { api } from "../convex/_generated/api.js";
 import { convex } from "./convex-client.js";
+import { SHARED_ACCOUNT_KEY } from "./account-sync.js";
 
 /**
  * Claude account profiles: separate Claude Code config dirs on this Mac
@@ -238,6 +239,22 @@ export async function setClaudeProfile(profile: ClaudeProfile): Promise<void> {
     await convex.mutation(api.settings.set, { key: CLAUDE_ACCOUNT_KEY, value: profile.label });
   }
   cache = null;
+  await recordSharedAccount(profile.email);
+}
+
+/**
+ * Saves which account Boop uses, by email, for the other copies of Boop
+ * (Mac, server) to follow. See account-sync.ts.
+ */
+export async function recordSharedAccount(email: string | null | undefined): Promise<void> {
+  if (!email) return;
+  await convex
+    .mutation(api.settings.set, { key: SHARED_ACCOUNT_KEY, value: email })
+    .catch((err) => console.warn("[claude-profiles] couldn't share the account choice", err));
+}
+
+export async function readSharedAccount(): Promise<string | null> {
+  return convex.query(api.settings.get, { key: SHARED_ACCOUNT_KEY }).catch(() => null);
 }
 
 /**

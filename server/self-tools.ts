@@ -85,6 +85,116 @@ async function lookupCswap(): Promise<CswapLookup> {
   }
 }
 
+/**
+ * Switches Boop's Claude account from what the owner said ("stan", "my Globex
+ * account", an email). Shared by the set_claude_account tool and the
+ * model-free commands that work even when the current model can't answer.
+ */
+export async function switchClaudeAccount(
+  account: string,
+  conversationId: string | undefined,
+): Promise<{ ok: boolean; text: string }> {
+  if (!isOwner(conversationId)) return { ok: false, text: NOT_OWNER_ACCOUNT_MESSAGE };
+  const { profiles, active } = await listClaudeProfiles();
+  const asked = account.slice(0, 60);
+  const lines: string[] = [];
+  const cswap = await lookupCswap();
+  const match =
+    cswap.ok && cswap.state.available
+      ? resolveCswapInput(account, cswap.state.accounts)
+      : ({ kind: "none" } as const);
+  if (match.kind === "ambiguous") {
+    return { ok: false, text: ambiguousAccountMessage(asked, match.accounts) };
+  }
+  if (match.kind === "match") {
+    const result = await switchToCswapAccount(match.account, !active || active.isDefault, {
+      checkLogin: checkCswapLogin,
+      switchAccount: switchCswapAccount,
+      useMainLogin: async () => {
+        await clearClaudeProfile();
+        clearClaudeProfileCache();
+      },
+      readMainLogin: () => getClaudeAccount({ fresh: true }),
+    });
+    if (!result.ok) return { ok: false, text: result.text };
+    lines.push(result.text);
+  } else {
+    const target = resolveProfileInput(accountNameFromPhrase(account) || account, profiles);
+    if (!target) {
+      const names = cswap.ok && cswap.state.available ? cswap.state.accounts : [];
+      const cswapNote = !cswap.ok
+        ? cswap.error
+        : !cswap.state.available
+          ? formatCswapSection(cswap, true).replace(/^cswap accounts: /, "")
+          : "";
+      return {
+        ok: false,
+        text: names.length
+          ? unknownAccountMessage(asked, names)
+          : `I couldn't find a Claude account matching "${asked}". ${cswapNote} To add one, sign in with \`claude\` in Terminal, then run \`cswap add\`.`,
+      };
+    }
+    if (active?.label === target.label) {
+      return { ok: true, text: `Boop is already using the ${describeProfile(target)} account.` };
+    }
+    // A config dir can hold an identity without a working login (signed out), so check before switching.
+    if (!target.isDefault) {
+      const login = await getClaudeAccountForConfigDir(target.configDir).catch(() => null);
+      if (!login?.loggedIn) {
+        return {
+          ok: false,
+          text: `The ${describeProfile(target)} account is signed out on this Mac, so I didn't switch to it. Sign in with \`CLAUDE_CONFIG_DIR=${target.configDir} claude\` in Terminal, then ask me again.`,
+        };
+      }
+    }
+    await setClaudeProfile(target);
+    lines.push(
+      `Claude account set to ${describeProfile(target)}. Boop uses it from the next turn on; no restart needed.`,
+    );
+  }
+  if (process.env.ANTHROPIC_API_KEY) {
+    lines.push(
+      "Note: an Anthropic API key is set in Boop's environment, and Claude Code bills that key ahead of any signed-in account, so this switch won't change billing until it's removed.",
+    );
+  }
+  if ((await getRuntimeConfig()).runtime === "codex") {
+    lines.push("Boop is on the Codex runtime right now; the account applies once you switch back to Claude.");
+  }
+  return { ok: true, text: lines.join("\n") };
+}
+
+/** Switches the model for the active runtime ("sonnet", "opus 5.5", "mini"). */
+export async function switchModel(model: string): Promise<{ ok: boolean; text: string }> {
+  const runtime = (await getRuntimeConfig()).runtime;
+  const resolved = resolveModelInput(model, runtime);
+  if (!resolved) {
+    const known = runtime === "codex" ? [...KNOWN_CODEX_MODELS] : [...KNOWN_MODELS];
+    const aliases = runtime === "codex" ? CODEX_MODEL_ALIASES : MODEL_ALIASES;
+    return {
+      ok: false,
+      text: `Unknown ${runtime} model "${model}". Try one of: ${known.join(", ")} or aliases ${Object.keys(aliases).join(", ")}.`,
+    };
+  }
+  await setRuntimeModel(resolved, runtime);
+  return {
+    ok: true,
+    text: `${runtime} model override set to ${resolved}. Next top-level turn will use it; this current turn keeps the previous model.`,
+  };
+}
+
+/** Switches the runtime/provider ("claude", "codex"). */
+export async function switchRuntime(runtime: string): Promise<{ ok: boolean; text: string }> {
+  const resolved = resolveRuntimeInput(runtime);
+  if (!resolved) {
+    return { ok: false, text: `Unknown runtime "${runtime}". Try one of: ${Object.keys(RUNTIME_ALIASES).join(", ")}.` };
+  }
+  await setRuntimeProvider(resolved);
+  return {
+    ok: true,
+    text: `Runtime set to ${resolved}. Next top-level turn will use ${resolved}; this current turn keeps the provider it started with.`,
+  };
+}
+
 export function createSelfTools(conversationId?: string): RuntimeTool[] {
   return [
     defineRuntimeTool(
@@ -171,73 +281,8 @@ export function createSelfTools(conversationId?: string): RuntimeTool[] {
           .describe('The account as the owner named it: org name, email, or name in the email (e.g. "globex", "globex"). Filler words are fine.'),
       },
       async ({ account }) => {
-        if (!isOwner(conversationId)) return runtimeText(NOT_OWNER_ACCOUNT_MESSAGE, false);
-        const { profiles, active } = await listClaudeProfiles();
-        const asked = account.slice(0, 60);
-        const lines: string[] = [];
-        const cswap = await lookupCswap();
-        const match =
-          cswap.ok && cswap.state.available
-            ? resolveCswapInput(account, cswap.state.accounts)
-            : ({ kind: "none" } as const);
-        if (match.kind === "ambiguous") {
-          return runtimeText(ambiguousAccountMessage(asked, match.accounts), false);
-        }
-        if (match.kind === "match") {
-          const result = await switchToCswapAccount(match.account, !active || active.isDefault, {
-            checkLogin: checkCswapLogin,
-            switchAccount: switchCswapAccount,
-            useMainLogin: async () => {
-              await clearClaudeProfile();
-              clearClaudeProfileCache();
-            },
-            readMainLogin: () => getClaudeAccount({ fresh: true }),
-          });
-          if (!result.ok) return runtimeText(result.text, false);
-          lines.push(result.text);
-        } else {
-          const target = resolveProfileInput(accountNameFromPhrase(account) || account, profiles);
-          if (!target) {
-            const names = cswap.ok && cswap.state.available ? cswap.state.accounts : [];
-            const cswapNote = !cswap.ok
-              ? cswap.error
-              : !cswap.state.available
-                ? formatCswapSection(cswap, true).replace(/^cswap accounts: /, "")
-                : "";
-            return runtimeText(
-              names.length
-                ? unknownAccountMessage(asked, names)
-                : `I couldn't find a Claude account matching "${asked}". ${cswapNote} To add one, sign in with \`claude\` in Terminal, then run \`cswap add\`.`,
-              false,
-            );
-          }
-          if (active?.label === target.label) {
-            return runtimeText(`Boop is already using the ${describeProfile(target)} account.`);
-          }
-          // A config dir can hold an identity without a working login (signed out), so check before switching.
-          if (!target.isDefault) {
-            const login = await getClaudeAccountForConfigDir(target.configDir).catch(() => null);
-            if (!login?.loggedIn) {
-              return runtimeText(
-                `The ${describeProfile(target)} account is signed out on this Mac, so I didn't switch to it. Sign in with \`CLAUDE_CONFIG_DIR=${target.configDir} claude\` in Terminal, then ask me again.`,
-                false,
-              );
-            }
-          }
-          await setClaudeProfile(target);
-          lines.push(
-            `Claude account set to ${describeProfile(target)}. Boop uses it from the next turn on; no restart needed.`,
-          );
-        }
-        if (process.env.ANTHROPIC_API_KEY) {
-          lines.push(
-            "Note: an Anthropic API key is set in Boop's environment, and Claude Code bills that key ahead of any signed-in account, so this switch won't change billing until it's removed.",
-          );
-        }
-        if ((await getRuntimeConfig()).runtime === "codex") {
-          lines.push("Boop is on the Codex runtime right now; the account applies once you switch back to Claude.");
-        }
-        return runtimeText(lines.join("\n"));
+        const result = await switchClaudeAccount(account, conversationId);
+        return runtimeText(result.text, result.ok);
       },
     ),
     defineRuntimeTool(
@@ -276,17 +321,8 @@ Use when the user tells you their timezone or location ("I'm in Dallas", "use ce
         .join(", ")}. Use "claude" for the Anthropic Claude Agent SDK provider and "codex" for the local Codex app-server provider backed by the user's ChatGPT/Codex subscription.`,
       { runtime: z.string().describe('Runtime/provider to use, e.g. "claude" or "codex".') },
       async ({ runtime }) => {
-        const resolved = resolveRuntimeInput(runtime);
-        if (!resolved) {
-          return runtimeText(
-            `Unknown runtime "${runtime}". Try one of: ${Object.keys(RUNTIME_ALIASES).join(", ")}.`,
-            false,
-          );
-        }
-        await setRuntimeProvider(resolved);
-        return runtimeText(
-          `Runtime set to ${resolved}. Next top-level turn will use ${resolved}; this current turn keeps the provider it started with.`,
-        );
+        const result = await switchRuntime(runtime);
+        return runtimeText(result.text, result.ok);
       },
     ),
     defineRuntimeTool(
@@ -306,20 +342,8 @@ Use when the user says "use opus", "switch to sonnet", "use Codex mini", "make i
           .describe('Model to use. Canonical ID like "claude-opus-5-5" or "gpt-5.4-mini", or an alias.'),
       },
       async ({ model }) => {
-        const runtime = (await getRuntimeConfig()).runtime;
-        const resolved = resolveModelInput(model, runtime);
-        if (!resolved) {
-          const known = runtime === "codex" ? [...KNOWN_CODEX_MODELS] : [...KNOWN_MODELS];
-          const aliases = runtime === "codex" ? CODEX_MODEL_ALIASES : MODEL_ALIASES;
-          return runtimeText(
-            `Unknown ${runtime} model "${model}". Try one of: ${known.join(", ")} or aliases ${Object.keys(aliases).join(", ")}.`,
-            false,
-          );
-        }
-        await setRuntimeModel(resolved, runtime);
-        return runtimeText(
-          `${runtime} model override set to ${resolved}. Next top-level turn will use it; this current turn keeps the previous model.`,
-        );
+        const result = await switchModel(model);
+        return runtimeText(result.text, result.ok);
       },
     ),
     defineRuntimeTool(
