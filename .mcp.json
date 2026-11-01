@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "boop-self-builds": {
+      "command": "npx",
+      "args": ["tsx", "server/mcp/self-builds.ts"]
+    }
+  }
+}
