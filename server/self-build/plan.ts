@@ -309,3 +309,16 @@ export function rollbackMessage(input: { buildId: string; logPath?: string; logT
   }
   return lines.join("\n");
 }
+
+/**
+ * What the Mac texts when it comes back online and installs what landed on
+ * main meanwhile. Merge commits name their PRs ("Merge pull request #29 …").
+ */
+export function catchUpMessage(subjects: string[]): string {
+  const prs = [...new Set(subjects.map((s) => s.match(/#\d+/)?.[0]).filter((s): s is string => Boolean(s)))];
+  const what =
+    prs.length > 0
+      ? `${prs.length === 1 ? "PR" : "PRs"} ${prs.join(", ")}`
+      : `${subjects.length} change${subjects.length === 1 ? "" : "s"}`;
+  return `While your Mac was off, ${what} landed on main. Installing now; I'll be back in a minute or two.`;
+}
