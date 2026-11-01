@@ -468,6 +468,26 @@ For Codex runtime, local browser tools are exposed internally under the `local_b
 
 ---
 
+## Reading self-builds from Claude Code (MCP)
+
+`npm run mcp:self-builds` starts a small read-only MCP server over stdio. It lets Claude Code, or any MCP client, see what Boop is building into itself. The repo's `.mcp.json` registers it, so Claude Code opened in this checkout offers it as `boop-self-builds`.
+
+| Tool | What it returns |
+|------|-----------------|
+| `list_self_builds` | Running builds with their latest activity, the queue in order, then recent builds. Filter with `status` (`running`, `failed`, `pr_open`, …). |
+| `get_self_build` | One build in full: request, status, branch, worktree, PR, the coding agent's summary, latest activity, failing check output, errors, and the failed-start and restart logs. Leave out `buildId` for the running build. |
+| `self_build_changes` | The commits and files a build changed: live from its worktree while it codes, otherwise from its PR (`gh`). `full: true` adds the diff. |
+
+It reads the same `selfBuilds` table as the dashboard's Self-builds page. It can't start, ship or cancel builds. Those still go through Boop, which checks they come from the owner.
+
+It finds Convex the same way the server does (`.env.local` in the checkout). Run from somewhere else on the Mac, it falls back to the desktop app's `~/Library/Application Support/Boop/runtime/.env.local`, or set `BOOP_ENV_FILE`. To use it from another project, add it to Claude Code with an absolute path:
+
+```bash
+claude mcp add boop-self-builds -- npx --prefix /path/to/boop-agent tsx /path/to/boop-agent/server/mcp/self-builds.ts
+```
+
+---
+
 ## Local Apple data
 
 Local Apple data is optional, Mac-only, and read-only. It is designed for private single-user local runs where you want Boop to answer questions about data already on the Mac running the server.
