@@ -131,15 +131,18 @@ async function retryWithBackoff(task, options = {}) {
 }
 
 /**
- * Keep a long-running child process (the `convex dev` watcher) alive: when it
- * exits with a non-zero code, wait with backoff, wait for the network, and
- * start a fresh one. The backoff resets once a child reports ready.
+ * Keep a long-running child process (the `convex dev` watcher, ngrok) alive:
+ * when it exits with a non-zero code, wait with backoff, wait for the network,
+ * and start a fresh one. The backoff resets once a child reports ready.
  *
  * `start()` returns a child that emits "exit" (code) and may carry a `ready`
- * promise. Returns `{ current() }` to get the live child (for shutdown).
+ * promise. `onRelaunch(child)` runs after each restart (not the first start).
+ * Returns `{ current() }` to get the live child (for shutdown).
  */
 function restartOnFailure({
   start,
+  label = "Convex sync",
+  onRelaunch = () => {},
   isShuttingDown = () => false,
   isOnline = () => isNetworkReachable(),
   sleep = defaultSleep,
@@ -165,7 +168,7 @@ function restartOnFailure({
       failures += 1;
       const delay = backoffDelay(failures, { baseMs, maxMs });
       log(
-        `Convex sync exited with code ${code}; the server keeps running. ` +
+        `${label} exited with code ${code}; the server keeps running. ` +
           `Retrying in ${Math.round(delay / 1000)}s (attempt ${failures + 1}).`,
       );
       void (async () => {
@@ -176,10 +179,10 @@ function restartOnFailure({
           sleep,
           intervalMs: networkPollMs,
           shouldStop: isShuttingDown,
-          onWaiting: () => log("Waiting for network connectivity before retrying Convex sync."),
+          onWaiting: () => log(`Waiting for network connectivity before retrying ${label}.`),
         });
         if (isShuttingDown() || child !== launched) return;
-        launch();
+        onRelaunch(launch());
       })();
     });
     return launched;

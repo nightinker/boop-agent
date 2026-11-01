@@ -185,6 +185,31 @@ describe("restartOnFailure", () => {
     expect(sleeps.at(-1)).toBe(1000);
   });
 
+  it("keeps a crashed ngrok tunnel alive and reports each relaunch", async () => {
+    // ngrok panics on a flaky network; Boop restarts it rather than stopping.
+    const children: FakeChild[] = [];
+    const log = vi.fn();
+    const relaunched: FakeChild[] = [];
+    restartOnFailure({
+      start: () => {
+        const c = fakeChild();
+        children.push(c);
+        return c;
+      },
+      label: "ngrok",
+      onRelaunch: (c: FakeChild) => relaunched.push(c),
+      isOnline: async () => true,
+      sleep: async () => {},
+      log,
+    });
+    expect(relaunched).toEqual([]);
+    children[0].emit("exit", 2);
+    await flush();
+    expect(children).toHaveLength(2);
+    expect(relaunched).toEqual([children[1]]);
+    expect(log.mock.calls[0][0]).toMatch(/^ngrok exited with code 2; the server keeps running/);
+  });
+
   it("does not restart on a clean exit, a signal, or during shutdown", async () => {
     let shuttingDown = false;
     const children: FakeChild[] = [];

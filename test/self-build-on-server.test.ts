@@ -4,7 +4,7 @@ const convexMock = vi.hoisted(() => ({ query: vi.fn(), mutation: vi.fn() }));
 vi.mock("../server/convex-client.js", () => ({ convex: convexMock }));
 vi.mock("../server/notify.js", () => ({ notifyConversation: vi.fn() }));
 
-import { shipSelfBuild, startSelfBuild } from "../server/self-build/run.js";
+import { resumeSelfBuilds, shipSelfBuild, startSelfBuild } from "../server/self-build/run.js";
 
 const realPlatform = process.platform;
 const env = { ...process.env };
@@ -29,6 +29,14 @@ describe("self-builds requested on the server", () => {
       expect.objectContaining({ request: "Add X", forceQueue: true }),
     );
     expect(reply).toContain("your Mac starts it as soon as it's back online");
+  });
+
+  it("leave the Mac's running builds alone when the server restarts", async () => {
+    // A server restart (e.g. its auto-update) interrupted nothing: the build
+    // marked coding is running on the Mac, so it must not be failed here.
+    convexMock.query.mockResolvedValue([{ buildId: "b1", status: "coding" }]);
+    await resumeSelfBuilds();
+    expect(convexMock.mutation).not.toHaveBeenCalled();
   });
 
   it("explain that shipping waits for the Mac", async () => {

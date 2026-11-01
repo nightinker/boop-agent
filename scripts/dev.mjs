@@ -301,12 +301,30 @@ const debugChild = run(
 const children = [serverChild, debugChild];
 
 let ngrokUrlReady = Promise.resolve(null);
+let ngrokSupervisor = null;
 if (useNgrok && ngrokInstalled) {
   const args = ngrokDomain
     ? ["http", port, `--domain=${ngrokDomain}`, "--log=stdout", "--log-format=term", "--log-level=info"]
     : ["http", port, "--log=stdout", "--log-format=term", "--log-level=info"];
-  const ngrokChild = run("ngrok", "ngrok", args);
-  children.push(ngrokChild);
+  // ngrok can crash on a flaky network (e.g. "panic: send on closed channel"
+  // while reconnecting). That must not stop Boop: restart it with backoff, and
+  // point Sendblue and Composio at the new address (it changes without a
+  // reserved NGROK_DOMAIN). Meanwhile another copy of Boop can take the texts.
+  ngrokSupervisor = restartOnFailure({
+    start: () => run("ngrok", "ngrok", args, /started tunnel|url=https:/),
+    label: "ngrok",
+    isShuttingDown: () => shuttingDown,
+    log: (message) => console.warn(`${C.ngrok}ngrok${C.reset}  │ ⚠ ${message}`),
+    onRelaunch: () => {
+      void (async () => {
+        const url = await waitForNgrokUrl(60000).catch(() => null);
+        if (!url || shuttingDown) return;
+        console.log(`${C.ngrok}ngrok${C.reset}  │ tunnel is back at ${url}`);
+        await registerSendblueWebhookOnce(url);
+        await autoRegisterComposioWebhook(url);
+      })();
+    },
+  });
   ngrokUrlReady = Promise.race([
     ngrokOutputUrlReady,
     new Promise((resolve) => setTimeout(() => resolve(null), 10000)),
@@ -441,7 +459,7 @@ const shutdown = (code = 0) => {
       /* ignore */
     }
   }
-  for (const c of [...children, convexSupervisor.current()]) {
+  for (const c of [...children, convexSupervisor.current(), ngrokSupervisor?.current()].filter(Boolean)) {
     try {
       c.kill();
     } catch {
