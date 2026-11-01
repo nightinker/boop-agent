@@ -12,6 +12,7 @@ import { AppleSection } from "./AppleSection.js";
 import { Select } from "./Select.js";
 import { ClaudeAccountRow } from "./ClaudeAccountRow.js";
 import { BrowserSection } from "./BrowserSection.js";
+import { keepAwakeLabel, keepAwakeTone, useKeepAwake } from "./KeepAwake.js";
 
 type RuntimeChoice = "claude" | "codex";
 type ReasoningEffort = "minimal" | "low" | "medium" | "high" | "xhigh";
@@ -92,7 +93,7 @@ const SETTINGS: Setting[] = [
   },
 ];
 
-const RUNTIME_SETTING_COUNT = SETTINGS.length + 5;
+const RUNTIME_SETTING_COUNT = SETTINGS.length + 6;
 const DEMO_PHONE_NUMBER = "+11111111111";
 
 const RUNTIME_OPTIONS: Option<RuntimeChoice>[] = [
@@ -235,6 +236,7 @@ export function SettingsPanel({
             <TimezoneRow key={s.key} setting={s} isDark={isDark} />
           ),
         )}
+        <KeepAwakeRow isDark={isDark} />
         <BrowserSection isDark={isDark} />
         <AppleSection isDark={isDark} />
         <DemoModeRow isDark={isDark} />
@@ -863,6 +865,76 @@ function ToggleRow({
             }`}
           />
         </button>
+      }
+    />
+  );
+}
+
+function KeepAwakeRow({ isDark }: { isDark: boolean }) {
+  const { status, error, setEnabled } = useKeepAwake();
+  const [busy, setBusy] = useState(false);
+  // Hidden where it can't apply (e.g. the Linux server copy).
+  if (status?.supported === false) return null;
+  const loading = status === null || busy;
+  const enabled = status?.enabled ?? true;
+  const tone = status ? keepAwakeTone(status) : "slate";
+
+  async function toggle() {
+    if (loading) return;
+    setBusy(true);
+    try {
+      await setEnabled(!enabled);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const dot =
+    tone === "emerald" ? "bg-emerald-500" : tone === "amber" ? "bg-amber-500" : isDark ? "bg-zinc-600" : "bg-zinc-300";
+
+  return (
+    <SettingShell
+      label="Keep Mac awake"
+      description={`Runs caffeinate -dimsu while Boop is running so the Mac doesn't sleep and Boop keeps answering texts. Only the active copy holds it: if the server copy takes over, the Mac is allowed to sleep. Note: closing a MacBook's lid still puts it to sleep unless it's on AC power with an external display connected; caffeinate can't override that.`}
+      debugLine={`settings.keep_awake_enabled · ${status?.command ?? "caffeinate -dimsu"}${
+        status?.pid ? ` · pid ${status.pid}` : ""
+      }${status?.restarts ? ` · ${status.restarts} restarts` : ""}`}
+      isDark={isDark}
+      control={
+        <div className="flex flex-col items-start gap-2 lg:items-end">
+          <button
+            onClick={toggle}
+            disabled={loading}
+            role="switch"
+            aria-checked={enabled}
+            aria-label="Toggle Keep Mac awake"
+            className={`toggle-switch relative inline-flex h-6 w-11 items-center rounded-full focus:outline-none focus:ring-2 focus:ring-offset-2 ${
+              loading ? "opacity-50 cursor-not-allowed" : "cursor-pointer"
+            } ${
+              enabled
+                ? isDark
+                  ? "bg-emerald-500 focus:ring-emerald-500/50 focus:ring-offset-[#202024]"
+                  : "bg-emerald-500 focus:ring-emerald-500/50 focus:ring-offset-white"
+                : isDark
+                  ? "bg-zinc-700 focus:ring-zinc-500/50 focus:ring-offset-[#202024]"
+                  : "bg-zinc-300 focus:ring-zinc-400/50 focus:ring-offset-white"
+            }`}
+          >
+            <span
+              className={`toggle-thumb inline-block h-5 w-5 transform rounded-full bg-white shadow ${
+                enabled ? "translate-x-5" : "translate-x-0.5"
+              }`}
+            />
+          </button>
+          <div
+            className={`flex items-center gap-1.5 text-[11px] ${isDark ? "text-zinc-400" : "text-zinc-500"}`}
+            role="status"
+          >
+            <span className={`inline-block h-2 w-2 rounded-full ${dot}`} />
+            {status ? keepAwakeLabel(status) : "Checking…"}
+          </div>
+          {error && <div className="text-[11px] text-rose-400">{error}</div>}
+        </div>
       }
     />
   );

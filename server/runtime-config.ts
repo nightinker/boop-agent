@@ -21,6 +21,7 @@ export const APPLE_ENABLED_KEY = "apple_enabled";
 export const APPLE_MESSAGES_ENABLED_KEY = "apple_messages_enabled";
 export const APPLE_NOTES_ENABLED_KEY = "apple_notes_enabled";
 export const APPLE_REMINDERS_ENABLED_KEY = "apple_reminders_enabled";
+export const KEEP_AWAKE_ENABLED_KEY = "keep_awake_enabled";
 const CONFIG_TTL_MS = 30 * 1000;
 const BROWSER_CONFIG_TTL_MS = 5 * 1000;
 const APPLE_CONFIG_TTL_MS = 5 * 1000;
@@ -377,4 +378,23 @@ export async function getAppleSettings(): Promise<AppleSettings> {
 
 export function clearAppleSettingsCache(): void {
   cachedAppleSettings = null;
+}
+
+/**
+ * Whether to keep the Mac awake while Boop runs (see keep-awake.ts). On by
+ * default; the Convex setting wins over BOOP_KEEP_AWAKE. Always false off
+ * macOS, even when turned on from the Mac through the shared settings.
+ */
+export async function getKeepAwakeEnabled(
+  platform: NodeJS.Platform = process.platform,
+): Promise<boolean> {
+  if (platform !== "darwin") return false;
+  return settingBool(await getSetting(KEEP_AWAKE_ENABLED_KEY), process.env.BOOP_KEEP_AWAKE, true);
+}
+
+export async function setKeepAwakeEnabled(enabled: boolean): Promise<void> {
+  await convex.mutation(api.settings.set, {
+    key: KEEP_AWAKE_ENABLED_KEY,
+    value: enabled ? "true" : "false",
+  });
 }
