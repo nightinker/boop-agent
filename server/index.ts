@@ -34,6 +34,8 @@ import {
 } from "./runtime-config.js";
 import { startImageCleanup } from "./images/clean.js";
 import { isPublicServerRequest, isTrustedLocalRequest } from "./local-access.js";
+import { accessConfigFromEnv, isAccessAuthenticatedRequest } from "./cloudflare-access.js";
+import { mountDashboard } from "./dashboard.js";
 import { resumeSelfBuilds } from "./self-build/run.js";
 import {
   checkCswapLogin,
@@ -69,14 +71,34 @@ async function main() {
   }
 
   const app = express();
+  // Behind Cloudflare Access (CF_ACCESS_TEAM_DOMAIN + CF_ACCESS_AUD), a visitor
+  // who passed its login is trusted like a local one, so the dashboard works
+  // at the public URL. Everyone else only reaches /health and the webhooks.
+  const accessConfig = accessConfigFromEnv();
+  if (accessConfig) console.log(`[access] trusting Cloudflare Access logins from ${accessConfig.teamDomain}`);
+  const isTrustedRequest = async (req: Parameters<typeof isTrustedLocalRequest>[0]) =>
+    isTrustedLocalRequest(req) || (await isAccessAuthenticatedRequest(req, accessConfig));
   app.use((req, res, next) => {
-    if (isPublicServerRequest(req) || isTrustedLocalRequest(req)) {
+    if (isPublicServerRequest(req)) {
       next();
       return;
     }
-    res.status(404).json({ error: "not found" });
+    isTrustedRequest(req)
+      .then((trusted) => {
+        if (trusted) next();
+        else res.status(404).json({ error: "not found" });
+      })
+      .catch(next);
   });
   app.use(cors());
+  // The dashboard calls the API under /api (the Vite dev server strips it on
+  // the Mac); accept the same paths when Boop serves the dashboard itself.
+  app.use((req, _res, next) => {
+    if (req.url === "/api" || req.url.startsWith("/api/") || req.url.startsWith("/api?")) {
+      req.url = req.url.slice(4) || "/";
+    }
+    next();
+  });
   // Composio webhook receiver must read raw bytes for HMAC verification, so
   // its body parser is mounted BEFORE the global express.json. Without this
   // ordering the JSON parser consumes the stream first and the raw buffer
@@ -254,15 +276,24 @@ async function main() {
     }
   });
 
+  app.get("/connection-config", (_req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    res.json({ phoneNumber: process.env.SENDBLUE_FROM_NUMBER ?? "" });
+  });
+
+  mountDashboard(app);
+
   const server = createServer(app);
   const wss = new WebSocketServer({ server, path: "/ws" });
   wss.on("connection", (ws, request) => {
-    if (!isTrustedLocalRequest(request)) {
-      ws.close(1008, "local connections only");
-      return;
-    }
-    addClient(ws);
-    ws.send(JSON.stringify({ event: "hello", data: { ok: true }, at: Date.now() }));
+    void isTrustedRequest(request).then((trusted) => {
+      if (!trusted) {
+        ws.close(1008, "local connections only");
+        return;
+      }
+      addClient(ws);
+      ws.send(JSON.stringify({ event: "hello", data: { ok: true }, at: Date.now() }));
+    });
   });
 
   const port = Number(process.env.PORT ?? 3456);

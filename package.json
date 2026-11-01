@@ -8,6 +8,7 @@
   "type": "module",
   "scripts": {
     "setup": "tsx scripts/setup.ts",
+    "dashboard:build": "vite build --config debug/vite.config.ts",
     "sendblue:sync": "node scripts/sendblue-sync.mjs",
     "sendblue:webhook": "node scripts/sendblue-webhook.mjs",
     "sendblue:webhook:check": "node scripts/sendblue-webhook.mjs --check",
