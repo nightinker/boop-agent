@@ -7,6 +7,9 @@ import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import convexSyncRetry from "./convex-sync-retry.cjs";
+
+const { restartOnFailure } = convexSyncRetry;
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, "..");
@@ -267,12 +270,26 @@ convexEnvFile = writeConvexDevEnvFile();
 const convexArgs = ["convex", "dev"];
 if (convexEnvFile) convexArgs.push("--env-file", convexEnvFile);
 const convexBin = localBin("convex");
-const convexChild = run(
-  "convex",
-  convexBin.cmd,
-  [...convexBin.args, ...convexArgs.slice(1)],
-  /Convex functions ready/,
-);
+// The Convex watcher is not fatal: when it can't reach Convex (e.g. the Mac
+// just woke and the network isn't up yet) it exits 1. Keep the server up so
+// /health answers, and restart the watcher with backoff until it syncs.
+let shuttingDown = false;
+let resolveConvexReady;
+const convexReady = new Promise((resolve) => (resolveConvexReady = resolve));
+const convexSupervisor = restartOnFailure({
+  start: () => {
+    const child = run(
+      "convex",
+      convexBin.cmd,
+      [...convexBin.args, ...convexArgs.slice(1)],
+      /Convex functions ready/,
+    );
+    child.ready.then(resolveConvexReady);
+    return child;
+  },
+  isShuttingDown: () => shuttingDown,
+  log: (message) => console.warn(`${C.convex}convex${C.reset} │ ⚠ ${message}`),
+});
 const viteBin = localBin("vite");
 const debugChild = run(
   "debug",
@@ -280,7 +297,8 @@ const debugChild = run(
   [...viteBin.args, "--config", "debug/vite.config.ts"],
   /Local:\s+http/,
 );
-const children = [serverChild, convexChild, debugChild];
+// Children whose failure shuts everything down (Convex is supervised above).
+const children = [serverChild, debugChild];
 
 let ngrokUrlReady = Promise.resolve(null);
 if (useNgrok && ngrokInstalled) {
@@ -371,7 +389,7 @@ if (useNgrok && ngrokInstalled && !ngrokDomain) {
 
 Promise.all([
   serverChild.ready,
-  convexChild.ready,
+  convexReady,
   debugChild.ready,
   ngrokUrlReady,
 ])
@@ -413,7 +431,6 @@ ${line}${C.reset}
   })
   .catch(() => {});
 
-let shuttingDown = false;
 const shutdown = (code = 0) => {
   if (shuttingDown) return;
   shuttingDown = true;
@@ -424,7 +441,7 @@ const shutdown = (code = 0) => {
       /* ignore */
     }
   }
-  for (const c of children) {
+  for (const c of [...children, convexSupervisor.current()]) {
     try {
       c.kill();
     } catch {

@@ -4,6 +4,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
+const { retryWithBackoff } = require("../scripts/convex-sync-retry.cjs");
 
 const isMac = process.platform === "darwin";
 const productName = "Boop";
@@ -37,6 +38,9 @@ let webhookCheckSequence = 0;
 let quitting = false;
 let intentionalStop = false;
 let starting = false;
+// Bumped on every start and stop, so a start still retrying Convex sync can
+// tell it was superseded (Stop / Restart pressed while it waited).
+let startGeneration = 0;
 let runtimeRoot = "";
 let cachedConnectionStatus = null;
 
@@ -666,6 +670,10 @@ function ingestLine(line) {
     next.server = "running";
     startupPhase("server boot: listening");
   }
+  if (/Convex sync exited with code/.test(plain)) {
+    next.convex = "starting";
+    startupPhase("convex connect: retrying in background");
+  }
   if (/Convex functions ready/.test(plain)) {
     next.convex = "running";
     startupPhase("convex connect: functions ready");
@@ -745,20 +753,58 @@ function runBootstrap(command, args) {
   });
 }
 
-async function syncConvexRuntime() {
+// How long startup keeps retrying `convex dev --once` before giving up on it.
+// With generated Convex files already present the server can run without a
+// fresh sync, so it starts after a short wait and the `convex dev` watcher
+// (scripts/dev.mjs) keeps retrying in the background. That leaves the
+// self-build health check (180s) plenty of time. Without generated files the
+// server cannot start at all, so startup waits longer.
+const CONVEX_SYNC_BUDGET_WITH_GENERATED_MS = 60_000;
+const CONVEX_SYNC_BUDGET_FIRST_RUN_MS = 180_000;
+
+function errorText(error) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+// Resolves to { ok, stopped, error, canStartServer }. Never throws.
+async function syncConvexRuntime(isSuperseded = () => false) {
   const generatedApi = path.join(runtimeRoot, "convex", "_generated", "api.js");
+  const hasGenerated = fs.existsSync(generatedApi);
   const convex = localCommand("convex");
   setStatus({
     state: "starting",
     convex: "starting",
-    lastMessage: fs.existsSync(generatedApi)
+    lastMessage: hasGenerated
       ? "Synchronizing Convex functions for this desktop version."
       : "Generating Convex files in the desktop runtime folder.",
   });
   startupPhase("convex sync: started");
-  await runBootstrap(convex.cmd, [...convex.args, "dev", "--once", "--typecheck=disable"]);
-  startupPhase("convex sync: finished");
+  const result = await retryWithBackoff(
+    () => runBootstrap(convex.cmd, [...convex.args, "dev", "--once", "--typecheck=disable"]),
+    {
+      budgetMs: hasGenerated ? CONVEX_SYNC_BUDGET_WITH_GENERATED_MS : CONVEX_SYNC_BUDGET_FIRST_RUN_MS,
+      shouldStop: () => intentionalStop || isSuperseded(),
+      onWaitingForNetwork: () => {
+        startupPhase("convex sync: waiting for network");
+        writeStartupLog("[electron] network not reachable yet; waiting before convex sync");
+        setStatus({ lastMessage: "Waiting for the network before synchronizing Convex." });
+      },
+      onAttemptFailed: (error, attempt, delayMs) => {
+        const next = delayMs === null ? "giving up" : `retrying in ${Math.round(delayMs / 1000)}s`;
+        startupPhase("convex sync: retrying");
+        writeStartupLog(`[electron] convex sync attempt ${attempt} failed (${next}): ${errorText(error)}`);
+        if (delayMs !== null) {
+          setStatus({ lastMessage: `Convex sync failed (attempt ${attempt}); ${next}.` });
+        }
+      },
+    },
+  );
   refreshConnectionStatus();
+  if (result.ok) {
+    startupPhase("convex sync: finished");
+    if (result.attempts > 1) writeStartupLog(`[electron] convex sync succeeded on attempt ${result.attempts}`);
+  }
+  return { ...result, canStartServer: result.ok || hasGenerated };
 }
 
 function resetServiceStatuses(state) {
@@ -789,23 +835,37 @@ async function startBoop() {
 
   starting = true;
   intentionalStop = false;
+  const generation = ++startGeneration;
+  const superseded = () => generation !== startGeneration;
   resetServiceStatuses("starting");
-  try {
-    await syncConvexRuntime();
-  } catch (error) {
+  const sync = await syncConvexRuntime(superseded);
+  if (superseded()) return; // a newer stop/start owns the status now
+  if (sync.stopped || intentionalStop) {
     starting = false;
-    if (intentionalStop) {
-      resetServiceStatuses("stopped");
-      return;
-    }
-    writeStartupLog(`[electron] convex sync failed: ${error instanceof Error ? error.message : String(error)}`);
+    resetServiceStatuses("stopped");
+    return;
+  }
+  if (!sync.ok && !sync.canStartServer) {
+    // First run with no generated Convex files: the server cannot start.
+    starting = false;
+    writeStartupLog(`[electron] convex sync failed: ${errorText(sync.error)}`);
     setStatus({
       state: "setup-required",
       server: "stopped",
       dashboard: "stopped",
-      lastMessage: error instanceof Error ? error.message : String(error),
+      lastMessage: errorText(sync.error),
     });
     return;
+  }
+  if (!sync.ok) {
+    // A Convex sync failure must not keep the server (and /health) down.
+    startupPhase("convex sync: failed, starting server anyway");
+    const warning =
+      `convex sync failed after ${sync.attempts} attempt(s): ${errorText(sync.error)}. ` +
+      "Starting the server anyway; Convex sync keeps retrying in the background.";
+    writeStartupLog(`[electron] WARNING ${warning}`);
+    console.warn(`[boop] ${warning}`);
+    setStatus({ lastMessage: "Convex sync failed; starting Boop anyway and retrying in the background." });
   }
 
   const script = path.join(runtimeRoot, "scripts", "dev.mjs");
@@ -848,6 +908,8 @@ async function startBoop() {
 }
 
 function stopBoop() {
+  startGeneration += 1;
+  if (starting) intentionalStop = true;
   if (bootstrapProcess) {
     intentionalStop = true;
     bootstrapProcess.kill("SIGTERM");
