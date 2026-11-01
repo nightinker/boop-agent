@@ -12,7 +12,7 @@ import {
   WorkflowCircle03Icon,
 } from "@hugeicons/core-free-icons";
 import { api } from "../../../convex/_generated/api.js";
-import { keepAwakeLabel, keepAwakeTone, useKeepAwake } from "./KeepAwake.js";
+import { keepAwakePillLabel, keepAwakeTone, useKeepAwake } from "./KeepAwake.js";
 
 type TimeRange = "all" | "7d" | "30d" | "90d";
 
@@ -213,7 +213,7 @@ export function DashboardPanel({ isDark }: { isDark: boolean }) {
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
             {keepAwake?.supported && (
               <StatusPill
-                label={keepAwakeLabel(keepAwake)}
+                label={keepAwakePillLabel(keepAwake)}
                 tone={keepAwakeTone(keepAwake)}
                 isDark={isDark}
               />
