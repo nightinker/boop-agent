@@ -41,7 +41,7 @@ import { isPublicServerRequest, isTrustedLocalRequest } from "./local-access.js"
 import { accessConfigFromEnv, isAccessAuthenticatedRequest } from "./cloudflare-access.js";
 import { mountDashboard } from "./dashboard.js";
 import { installMissedUpdates, resumeSelfBuilds, startNextQueuedBuild } from "./self-build/run.js";
-import { instanceIdentity, resolvePublicUrl, startInstanceCoordinator } from "./instance.js";
+import { instanceIdentity, isActiveInstance, resolvePublicUrl, startInstanceCoordinator } from "./instance.js";
 import { startSelfUpdateLoop } from "./self-update.js";
 import { keepAwake } from "./keep-awake.js";
 import { createKeepAwakeRouter, startBuildWakeLockLoop, startKeepAwakeSettingLoop } from "./keep-awake-routes.js";
@@ -359,6 +359,13 @@ async function main() {
       if (!(await installMissedUpdates())) await startNextQueuedBuild();
     })();
   };
+
+  // Safety net for builds queued while this copy wasn't in charge (e.g. the
+  // server took a request during a handover): the active copy looks for them
+  // every minute. It's a no-op without a source checkout or while one builds.
+  setInterval(() => {
+    if (isActiveInstance()) void startNextQueuedBuild();
+  }, 60_000).unref();
 
   // A server copy follows main, so builds shipped from the Mac reach it too.
   startSelfUpdateLoop({ isBusy: () => inboundQueue.isBusy() });

@@ -128,6 +128,52 @@ describe("the coordinator", () => {
     expect(isActiveInstance()).toBe(true);
     await c.stop();
   });
+
+  it("stands by after losing contact for as long as the others wait, then catches up when it's back", async () => {
+    // The Mac with its lid shut: check-ins fail long enough that the server
+    // takes over. When the network returns it must run onActivate again, which
+    // is what starts the self-builds queued meanwhile.
+    const identity = { instanceId: "mac", label: "the Mac", platform: "darwin", priority: 100, startedAt: 0 };
+    let clock = now;
+    let reply: InstanceSummary | null = summary("mac", ["mac"]);
+    const onActivate = vi.fn();
+    const onDeactivate = vi.fn();
+    const c = startInstanceCoordinator({
+      identity,
+      checkIn: async () => {
+        if (!reply) throw new Error("fetch failed");
+        return reply;
+      },
+      leave: async () => undefined,
+      onActivate,
+      onDeactivate,
+      intervalMs: 60_000,
+      graceMs: 20_000,
+      offlineAfterMs: 45_000,
+      now: () => clock,
+      log: { log: () => undefined, warn: () => undefined },
+    });
+    await c.tick();
+    expect(onActivate).toHaveBeenCalledTimes(1);
+
+    reply = null; // lid shut, no network
+    clock += 30_000;
+    await c.tick();
+    expect(isActiveInstance()).toBe(true); // a short blip keeps the role
+    clock += 30_000;
+    await c.tick();
+    expect(isActiveInstance()).toBe(false);
+    expect(onDeactivate).toHaveBeenCalledTimes(1);
+
+    reply = summary("mac", ["mac", "server"]); // back online; the server steps down
+    clock += 1_000;
+    await c.tick();
+    clock += 20_000;
+    await c.tick();
+    expect(isActiveInstance()).toBe(true);
+    expect(onActivate).toHaveBeenCalledTimes(2);
+    await c.stop();
+  });
 });
 
 describe("knowing where it runs", () => {

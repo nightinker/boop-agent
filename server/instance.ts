@@ -1,4 +1,5 @@
 import { hostname } from "node:os";
+import { INSTANCE_OFFLINE_AFTER_MS } from "../convex/instanceRules.js";
 
 /**
  * Boop can run in more than one place at once: the owner's Mac (primary) and a
@@ -107,6 +108,8 @@ export interface CoordinatorDeps {
   onDeactivate: (info: { summary: InstanceSummary }) => void | Promise<void>;
   intervalMs?: number;
   graceMs?: number;
+  /** How long check-ins may fail before this copy stops acting as active. */
+  offlineAfterMs?: number;
   now?: () => number;
   log?: Pick<Console, "log" | "warn">;
 }
@@ -122,6 +125,13 @@ export function startInstanceCoordinator(deps: CoordinatorDeps): { stop: () => P
   let inflight: Promise<void> | null = null;
   let stopped = false;
   let graceTimer: ReturnType<typeof setTimeout> | null = null;
+  // The other copies count this one offline once its check-ins stop for this
+  // long, and one of them takes over. So after the same time without a
+  // check-in (no network, a laptop dozing with its lid shut), this copy stands
+  // by too. Otherwise it would come back still "active" without ever running
+  // onActivate, and skip the catching up that does (queued self-builds, texts).
+  const offlineAfterMs = deps.offlineAfterMs ?? INSTANCE_OFFLINE_AFTER_MS;
+  let lastCheckInAt = now();
 
   // A check-in already under way is shared, so callers see its result.
   const tick = (): Promise<void> => {
@@ -136,6 +146,7 @@ export function startInstanceCoordinator(deps: CoordinatorDeps): { stop: () => P
     try {
       const publicUrl = await deps.publicUrl?.().catch(() => undefined);
       const summary = await deps.checkIn({ ...deps.identity, ...(publicUrl ? { publicUrl } : {}) });
+      lastCheckInAt = now();
       if (summary.activeInstanceId !== lastActiveId) {
         const who = summary.instances.find((i) => i.instanceId === summary.activeInstanceId);
         log.log(`[instance] active copy: ${who ? who.label : "none"}`);
@@ -169,6 +180,15 @@ export function startInstanceCoordinator(deps: CoordinatorDeps): { stop: () => P
       }
     } catch (err) {
       log.warn("[instance] check-in failed", err instanceof Error ? err.message : err);
+      if (current?.active && now() - lastCheckInAt > offlineAfterMs) {
+        log.log(`[instance] this copy (${deps.identity.label}) lost contact; standing by until it can check in again`);
+        const summary = current.summary ?? { activeInstanceId: null, instances: [] };
+        current = { identity: deps.identity, active: false, summary };
+        activeSeenAt = null;
+        await Promise.resolve(deps.onDeactivate({ summary })).catch((e) =>
+          log.warn("[instance] stepping down failed", e instanceof Error ? e.message : e),
+        );
+      }
     }
   };
 
