@@ -1,5 +1,6 @@
 import { api } from "../../convex/_generated/api.js";
 import { convex } from "../convex-client.js";
+import { isActiveInstance } from "../instance.js";
 
 const DEFAULT_RETENTION_DAYS = 3;
 const DEFAULT_INTERVAL_MS = 12 * 60 * 60 * 1000;
@@ -154,7 +155,7 @@ export function startImageCleanup(): () => void {
   // In-flight guard so a slow cleanup can't race against the next tick.
   let running = false;
   const tick = async () => {
-    if (running) return;
+    if (running || !isActiveInstance()) return;
     running = true;
     try {
       const r = await runImageCleanup();

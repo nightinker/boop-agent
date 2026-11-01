@@ -41,11 +41,18 @@ export const create = mutation({
  * One transaction, so two requests at once can't both start.
  */
 export const enqueue = mutation({
-  args: { buildId: v.string(), conversationId: v.string(), request: v.string() },
-  handler: async (ctx, args) => {
+  args: {
+    buildId: v.string(),
+    conversationId: v.string(),
+    request: v.string(),
+    // Always queue, even if nothing is building: used when the copy taking
+    // the request can't build (a server), so the Mac starts it later.
+    forceQueue: v.optional(v.boolean()),
+  },
+  handler: async (ctx, { forceQueue, ...args }) => {
     const now = Date.now();
     const active = await firstActive(ctx);
-    if (!active) {
+    if (!active && !forceQueue) {
       await ctx.db.insert("selfBuilds", { ...args, status: "coding", createdAt: now, updatedAt: now });
       return { status: "coding" as const, position: 0, blockedBy: null };
     }
@@ -57,7 +64,7 @@ export const enqueue = mutation({
     return {
       status: "queued" as const,
       position: ahead.length + 1,
-      blockedBy: { buildId: active.buildId, status: active.status },
+      blockedBy: active ? { buildId: active.buildId, status: active.status } : null,
     };
   },
 });

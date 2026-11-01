@@ -11,6 +11,7 @@ import {
   createSkillTools,
   newSkillToolsState,
 } from "./tools.js";
+import { isActiveInstance } from "../instance.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 export const SETTING_CURATOR_ENABLED = "skills_curator_enabled";
@@ -174,7 +175,10 @@ export async function runCurator(options: { force?: boolean; consolidate?: boole
 }
 
 export function startCuratorLoop(intervalMs = 6 * 60 * 60 * 1000): () => void {
-  const tick = () => void runCurator().catch((err) => console.error("[skills] curator failed", err));
+  const tick = () => {
+    if (!isActiveInstance()) return;
+    void runCurator().catch((err) => console.error("[skills] curator failed", err));
+  };
   const first = setTimeout(tick, 2 * 60 * 1000);
   const timer = setInterval(tick, intervalMs);
   return () => {

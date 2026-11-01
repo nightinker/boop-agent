@@ -4,6 +4,7 @@ import { broadcast } from "./broadcast.js";
 import { getRuntimeConfig, type RuntimeConfig } from "./runtime-config.js";
 import { runAgentRuntime } from "./runtimes/index.js";
 import { EMPTY_USAGE, type UsageTotals } from "./usage.js";
+import { isActiveInstance } from "./instance.js";
 
 function randomId(prefix: string): string {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
@@ -480,6 +481,7 @@ export async function runConsolidation(trigger = "scheduled"): Promise<{
 
 export function startConsolidationLoop(intervalMs = 24 * 60 * 60 * 1000): () => void {
   const timer = setInterval(() => {
+    if (!isActiveInstance()) return;
     runConsolidation("scheduled").catch((err) =>
       console.error("[consolidation] loop error", err),
     );

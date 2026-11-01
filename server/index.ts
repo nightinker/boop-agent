@@ -1,5 +1,7 @@
 import "./env-setup.js";
 import express from "express";
+import { api } from "../convex/_generated/api.js";
+import { convex } from "./convex-client.js";
 import cors from "cors";
 import { createServer } from "node:http";
 import { WebSocketServer } from "ws";
@@ -36,7 +38,9 @@ import { startImageCleanup } from "./images/clean.js";
 import { isPublicServerRequest, isTrustedLocalRequest } from "./local-access.js";
 import { accessConfigFromEnv, isAccessAuthenticatedRequest } from "./cloudflare-access.js";
 import { mountDashboard } from "./dashboard.js";
-import { resumeSelfBuilds } from "./self-build/run.js";
+import { resumeSelfBuilds, startNextQueuedBuild } from "./self-build/run.js";
+import { instanceIdentity, resolvePublicUrl, startInstanceCoordinator } from "./instance.js";
+import { startSelfUpdateLoop } from "./self-update.js";
 import {
   checkCswapLogin,
   getClaudeAccount,
@@ -58,17 +62,6 @@ async function main() {
   // recall() doesn't pay the model-load cost.
   preloadLocalModel();
 
-  // If a stable public URL is configured, register the Composio webhook +
-  // Gmail trigger now. For ngrok-based dev, scripts/dev.mjs drives the same
-  // function once the ngrok URL is known, so we skip when only the local
-  // PORT default is available.
-  const stableUrl = process.env.PUBLIC_URL;
-  if (stableUrl && !stableUrl.includes("localhost")) {
-    ensureProactiveWatcher(stableUrl).catch((err) =>
-      console.error("[proactive] startup failed", err),
-    );
-    ensureSlackWatcher(stableUrl).catch((err) => console.error("[slack-watch] startup failed", err));
-  }
 
   const app = express();
   // Behind Cloudflare Access (CF_ACCESS_TEAM_DOMAIN + CF_ACCESS_AUD), a visitor
@@ -296,19 +289,59 @@ async function main() {
     });
   });
 
+  let coordinator: ReturnType<typeof startInstanceCoordinator> | null = null;
+  let stopPoller: (() => void) | null = null;
+  let resumedSelfBuilds = false;
+  const onActivate = async (othersOnline: boolean) => {
+    // Texts a crash cut off are only re-answered when no other copy is up;
+    // otherwise one stepping down may still be answering them.
+    if (!othersOnline) {
+      const { requeued, failed } = await inboundQueue
+        .recover()
+        .catch((err) => (console.error("[inbound] recovery failed", err), { requeued: 0, failed: 0 }));
+      if (requeued || failed) console.log(`[inbound] after takeover: ${requeued} requeued, ${failed} given up`);
+    } else {
+      void inboundQueue.drainAll().catch((err) => console.error("[inbound] drain failed", err));
+    }
+    stopPoller ??= startSendbluePoller(inboundQueue);
+    // Composio sends events to one address, so point it at this copy.
+    const publicUrl = await resolvePublicUrl();
+    if (publicUrl) {
+      ensureProactiveWatcher(publicUrl).catch((err) => console.error("[proactive] startup failed", err));
+      ensureSlackWatcher(publicUrl).catch((err) => console.error("[slack-watch] startup failed", err));
+    }
+    // Self-builds run on the Mac. Only the first activation after this
+    // process started cleans up builds a restart interrupted; later ones
+    // (e.g. waking from sleep) just start whatever was queued meanwhile.
+    if (resumedSelfBuilds) {
+      void startNextQueuedBuild();
+    } else {
+      resumedSelfBuilds = true;
+      void resumeSelfBuilds();
+    }
+  };
+
+  // A server copy follows main, so builds shipped from the Mac reach it too.
+  startSelfUpdateLoop({ isBusy: () => inboundQueue.isBusy() });
+
   const port = Number(process.env.PORT ?? 3456);
   server.listen(port, () => {
     console.log(`boop-agent server listening on :${port}`);
-    setTimeout(() => void resumeSelfBuilds(), 5_000);
-    // Answer texts a crash or restart cut off, then keep checking Sendblue
-    // for texts its webhook never delivered.
-    inboundQueue
-      .recover()
-      .then(({ requeued, failed }) => {
-        if (requeued || failed) console.log(`[inbound] after restart: ${requeued} requeued, ${failed} given up`);
-      })
-      .catch((err) => console.error("[inbound] recovery failed", err))
-      .finally(() => startSendbluePoller(inboundQueue));
+    // Work that must happen once, or costs tokens, runs only on the active
+    // copy of Boop (the Mac first, a server while the Mac is offline).
+    coordinator = startInstanceCoordinator({
+      identity: instanceIdentity(),
+      checkIn: (identity) => convex.mutation(api.instances.checkIn, identity),
+      leave: async (instanceId) => {
+        await convex.mutation(api.instances.leave, { instanceId });
+      },
+      publicUrl: () => resolvePublicUrl(),
+      onActivate: ({ othersOnline }) => onActivate(othersOnline),
+      onDeactivate: () => {
+        stopPoller?.();
+        stopPoller = null;
+      },
+    });
     console.log(`  health      GET  http://localhost:${port}/health`);
     console.log(`  chat        POST http://localhost:${port}/chat`);
     console.log(`  sendblue    POST http://localhost:${port}/sendblue/webhook`);
@@ -321,8 +354,9 @@ async function main() {
     process.on(sig, () => {
       if (shuttingDown) return;
       shuttingDown = true;
-      closeLocalBrowser()
-        .catch(() => undefined)
+      // Hand over to another copy right away instead of after a timeout.
+      const leaving = coordinator?.stop() ?? Promise.resolve();
+      Promise.allSettled([closeLocalBrowser(), Promise.race([leaving, new Promise((r) => setTimeout(r, 3_000))])])
         .finally(() => process.exit(signalExitCodes[sig]));
     });
   }

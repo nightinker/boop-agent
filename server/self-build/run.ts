@@ -164,6 +164,18 @@ export async function startSelfBuild(input: { conversationId: string; request: s
   const refused = refuseUnlessOwner(input.conversationId);
   if (refused) return refused;
   const src = sourceDir();
+  if (!src && process.platform !== "darwin") {
+    // A server copy can't build or ship (that needs the Mac app), so it
+    // queues the request for the Mac, which starts it when it's back.
+    const buildId = newBuildId();
+    const slot = await convex.mutation(api.selfBuilds.enqueue, {
+      buildId,
+      conversationId: input.conversationId,
+      request: input.request,
+      forceQueue: true,
+    });
+    return `I'm running on the server right now, and builds happen on your Mac. I queued this as build ${buildId} (#${slot.position} in line); your Mac starts it as soon as it's back online, and I'll text you then.`;
+  }
   if (!src) return "Self-build isn't set up: set BOOP_SOURCE_DIR in .env.local to Boop's git checkout.";
   const buildId = newBuildId();
   const slot = await convex.mutation(api.selfBuilds.enqueue, {
@@ -357,6 +369,9 @@ export async function shipSelfBuild(input: {
   const refused = refuseUnlessOwner(input.conversationId);
   if (refused) return refused;
   const src = sourceDir();
+  if (!src && process.platform !== "darwin") {
+    return "Shipping a build restarts the Mac app, so it has to happen on your Mac, which is offline right now. Ask me again once it's back.";
+  }
   if (!src) return "Self-build isn't set up: set BOOP_SOURCE_DIR in .env.local to Boop's git checkout.";
   const recent = await convex.query(api.selfBuilds.recent, { limit: 10 });
   const shippable = (b: (typeof recent)[number]) =>

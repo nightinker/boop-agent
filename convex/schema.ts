@@ -187,6 +187,19 @@ export default defineSchema({
     claimedAt: v.number(),
   }).index("by_handle", ["handle"]),
 
+  // Each running copy of Boop (the owner's Mac, a Linux server) checks in here
+  // every few seconds. The online copy with the highest priority is the
+  // active one: it answers texts and runs automations; the others stand by.
+  instances: defineTable({
+    instanceId: v.string(),
+    label: v.string(),
+    platform: v.string(),
+    priority: v.number(),
+    publicUrl: v.optional(v.string()),
+    startedAt: v.number(),
+    lastSeenAt: v.number(),
+  }).index("by_instanceId", ["instanceId"]),
+
   // Every inbound iMessage, saved before Boop answers it. Each conversation's
   // texts are handled one at a time, oldest first. Rows come from the Sendblue
   // webhook or from the poller that catches texts the webhook never delivered.

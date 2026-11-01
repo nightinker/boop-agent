@@ -6,6 +6,7 @@ import { sendImessage, withAttachmentNote } from "./sendblue.js";
 import { broadcast } from "./broadcast.js";
 import { getUserTimezone } from "./timezone-config.js";
 import { isUsageLimitError, logSuppressedUsageLimit } from "./usage-limit.js";
+import { isActiveInstance } from "./instance.js";
 
 function randomId(prefix: string): string {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
@@ -132,6 +133,7 @@ export async function tickAutomations(): Promise<void> {
 
 export function startAutomationLoop(intervalMs = 30_000): () => void {
   const timer = setInterval(() => {
+    if (!isActiveInstance()) return;
     tickAutomations().catch((err) => console.error("[automations] tick error", err));
   }, intervalMs);
   return () => clearInterval(timer);

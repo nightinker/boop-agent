@@ -10,6 +10,7 @@ import { maybeHandleScriptedDemoReply } from "./scripted-demo-replies.js";
 import { verifySendblueWebhookSecret } from "./sendblue-webhook-auth.js";
 import { createInboundQueue, inboundFromSendblue, type InboundItem } from "./inbound-queue.js";
 import { convexInboundStore } from "./inbound-store.js";
+import { isActiveInstance } from "./instance.js";
 
 const API_BASE = "https://api.sendblue.com/api";
 const MAX_CHUNK = 2900;
@@ -416,6 +417,7 @@ export async function processInboundText(item: InboundItem): Promise<void> {
 export const inboundQueue = createInboundQueue({
   store: convexInboundStore,
   process: processInboundText,
+  isActive: isActiveInstance,
 });
 
 export function createSendblueRouter(): express.Router {

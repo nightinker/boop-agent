@@ -13,6 +13,7 @@ import { normalizeProactivePhone } from "./proactive-email.js";
 import { getRuntimeConfig } from "./runtime-config.js";
 import { runAgentRuntime } from "./runtimes/index.js";
 import { describeUserNow, getUserTimezone } from "./timezone-config.js";
+import { isActiveInstance } from "./instance.js";
 
 export const CHANNEL_TRIGGER = "SLACK_CHANNEL_MESSAGE_RECEIVED";
 export const DM_TRIGGER = "SLACK_DIRECT_MESSAGE_RECEIVED";
@@ -509,9 +510,9 @@ export async function sendSlackDigest(options: { force?: boolean } = {}): Promis
 }
 
 export function startSlackDigestLoop(intervalMs = 60_000): () => void {
-  const timer = setInterval(
-    () => void sendSlackDigest().catch((err) => console.error("[slack-watch] digest failed", err)),
-    intervalMs,
-  );
+  const timer = setInterval(() => {
+    if (!isActiveInstance()) return;
+    void sendSlackDigest().catch((err) => console.error("[slack-watch] digest failed", err));
+  }, intervalMs);
   return () => clearInterval(timer);
 }

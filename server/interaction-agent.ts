@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { hostPlatformPromptNote } from "./platform-support.js";
+import { instancePromptNote } from "./instance.js";
 import { api } from "../convex/_generated/api.js";
 import { convex } from "./convex-client.js";
 import { createMemoryTools } from "./memory/tools.js";
@@ -462,7 +463,7 @@ export async function handleUserMessageWithAttachments(
     INTERACTION_SYSTEM.replace(
       "{{INTEGRATIONS}}",
       integrationSummary || "(no integrations configured yet)",
-    ) + hostPlatformPromptNote();
+    ) + hostPlatformPromptNote() + instancePromptNote();
 
   const userText = opts.mediaError
     ? `[user sent images but they couldn't be downloaded: ${opts.mediaError}]\n${opts.content}`
