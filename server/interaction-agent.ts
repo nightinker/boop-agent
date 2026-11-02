@@ -33,6 +33,9 @@ import { orchestratorAvailable } from "./orchestrator-client.js";
 import {
   ORCHESTRATOR_ALLOWED_TOOLS,
   ORCHESTRATOR_DISPATCHER_PROMPT,
+  ORCHESTRATOR_HEALTH_PROMPT,
+  ORCHESTRATOR_HEALTH_TOOL,
+  createOrchestratorHealthTool,
   createOrchestratorTools,
 } from "./orchestrator-tools.js";
 import { otherAccountNames, rescueDeps, syncClaudeAccount } from "./rescue-wiring.js";
@@ -517,6 +520,7 @@ export async function handleUserMessageWithAttachments(
     ) +
     hostPlatformPromptNote() +
     instancePromptNote() +
+    (opts.kind !== "proactive" ? ORCHESTRATOR_HEALTH_PROMPT : "") +
     (orchestratorUp ? ORCHESTRATOR_DISPATCHER_PROMPT : "");
 
   const userText = opts.mediaError
@@ -652,6 +656,7 @@ export async function handleUserMessageWithAttachments(
     ...createSelfBuildTools(opts.conversationId),
     ...createLearnTools(opts.conversationId),
     ...createSecretDispatcherTools(opts.conversationId),
+    createOrchestratorHealthTool(),
     ...(orchestratorUp
       ? createOrchestratorTools(opts.conversationId, {
           redact: (text) => redactSecrets(redactPhoneNumbers(text)),
@@ -759,6 +764,7 @@ export async function handleUserMessageWithAttachments(
               ...SELF_BUILD_ALLOWED_TOOLS,
               ...LEARN_ALLOWED_TOOLS,
               ...SECRETS_DISPATCHER_ALLOWED_TOOLS,
+              ORCHESTRATOR_HEALTH_TOOL,
               ...(orchestratorUp ? ORCHESTRATOR_ALLOWED_TOOLS : []),
               "mcp__boop-draft-decisions__reject_draft",
               "mcp__boop-ack__send_ack",
