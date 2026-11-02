@@ -16,6 +16,7 @@ import {
   Sun03Icon,
   Menu01Icon,
   Cancel01Icon,
+  Flowchart01Icon,
 } from "@hugeicons/core-free-icons";
 import { api } from "../../convex/_generated/api.js";
 import { useSocket } from "./lib/useSocket.js";
@@ -29,6 +30,7 @@ import { ConnectionsPanel } from "./components/ConnectionsPanel.js";
 import { ConsolidationPanel } from "./components/ConsolidationPanel.js";
 import { SettingsPanel } from "./components/SettingsPanel.js";
 import { SelfBuildsPanel } from "./components/SelfBuildsPanel.js";
+import { OrchestratorPanel } from "./components/OrchestratorPanel.js";
 import { ChangelogDrawer } from "./components/ChangelogDrawer.js";
 import { RuntimeProviderLogo, type RuntimeProvider } from "./lib/branding.js";
 import { CLAUDE_ACCOUNT_CHANGED_EVENT } from "./components/ClaudeAccountRow.js";
@@ -46,6 +48,7 @@ type View =
   | "consolidation"
   | "connections"
   | "selfBuilds"
+  | "orchestrator"
   | "settings";
 
 type Theme = "dark" | "light";
@@ -101,6 +104,7 @@ const NAV_ICONS: Record<View, any> = {
   consolidation: ArrowShrink02Icon,
   connections: Link04Icon,
   selfBuilds: SourceCodeIcon,
+  orchestrator: Flowchart01Icon,
   settings: Settings01Icon,
 };
 
@@ -114,6 +118,7 @@ const NAV: { id: View; label: string }[] = [
   { id: "consolidation", label: "Consolidation" },
   { id: "connections", label: "Connections" },
   { id: "selfBuilds", label: "Self-builds" },
+  { id: "orchestrator", label: "Orchestrator" },
   { id: "settings", label: "Settings" },
 ];
 
@@ -501,6 +506,7 @@ export function App() {
             {view === "consolidation" && <ConsolidationPanel isDark={isDark} />}
             {view === "connections" && <ConnectionsPanel isDark={isDark} />}
             {view === "selfBuilds" && <SelfBuildsPanel isDark={isDark} />}
+            {view === "orchestrator" && <OrchestratorPanel isDark={isDark} />}
             {view === "settings" && (
               <SettingsPanel
                 isDark={isDark}

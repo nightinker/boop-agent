@@ -66,6 +66,12 @@ describe("dashboard shell on a phone", () => {
     expect(nav).toContain("max-md:fixed");
   });
 
+  it("has an Orchestrator tab in the sidebar, after Self-builds", () => {
+    const labels = [...html.matchAll(/sidebar-nav-item[^>]*>.*?<span class="truncate">([^<]+)<\/span>/g)].map((m) => m[1]);
+    expect(labels).toContain("Orchestrator");
+    expect(labels.indexOf("Orchestrator")).toBe(labels.indexOf("Self-builds") + 1);
+  });
+
   it("shows a phone-only menu button that controls the drawer", () => {
     const menu = classesOf(html, /aria-label="Open menu"/);
     expect(menu).toContain("md:hidden");

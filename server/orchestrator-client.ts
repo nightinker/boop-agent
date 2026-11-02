@@ -45,6 +45,24 @@ export interface TaskStatus {
   output?: string;
   error?: string;
   reason?: string;
+  started_at?: string;
+  finished_at?: string;
+}
+
+/** One step of a plan, as the planner wrote it. */
+export interface PlanTask {
+  id: string;
+  title?: string;
+  agent: string;
+  input?: string;
+  integrations?: string[];
+  depends_on?: string[];
+  cost_hint?: string;
+}
+
+export interface Plan {
+  goal: string;
+  tasks: PlanTask[];
 }
 
 export interface RunStatus {
@@ -52,6 +70,8 @@ export interface RunStatus {
   state: RunState;
   conversation_id?: string;
   task?: string;
+  /** Set once the run has a plan (straight away for submitted plans, after planning otherwise). */
+  plan?: Plan;
   tasks: TaskStatus[];
   token_budget: number;
   tokens_used: number;
@@ -59,6 +79,9 @@ export interface RunStatus {
   output?: string;
   result?: RunResult;
   error?: string;
+  max_parallel?: number;
+  created_at?: string;
+  finished_at?: string;
 }
 
 export interface RunResultResponse {
@@ -185,6 +208,12 @@ export class OrchestratorClient {
     if (req.maxParallel) body.max_parallel = req.maxParallel;
     if (req.conversationId) body.conversation_id = req.conversationId;
     return this.request("POST", "/v1/runs", body);
+  }
+
+  /** Every run the sidecar has in memory, newest first. */
+  async listRuns(): Promise<RunStatus[]> {
+    const res = await this.request<{ runs?: RunStatus[] }>("GET", "/v1/runs");
+    return Array.isArray(res.runs) ? res.runs : [];
   }
 
   async getRun(id: string, opts: { waitSeconds?: number; signal?: AbortSignal } = {}): Promise<RunStatus> {

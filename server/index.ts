@@ -18,6 +18,7 @@ import { runCurator, startCuratorLoop } from "./skills/curator.js";
 import { availableIntegrations, cancelAgent, retryAgent, spawnExecutionAgent } from "./execution-agent.js";
 import { createOrchestratorBridgeRouter } from "./orchestrator-bridge.js";
 import { orchestratorSidecar, SIDECAR_KEY_NAME } from "./orchestrator-sidecar.js";
+import { createOrchestratorDashboardRouter } from "./orchestrator-dashboard.js";
 import { createComposioRouter } from "./composio-routes.js";
 import { ensureProactiveWatcher } from "./proactive-email.js";
 import { ensureSlackWatcher, sendSlackDigest, startSlackDigestLoop } from "./proactive-slack.js";
@@ -255,6 +256,12 @@ async function main() {
     await sidecar.checkHealth();
     res.json(sidecar.status());
   });
+  // The dashboard's Orchestrator tab: health, log tail and runs in one call,
+  // plus one run's plan graph. The browser never talks to the sidecar itself.
+  app.use(
+    "/orchestrator/dashboard",
+    createOrchestratorDashboardRouter({ status: () => sidecar.status(), checkHealth: () => sidecar.checkHealth() }),
+  );
   app.post("/orchestrator/sidecar/self-test", async (_req, res) => {
     const result = await sidecar.selfTest();
     res.json({ selfTest: result, status: sidecar.status() });

@@ -8,6 +8,17 @@ Format:
 
 ---
 
+## Unreleased — Self-build checks use the branch's own dependencies
+
+- Fixed: self-build checks could fail even when every test passed. A build's worktree borrowed the running app's `node_modules`, which can be missing packages `origin/main` added since the app last installed (e.g. `@edge-runtime/vm` for `convex/memoryEmbeddings.test.ts`), so vitest exited with an unhandled "Cannot find package" error. The worktree now borrows `node_modules` only when it has every package in the branch's `package.json`, and otherwise runs its own `npm ci` (rechecked before the checks, in case the build added packages). It never installs into the running app's `node_modules`.
+- Changed: the PR body, the dashboard's check output and the "ready for review" text now state each check Boop ran and its real result (e.g. "Typecheck passed; tests failed: vitest hit 1 unhandled error (…)"), instead of a generic line that could sit next to the coding agent's own "all tests passed" claim.
+
+## Unreleased — Orchestrator tab in the dashboard
+
+- Added: an **Orchestrator** tab in the dashboard (after Self-builds). The top card shows the Go sidecar's health (running, starting, restarting, down or not configured), uptime, restart count and the next restart's backoff, whether `ANTHROPIC_API_KEY` is stored (never its value), the planner, the last health check, last exit and self-test, and the last 40 lines of `data/orchestrator/orchestrator.log`.
+- Added: recent runs with a detail view: the plan as a dependency graph (one column per level, an arrow from each step to the steps waiting on it), a timeline of when each step ran, each step's status (pending, running, done, failed, blocked, skipped, cancelled), agent, duration, tries, input and output, and the merged result. It polls every 2s while a run is going, every 5s otherwise, and pauses while the tab is hidden.
+- Added: `GET /orchestrator/dashboard` and `GET /orchestrator/dashboard/runs/{id}` on Boop's server (local only, behind the same access check as the rest of the dashboard API). They read the supervisor's status and the sidecar's `GET /v1/runs` / `GET /v1/runs/{id}`, so the browser never talks to the sidecar. They never fail the page: a sidecar that's down comes back as `available: false` and the tab says "Orchestrator not running". Log lines, errors and run text go through Boop's secret scrubber first. Startup is unchanged.
+
 ## Unreleased — Go orchestrator sidecar runs with Boop
 
 - Added: Boop now runs the Go orchestrator sidecar itself. On startup it builds `orchestrator-go` with `go build` when the binary is missing or the Go source changed (binary in `data/orchestrator/bin/`), starts it on `127.0.0.1:3460` as a child process, and logs its output to `data/orchestrator/orchestrator.log`. It restarts the sidecar with backoff (1s, doubling, up to 60s) if it dies or stops answering, and stops it on shutdown. A sidecar a crashed Boop left behind is stopped on the next start; one you started by hand is used instead of starting a second.

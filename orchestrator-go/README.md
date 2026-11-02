@@ -136,6 +136,18 @@ using Claude:
   tools: `run_orchestration` (submit a task, wait for the merged answer),
   `orchestration_status` and `cancel_orchestration`. Runs are tied to the
   conversation they came from.
+- The dashboard's **Orchestrator** tab shows the sidecar at a glance: running,
+  starting, restarting, down or not configured; uptime, restarts and the next
+  restart's backoff; whether `ANTHROPIC_API_KEY` is stored (never its value);
+  and the last 40 lines of `orchestrator.log`. Below that, the recent runs and,
+  for the one you pick, its plan as a dependency graph and a timeline: each
+  step's status, agent, duration, output and the merged result. It polls
+  every 2s while a run is going. The page reads Boop's
+  `GET /orchestrator/dashboard` and `GET /orchestrator/dashboard/runs/{id}`
+  (local only, `server/orchestrator-dashboard.ts`), which call `GET /v1/runs`
+  and `GET /v1/runs/{id}` here, so the browser never talks to the sidecar. If
+  the sidecar is down the page says "Orchestrator not running"; log lines and
+  run text pass through Boop's secret scrubber first.
 
 ## Plans
 
