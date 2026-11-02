@@ -5,13 +5,16 @@ vi.mock("../server/sendblue.js", () => ({ sendImessage: vi.fn() }));
 
 import {
   branchName,
+  checksSummary,
   codingPrompt,
   isOwnerConversation,
+  missingDependencies,
   parseGitHubRepo,
   prBody,
   readyMessage,
   restartScript,
   slugify,
+  vitestProblem,
 } from "../server/self-build/plan.js";
 import { codingEnv, realNodeEnv } from "../server/self-build/run.js";
 import { SELF_BUILD_ALLOWED_TOOLS, createSelfBuildTools } from "../server/self-build/tools.js";
@@ -72,6 +75,65 @@ describe("messages", () => {
     expect(text).toContain("Build b1 is ready");
     expect(text).toContain("https://github.com/a/b/pull/9");
     expect(text).toContain("ship it");
+  });
+});
+
+describe("check results", () => {
+  // vitest's footer when every test passed but one test file couldn't start.
+  const unhandled = [
+    "Error: [vitest-pool]: Failed to start forks worker for test files convex/x.test.ts.",
+    "Caused by: Error: Cannot find package '@edge-runtime/vm' imported from vitest",
+    "",
+    " Test Files  59 passed (59)",
+    "      Tests  558 passed (558)",
+    "     Errors  1 error",
+  ].join("\n");
+
+  it("explains a vitest failure where every test passed", () => {
+    expect(vitestProblem(unhandled)).toBe(
+      "vitest hit 1 unhandled error (Error: Cannot find package '@edge-runtime/vm' imported from vitest)",
+    );
+  });
+
+  it("reports failed tests by count", () => {
+    expect(vitestProblem(" Test Files  1 failed | 58 passed (59)\n      Tests  2 failed | 556 passed (558)")).toBe(
+      "2 tests failed",
+    );
+    expect(vitestProblem(" Test Files  59 passed (59)\n      Tests  558 passed (558)")).toBeNull();
+  });
+
+  it("names each check and its real result, never 'passed' for a failing run", () => {
+    expect(checksSummary({ typecheckOk: true, testsOk: true, testsOutput: "" })).toBe(
+      "Typecheck passed; tests passed.",
+    );
+    const failing = checksSummary({ typecheckOk: true, testsOk: false, testsOutput: unhandled });
+    expect(failing).toMatch(/^Typecheck passed; tests failed: vitest hit 1 unhandled error/);
+    expect(checksSummary({ typecheckOk: false, testsOk: false, testsOutput: "boom" })).toBe(
+      "Typecheck failed; tests failed: vitest exited with an error.",
+    );
+  });
+
+  it("puts Boop's own check result in the ready text and PR body", () => {
+    const checks = checksSummary({ typecheckOk: true, testsOk: false, testsOutput: unhandled });
+    const text = readyMessage({ buildId: "b1", summary: "All 558 tests pass.", prUrl: "u", testsPassed: false, checks });
+    expect(text).toContain(`Heads up, checks are failing (run by Boop): ${checks}`);
+    expect(text).not.toContain("Typecheck and tests pass.");
+    const body = prBody({ request: "X", summary: "", testsPassed: false, testOutput: "", checks });
+    expect(body).toContain(`## Checks: FAILING\n${checks}`);
+  });
+});
+
+describe("worktree dependencies", () => {
+  const pkg = { dependencies: { a: "1", b: "1" }, devDependencies: { "@edge-runtime/vm": "5", a: "1" } };
+
+  it("lists declared packages that aren't installed", () => {
+    const installed = new Set(["a", "b"]);
+    expect(missingDependencies(pkg, (n) => installed.has(n))).toEqual(["@edge-runtime/vm"]);
+  });
+
+  it("is empty when everything is installed", () => {
+    expect(missingDependencies(pkg, () => true)).toEqual([]);
+    expect(missingDependencies({}, () => false)).toEqual([]);
   });
 });
 

@@ -75,11 +75,54 @@ export function tail(text: string, lines = 30): string {
   return all.slice(-lines).join("\n");
 }
 
+/**
+ * Declared dependencies with no installed copy. A build worktree borrows the
+ * running app's node_modules, which can predate the branch (origin/main may
+ * have added packages since the app last installed); checks run against it
+ * then fail in ways the code itself doesn't explain.
+ */
+export function missingDependencies(
+  pkg: { dependencies?: Record<string, string>; devDependencies?: Record<string, string> },
+  isInstalled: (name: string) => boolean,
+): string[] {
+  const names = [...Object.keys(pkg.dependencies ?? {}), ...Object.keys(pkg.devDependencies ?? {})];
+  return [...new Set(names)].filter((name) => !isInstalled(name));
+}
+
+/**
+ * Why vitest failed, in one line. vitest exits non-zero for unhandled errors
+ * (like a test file whose environment can't load) even when every test that
+ * ran passed, so "N passed" alone doesn't mean the run was green.
+ */
+export function vitestProblem(output: string): string | null {
+  const failed = output.match(/Tests\s+(\d+) failed/);
+  if (failed) return `${failed[1]} test${failed[1] === "1" ? "" : "s"} failed`;
+  const filesFailed = output.match(/Test Files\s+(\d+) failed/);
+  if (filesFailed) return `${filesFailed[1]} test file${filesFailed[1] === "1" ? "" : "s"} failed`;
+  const errors = output.match(/Errors\s+(\d+) errors?/);
+  if (errors) {
+    const cause = output.match(/^Caused by: (.+)$/m)?.[1] ?? output.match(/^Error: (.+)$/m)?.[1];
+    const what = `vitest hit ${errors[1]} unhandled error${errors[1] === "1" ? "" : "s"}`;
+    return cause ? `${what} (${cause.trim().slice(0, 200)})` : what;
+  }
+  return null;
+}
+
+/** One plain line naming each check Boop ran and its real result. */
+export function checksSummary(input: { typecheckOk: boolean; testsOk: boolean; testsOutput: string }): string {
+  const typecheck = input.typecheckOk ? "Typecheck passed" : "Typecheck failed";
+  const tests = input.testsOk
+    ? "tests passed"
+    : `tests failed: ${vitestProblem(input.testsOutput) ?? "vitest exited with an error"}`;
+  return `${typecheck}; ${tests}.`;
+}
+
 export function prBody(input: {
   request: string;
   summary: string;
   testsPassed: boolean;
   testOutput: string;
+  checks?: string;
 }): string {
   return [
     "Built by Boop from an iMessage request.",
@@ -90,6 +133,7 @@ export function prBody(input: {
     input.summary.trim() || "(no summary)",
     "",
     `## Checks: ${input.testsPassed ? "passing" : "FAILING"}`,
+    ...(input.checks ? [input.checks, ""] : []),
     "```",
     tail(input.testOutput, 40),
     "```",
@@ -103,14 +147,21 @@ export function readyMessage(input: {
   summary: string;
   prUrl: string;
   testsPassed: boolean;
+  /** checksSummary() of what Boop itself ran, which outranks the agent's own claims. */
+  checks?: string;
 }): string {
   const summary = input.summary.trim().split("\n").slice(0, 8).join("\n");
+  const checks = input.checks
+    ? `${input.testsPassed ? "Checks" : "Heads up, checks are failing"} (run by Boop): ${input.checks}`
+    : input.testsPassed
+      ? "Typecheck and tests pass."
+      : "Heads up: typecheck or tests are failing.";
   return [
     `Build ${input.buildId} is ready for review.`,
     "",
     summary,
     "",
-    input.testsPassed ? "Typecheck and tests pass." : "Heads up: typecheck or tests are failing.",
+    checks,
     input.prUrl,
     "",
     "Reply \"ship it\" to install it (I'll restart), or \"cancel build\".",

@@ -8,6 +8,11 @@ Format:
 
 ---
 
+## Unreleased — Self-build checks use the branch's own dependencies
+
+- Fixed: self-build checks could fail even when every test passed. A build's worktree borrowed the running app's `node_modules`, which can be missing packages `origin/main` added since the app last installed (e.g. `@edge-runtime/vm` for `convex/memoryEmbeddings.test.ts`), so vitest exited with an unhandled "Cannot find package" error. The worktree now borrows `node_modules` only when it has every package in the branch's `package.json`, and otherwise runs its own `npm ci` (rechecked before the checks, in case the build added packages). It never installs into the running app's `node_modules`.
+- Changed: the PR body, the dashboard's check output and the "ready for review" text now state each check Boop ran and its real result (e.g. "Typecheck passed; tests failed: vitest hit 1 unhandled error (…)"), instead of a generic line that could sit next to the coding agent's own "all tests passed" claim.
+
 ## Unreleased — Orchestrator tab in the dashboard
 
 - Added: an **Orchestrator** tab in the dashboard (after Self-builds). The top card shows the Go sidecar's health (running, starting, restarting, down or not configured), uptime, restart count and the next restart's backoff, whether `ANTHROPIC_API_KEY` is stored (never its value), the planner, the last health check, last exit and self-test, and the last 40 lines of `data/orchestrator/orchestrator.log`.

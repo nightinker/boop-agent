@@ -1,7 +1,7 @@
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { existsSync } from "node:fs";
-import { chmod, mkdir, readFile, readdir, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, readFile, readdir, rename, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { api } from "../../convex/_generated/api.js";
@@ -23,6 +23,8 @@ import {
   readyMessage,
   restartScript,
   catchUpMessage,
+  checksSummary,
+  missingDependencies,
   ROLLBACK_LOG_LINES,
   rollbackMessage,
   startupLogName,
@@ -94,6 +96,34 @@ async function refreshGeneratedTypes(worktree: string, src: string): Promise<voi
   if (!fallback) return;
   await rm(join(worktree, "convex", "_generated"), { recursive: true, force: true });
   await must("cp", ["-R", fallback, join(worktree, "convex", "_generated")]);
+}
+
+/**
+ * Gives the worktree dependencies that match its own package.json. Borrows
+ * the running app's node_modules (a symlink) when that has every declared
+ * package; otherwise it's stale, so the worktree gets its own `npm ci`
+ * instead. Never installs through the symlink: that would change the
+ * dependencies of the Boop that's running.
+ */
+async function ensureDependencies(worktree: string, src: string): Promise<void> {
+  const pkg = JSON.parse(await readFile(join(worktree, "package.json"), "utf8"));
+  const installedIn = (dir: string) => (name: string) => existsSync(join(dir, name, "package.json"));
+  const local = join(worktree, "node_modules");
+  if (existsSync(local) && !missingDependencies(pkg, installedIn(local)).length) return;
+  const shared = join(src, "node_modules");
+  const linked = await lstat(local).then((s) => s.isSymbolicLink(), () => false);
+  if (linked) await unlink(local);
+  else if (!existsSync(local) && existsSync(shared) && !missingDependencies(pkg, installedIn(shared)).length) {
+    await symlink(shared, local, "dir");
+    return;
+  }
+  const missing = missingDependencies(pkg, installedIn(existsSync(local) ? local : shared));
+  console.log(`[self-build] installing dependencies in ${worktree} (missing: ${missing.slice(0, 5).join(", ")})`);
+  await must("npm", ["ci", "--no-audit", "--no-fund"], {
+    cwd: worktree,
+    timeout: 15 * 60_000,
+    env: { ...realNodeEnv(), ELECTRON_SKIP_BINARY_DOWNLOAD: "1" },
+  });
 }
 
 export function sourceDir(): string | null {
@@ -319,9 +349,7 @@ async function runBuild(input: {
 
   await must("git", ["fetch", "origin", "main"], { cwd: src });
   await must("git", ["worktree", "add", "-b", branch, worktree, "origin/main"], { cwd: src });
-  if (existsSync(join(src, "node_modules"))) {
-    await symlink(join(src, "node_modules"), join(worktree, "node_modules"), "dir");
-  }
+  await ensureDependencies(worktree, src);
   await refreshGeneratedTypes(worktree, src);
   // Cancelled while its worktree was being set up: don't bring it back.
   if ((await convex.query(api.selfBuilds.get, { buildId }))?.status === "cancelled") return;
@@ -383,17 +411,20 @@ async function runBuild(input: {
   const ahead = Number((await must("git", ["rev-list", "--count", "origin/main..HEAD"], { cwd: worktree })).trim());
   if (!ahead) throw new Error("The coding run finished without changing anything.");
 
+  // The coding run may have added packages since setup.
+  await ensureDependencies(worktree, src);
   await refreshGeneratedTypes(worktree, src);
   await noteActivity(buildId, "Running npx tsc --noEmit", { flush: true });
   const typecheck = await sh("npx", ["tsc", "--noEmit"], { cwd: worktree, timeout: CHECK_TIMEOUT_MS });
   await noteActivity(buildId, `Typecheck ${typecheck.ok ? "passed" : "failed"}; running npx vitest run`, { flush: true });
   const tests = await sh("npx", ["vitest", "run"], { cwd: worktree, timeout: CHECK_TIMEOUT_MS });
   const testsPassed = typecheck.ok && tests.ok;
-  const testOutput = `$ npx tsc --noEmit\n${tail(typecheck.output, 20) || "(clean)"}\n\n$ npx vitest run\n${tail(tests.output, 20)}`;
+  const checks = checksSummary({ typecheckOk: typecheck.ok, testsOk: tests.ok, testsOutput: tests.output });
+  const testOutput = `${checks}\n\n$ npx tsc --noEmit\n${tail(typecheck.output, 20) || "(clean)"}\n\n$ npx vitest run\n${tail(tests.output, 20)}`;
 
   const repo = parseGitHubRepo(await must("git", ["remote", "get-url", "origin"], { cwd: src }));
   if (!repo) throw new Error("Couldn't tell which GitHub repo origin points at.");
-  await noteActivity(buildId, `Tests ${tests.ok ? "passed" : "failed"}; pushing ${branch} and opening a PR`, { flush: true });
+  await noteActivity(buildId, `${checks} Pushing ${branch} and opening a PR`, { flush: true });
   await must("git", ["push", "-u", "origin", branch], { cwd: worktree });
   const prUrl = (
     await must(
@@ -410,7 +441,7 @@ async function runBuild(input: {
         "--title",
         `Boop self-build: ${input.request.slice(0, 60)}`,
         "--body",
-        prBody({ request: input.request, summary, testsPassed, testOutput }),
+        prBody({ request: input.request, summary, testsPassed, testOutput, checks }),
       ],
       { cwd: worktree },
     )
@@ -421,7 +452,7 @@ async function runBuild(input: {
 
   await noteActivity(buildId, `PR open: ${prUrl}`, { flush: true });
   await setStatus(buildId, { status: "pr_open", prUrl, testsPassed, testOutput: testOutput.slice(0, 8000) });
-  await notify(input.conversationId, readyMessage({ buildId, summary, prUrl, testsPassed }));
+  await notify(input.conversationId, readyMessage({ buildId, summary, prUrl, testsPassed, checks }));
 }
 
 export async function cancelSelfBuild(input: { conversationId: string; buildId?: string }): Promise<string> {
