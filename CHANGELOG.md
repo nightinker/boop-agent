@@ -14,6 +14,11 @@ Format:
 - Changed: a "started typing" with no "stopped" is trusted for 30s after the latest typing event, and once you've been seen typing the hard cap is `BOOP_MAX_TYPING_HOLD_MS` (default 60s, at most 120s), so a lost event still can't stall replies for long. Waits with texts only keep the 15s cap.
 - Added: log lines for every typing webhook Sendblue sends (`[sendblue] typing event … → held/restarted/ignored`, or the field names when the payload has no usable typing event), for why a typing signal was ignored, and for typing-timeout flushes. Phone numbers stay hidden.
 
+## Unreleased — Go orchestrator sidecar: planner and bridge (Milestone 2)
+
+- Added: `orchestrator-go/`, a standard-library Go sidecar that turns a task into a validated plan (a DAG with `depends_on`, `cost_hint` low/med/high and `scout.narrow` hints) using Claude, then runs it with a token budget (default 2 tasks at a time), retries with backoff, cancellation, and BLOCKED vs SKIPPED states. HTTP API: `POST /v1/plan`, `POST /v1/runs`, `GET /v1/runs[/{id}]`, `POST /v1/runs/{id}/cancel`. See `orchestrator-go/README.md`. Runs are kept in memory only and are lost on restart.
+- Added: `POST /orchestrator/spawn` and `GET /orchestrator/integrations` on Boop's server (local or Access-authenticated only, like the rest of the API), so the sidecar can run Boop's own sub-agents. Dropping the request cancels the sub-agent.
+
 ## Unreleased — Replies can't get stuck behind "typing…"
 
 - Fixed: after the typing indicator shipped, a "started typing" with no matching "stopped typing" could hold your texts for up to a minute (longer with retries and the poller), so replies seemed to stop. Now every text or typing signal only restarts the 5s quiet period, and every wait has a hard cap of 15s from your first waiting text that nothing can push out. `BOOP_MAX_TYPING_HOLD_MS` defaults to 15s and can't go higher.

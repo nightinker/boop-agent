@@ -156,6 +156,11 @@ export interface SpawnOptions {
    * deliver SpawnResult.attachments to the user (e.g. over iMessage).
    */
   allowImageAttachments?: boolean;
+  /**
+   * Cancels the agent when aborted, as if cancelAgent(agentId) were called.
+   * Used by callers that don't learn the agentId up front (the orchestrator bridge).
+   */
+  signal?: AbortSignal;
 }
 
 export type SpawnExecutionAgentOpts = SpawnOptions;
@@ -178,6 +183,10 @@ export async function spawnExecutionAgent(opts: SpawnExecutionAgentOpts): Promis
   const name = opts.name ?? (opts.integrations.join("+") || "general");
   const abort = new AbortController();
   running.set(agentId, abort);
+  if (opts.signal) {
+    if (opts.signal.aborted) abort.abort();
+    else opts.signal.addEventListener("abort", () => abort.abort(), { once: true });
+  }
 
   const shortId = agentId.slice(-6);
   const logAgent = (msg: string) => console.log(`[agent ${shortId}] ${msg}`);

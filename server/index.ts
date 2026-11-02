@@ -15,7 +15,8 @@ import { startAutomationLoop } from "./automations.js";
 import { startHeartbeatLoop } from "./heartbeat.js";
 import { startConsolidationLoop } from "./consolidation.js";
 import { runCurator, startCuratorLoop } from "./skills/curator.js";
-import { cancelAgent, retryAgent } from "./execution-agent.js";
+import { availableIntegrations, cancelAgent, retryAgent, spawnExecutionAgent } from "./execution-agent.js";
+import { createOrchestratorBridgeRouter } from "./orchestrator-bridge.js";
 import { createComposioRouter } from "./composio-routes.js";
 import { ensureProactiveWatcher } from "./proactive-email.js";
 import { ensureSlackWatcher, sendSlackDigest, startSlackDigestLoop } from "./proactive-slack.js";
@@ -238,6 +239,10 @@ async function main() {
   app.use("/apple", createAppleRouter());
   app.use("/changelog", createChangelogRouter());
   app.use("/keep-awake", createKeepAwakeRouter(awake));
+  app.use(
+    "/orchestrator",
+    createOrchestratorBridgeRouter({ spawn: spawnExecutionAgent, integrations: availableIntegrations }),
+  );
   app.use(
     "/secrets",
     createSecretsRouter({
