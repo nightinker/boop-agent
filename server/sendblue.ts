@@ -19,6 +19,7 @@ import {
 } from "./inbound-queue.js";
 import { convexInboundStore } from "./inbound-store.js";
 import { isActiveInstance } from "./instance.js";
+import { isNetworkError, noteNetworkFailure } from "./network-health.js";
 
 const API_BASE = "https://api.sendblue.com/api";
 const MAX_CHUNK = 2900;
@@ -133,6 +134,7 @@ export async function postWithRetry(
       await res.body?.cancel().catch(() => undefined);
       console.warn(`[sendblue] send got HTTP ${res.status}; retrying in ${delaysMs[attempt]}ms`);
     } catch (err) {
+      if (isNetworkError(err)) noteNetworkFailure("sendblue send");
       if (last) throw err;
       console.warn(`[sendblue] send failed (${String(err)}); retrying in ${delaysMs[attempt]}ms`);
     }
@@ -439,16 +441,23 @@ export async function processInboundText(item: InboundItem): Promise<void> {
       try {
         sent = await sendImessage(from_number, reply, attachments);
       } catch (err) {
-        // Still keep the reply in the history, marked undelivered, so the
-        // next turn ("any update?") can resend it instead of starting over.
-        await convex
-          .mutation(api.messages.send, {
-            conversationId,
-            role: "assistant",
-            content: `${reply}\n[not delivered: sending the iMessage failed (${String(err)}). Send this again if the user asks.]`,
-          })
-          .catch(() => undefined);
-        throw err;
+        if (!isNetworkError(err)) throw err;
+        // The reply is written; only sending it failed. Save it to the history
+        // and the outbox: the active copy (the server, if this Mac's network
+        // is bad) resends it, with no model call and no agent re-run.
+        await convex.mutation(api.replyOutbox.add, {
+          conversationId,
+          toNumber: from_number,
+          content: reply,
+          error: String(err),
+        });
+        await convex.mutation(api.messages.send, {
+          conversationId,
+          role: "assistant",
+          content: attachments.length > 0 ? `${reply}\n[images not sent: the network dropped]` : reply,
+        });
+        console.warn(`[turn ${turnTag}] → reply saved to the outbox; sending failed (${String(err)})`);
+        return;
       }
       await convex.mutation(api.messages.send, {
         conversationId,
@@ -460,6 +469,7 @@ export async function processInboundText(item: InboundItem): Promise<void> {
     }
   } catch (err) {
     console.error(`[turn ${turnTag}] handler error`, err);
+    if (isNetworkError(err)) noteNetworkFailure("inbound turn");
     throw err;
   } finally {
     stopTyping();
