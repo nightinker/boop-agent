@@ -32,6 +32,11 @@ export interface InstanceSummary {
 }
 
 export const CHECK_IN_INTERVAL_MS = 15_000;
+/**
+ * Priority a copy checks in with while its network is degraded: below a
+ * server's default (10), so a healthy server takes over. Alone, it still wins.
+ */
+export const DEGRADED_PRIORITY = 1;
 // A copy that becomes active while another was online waits this long, so the
 // one stepping down (which notices within one check-in) has stopped first.
 export const HANDOVER_GRACE_MS = 20_000;
@@ -108,6 +113,13 @@ export interface CoordinatorDeps {
   onDeactivate: (info: { summary: InstanceSummary }) => void | Promise<void>;
   intervalMs?: number;
   graceMs?: number;
+  /**
+   * This machine's network health. While degraded the copy checks in at
+   * DEGRADED_PRIORITY so a healthier copy takes over; failed check-ins count
+   * as network failures.
+   */
+  network?: { isDegraded: () => boolean; noteFailure: (source: string) => void };
+  degradedPriority?: number;
   /** How long check-ins may fail before this copy stops acting as active. */
   offlineAfterMs?: number;
   now?: () => number;
@@ -132,6 +144,7 @@ export function startInstanceCoordinator(deps: CoordinatorDeps): { stop: () => P
   // onActivate, and skip the catching up that does (queued self-builds, texts).
   const offlineAfterMs = deps.offlineAfterMs ?? INSTANCE_OFFLINE_AFTER_MS;
   let lastCheckInAt = now();
+  let wasDegraded = false;
 
   // A check-in already under way is shared, so callers see its result.
   const tick = (): Promise<void> => {
@@ -145,7 +158,19 @@ export function startInstanceCoordinator(deps: CoordinatorDeps): { stop: () => P
   const checkInOnce = async () => {
     try {
       const publicUrl = await deps.publicUrl?.().catch(() => undefined);
-      const summary = await deps.checkIn({ ...deps.identity, ...(publicUrl ? { publicUrl } : {}) });
+      const degraded = deps.network?.isDegraded() ?? false;
+      if (degraded !== wasDegraded) {
+        log.log(
+          degraded
+            ? `[instance] network degraded: checking in at priority ${deps.degradedPriority ?? DEGRADED_PRIORITY} so a healthier copy takes over`
+            : `[instance] network healthy again: checking in at priority ${deps.identity.priority}`,
+        );
+        wasDegraded = degraded;
+      }
+      const priority = degraded
+        ? Math.min(deps.identity.priority, deps.degradedPriority ?? DEGRADED_PRIORITY)
+        : deps.identity.priority;
+      const summary = await deps.checkIn({ ...deps.identity, priority, ...(publicUrl ? { publicUrl } : {}) });
       lastCheckInAt = now();
       if (summary.activeInstanceId !== lastActiveId) {
         const who = summary.instances.find((i) => i.instanceId === summary.activeInstanceId);
@@ -180,6 +205,7 @@ export function startInstanceCoordinator(deps: CoordinatorDeps): { stop: () => P
       }
     } catch (err) {
       log.warn("[instance] check-in failed", err instanceof Error ? err.message : err);
+      deps.network?.noteFailure("convex check-in");
       if (current?.active && now() - lastCheckInAt > offlineAfterMs) {
         log.log(`[instance] this copy (${deps.identity.label}) lost contact; standing by until it can check in again`);
         const summary = current.summary ?? { activeInstanceId: null, instances: [] };

@@ -16,6 +16,17 @@ export default defineSchema({
     .index("by_conversation_turn", ["conversationId", "turnId"])
     .index("by_createdAt", ["createdAt"]),
 
+  // Replies Boop wrote but couldn't send (the network dropped). The active
+  // copy resends them; a row is deleted once sent or given up on.
+  replyOutbox: defineTable({
+    conversationId: v.string(),
+    toNumber: v.string(),
+    content: v.string(),
+    createdAt: v.number(),
+    attempts: v.number(),
+    lastError: v.optional(v.string()),
+  }).index("by_createdAt", ["createdAt"]),
+
   conversations: defineTable({
     conversationId: v.string(),
     title: v.optional(v.string()),

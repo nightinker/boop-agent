@@ -47,6 +47,9 @@ import { accessConfigFromEnv, isAccessAuthenticatedRequest } from "./cloudflare-
 import { mountDashboard } from "./dashboard.js";
 import { installMissedUpdates, resumeSelfBuilds, startNextQueuedBuild } from "./self-build/run.js";
 import { instanceIdentity, isActiveInstance, resolvePublicUrl, startInstanceCoordinator } from "./instance.js";
+import type { Id } from "../convex/_generated/dataModel.js";
+import { networkHealth } from "./network-health.js";
+import { startReplyOutbox } from "./reply-outbox.js";
 import { startSelfUpdateLoop } from "./self-update.js";
 import { keepAwake } from "./keep-awake.js";
 import { createKeepAwakeRouter, startBuildWakeLockLoop, startKeepAwakeSettingLoop } from "./keep-awake-routes.js";
@@ -401,6 +404,7 @@ async function main() {
       void inboundQueue.drainAll().catch((err) => console.error("[inbound] drain failed", err));
     }
     stopPoller ??= startSendbluePoller(inboundQueue);
+    void outbox.flush();
     // Composio sends events to one address, so point it at this copy.
     const publicUrl = await resolvePublicUrl();
     if (publicUrl) {
@@ -433,6 +437,22 @@ async function main() {
     if (isActiveInstance()) void startNextQueuedBuild();
   }, 60_000).unref();
 
+  // Replies that were written but couldn't be sent: the active copy resends
+  // them every minute (and right after taking over).
+  const outbox = startReplyOutbox({
+    pending: () => convex.query(api.replyOutbox.pending, {}),
+    send: async (toNumber, text) => {
+      await sendImessage(toNumber, text);
+    },
+    remove: async (id) => {
+      await convex.mutation(api.replyOutbox.remove, { id: id as Id<"replyOutbox"> });
+    },
+    noteAttempt: async (id, error) => {
+      await convex.mutation(api.replyOutbox.noteAttempt, { id: id as Id<"replyOutbox">, error });
+    },
+    isActive: isActiveInstance,
+  });
+
   // A server copy follows main, so builds shipped from the Mac reach it too.
   startSelfUpdateLoop({ isBusy: () => inboundQueue.isBusy() });
 
@@ -448,6 +468,8 @@ async function main() {
         await convex.mutation(api.instances.leave, { instanceId });
       },
       publicUrl: () => resolvePublicUrl(),
+      // Flaky Wi-Fi: hand over to a healthier copy instead of losing replies.
+      network: networkHealth,
       onActivate: ({ othersOnline }) => onActivate(othersOnline),
       onDeactivate: () => {
         // Standing by: let this machine sleep; the active copy keeps answering.
