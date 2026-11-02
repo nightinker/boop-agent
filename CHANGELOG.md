@@ -8,6 +8,12 @@ Format:
 
 ---
 
+## Unreleased — Orchestrator tab in the dashboard
+
+- Added: an **Orchestrator** tab in the dashboard (after Self-builds). The top card shows the Go sidecar's health (running, starting, restarting, down or not configured), uptime, restart count and the next restart's backoff, whether `ANTHROPIC_API_KEY` is stored (never its value), the planner, the last health check, last exit and self-test, and the last 40 lines of `data/orchestrator/orchestrator.log`.
+- Added: recent runs with a detail view: the plan as a dependency graph (one column per level, an arrow from each step to the steps waiting on it), a timeline of when each step ran, each step's status (pending, running, done, failed, blocked, skipped, cancelled), agent, duration, tries, input and output, and the merged result. It polls every 2s while a run is going, every 5s otherwise, and pauses while the tab is hidden.
+- Added: `GET /orchestrator/dashboard` and `GET /orchestrator/dashboard/runs/{id}` on Boop's server (local only, behind the same access check as the rest of the dashboard API). They read the supervisor's status and the sidecar's `GET /v1/runs` / `GET /v1/runs/{id}`, so the browser never talks to the sidecar. They never fail the page: a sidecar that's down comes back as `available: false` and the tab says "Orchestrator not running". Log lines, errors and run text go through Boop's secret scrubber first. Startup is unchanged.
+
 ## Unreleased — Go orchestrator sidecar runs with Boop
 
 - Added: Boop now runs the Go orchestrator sidecar itself. On startup it builds `orchestrator-go` with `go build` when the binary is missing or the Go source changed (binary in `data/orchestrator/bin/`), starts it on `127.0.0.1:3460` as a child process, and logs its output to `data/orchestrator/orchestrator.log`. It restarts the sidecar with backoff (1s, doubling, up to 60s) if it dies or stops answering, and stops it on shutdown. A sidecar a crashed Boop left behind is stopped on the next start; one you started by hand is used instead of starting a second.
