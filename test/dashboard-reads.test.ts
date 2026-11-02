@@ -36,6 +36,30 @@ describe("dashboard reads", () => {
     renderToStaticMarkup(createElement(App));
     renderToStaticMarkup(createElement(DashboardPanel, { isDark: true }));
     for (const name of HEAVY) expect(live, name).not.toContain(name);
+    // Both read the one cached stats record instead.
+    expect(live).toContain(getFunctionName(api.dashboard.cachedMetrics));
+  });
+
+  it("shows the sidebar memory counts from the cached stats", () => {
+    queryResults.set(getFunctionName(api.dashboard.cachedMetrics), {
+      messages: 0,
+      memories: { total: 9, shortTerm: 2, longTerm: 3, permanent: 4 },
+      agents: { total: 0, completed: 0, failed: 0, cancelled: 0, running: 0 },
+      cost: { total: 0 },
+      tokens: { input: 0, output: 0 },
+      dailyBuckets: [],
+      truncated: false,
+      scanLimit: 5000,
+      computedAt: 1,
+    });
+    try {
+      const html = renderToStaticMarkup(createElement(App));
+      expect(html).toMatch(/Short[\s\S]*?>2</);
+      expect(html).toMatch(/Long[\s\S]*?>3</);
+      expect(html).toMatch(/Perm[\s\S]*?>4</);
+    } finally {
+      queryResults.clear();
+    }
   });
 
   it("shows the sidebar badges from the slim index queries", () => {

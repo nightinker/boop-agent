@@ -32,7 +32,7 @@ import { SelfBuildsPanel } from "./components/SelfBuildsPanel.js";
 import { ChangelogDrawer } from "./components/ChangelogDrawer.js";
 import { RuntimeProviderLogo, type RuntimeProvider } from "./lib/branding.js";
 import { CLAUDE_ACCOUNT_CHANGED_EVENT } from "./components/ClaudeAccountRow.js";
-import { usePolledQuery } from "./lib/usePolledQuery.js";
+import { useDashboardStats } from "./lib/dashboardStats.js";
 import { navDrawerClasses, useMobileNav } from "./lib/mobileNav.js";
 import boopGif from "../../assets/boop.gif";
 
@@ -137,11 +137,12 @@ export function App() {
   const { connected } = useSocket();
   const mobileNav = useMobileNav();
 
-  // The tier counts scan every memory (embeddings included), so refresh them
-  // every 10 minutes rather than on every memory write.
-  const counts = usePolledQuery(api.memoryRecords.countsByTier, {}, 10 * 60_000) as
-    | MemoryTierCounts
-    | undefined;
+  // Memory counts come from the cached dashboard stats (kept fresh here while
+  // the window is open) instead of scanning every memory on each change.
+  const stats = useDashboardStats();
+  const counts: MemoryTierCounts | undefined = stats
+    ? { short: stats.memories.shortTerm, long: stats.memories.longTerm, permanent: stats.memories.permanent }
+    : undefined;
   // Badges read only the running agents and in-progress builds, by index.
   const activeAgentCount = useQuery(api.agents.activeCount, {}) ?? 0;
   const pendingSelfBuildCount = new Set((useQuery(api.selfBuilds.inProgress, {}) ?? []).map((b) => b.buildId)).size;

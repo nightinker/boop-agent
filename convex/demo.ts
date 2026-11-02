@@ -1,6 +1,7 @@
 import { mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
 import { v } from "convex/values";
 import { DEMO_PREFIX, DEMO_SCAN_LIMIT, DEMO_SETTING_KEY, isDemoId } from "./demoMode";
+import { deleteEmbedding, saveEmbedding } from "./embeddingStore";
 
 const MINUTE = 60 * 1000;
 const HOUR = 60 * MINUTE;
@@ -235,6 +236,7 @@ async function deleteDemoRows(ctx: MutationCtx): Promise<DemoCounts> {
   for (const row of memories) {
     if (!isDemoId(row.memoryId)) continue;
     await ctx.db.delete(row._id);
+    await deleteEmbedding(ctx, row.memoryId);
     counts.memories += 1;
   }
 
@@ -1315,8 +1317,9 @@ async function seedMemories(ctx: MutationCtx, now: number) {
       topicMemoryIds[topicIndex + 1],
     ].filter((memoryId): memoryId is string => Boolean(memoryId));
     const lifecycle = index % 23 === 0 ? "archived" : index % 31 === 0 ? "pruned" : "active";
-    await ctx.db.insert("memoryRecords", {
-      memoryId: `demo:mem:${String(index + 1).padStart(3, "0")}`,
+    const memoryId = `demo:mem:${String(index + 1).padStart(3, "0")}`;
+    const memoryRecordId = await ctx.db.insert("memoryRecords", {
+      memoryId,
       content: row.content,
       tier: row.tier,
       segment: row.segment,
@@ -1326,7 +1329,6 @@ async function seedMemories(ctx: MutationCtx, now: number) {
       lastAccessedAt: ago(now, index % 10, (index % 6) * 33 * MINUTE),
       sourceTurn: `demo:turn:${topic}:${index % 4}`,
       lifecycle,
-      embedding: demoEmbedding(row.content),
       supersedes:
         index % 17 === 0 && index > 0
           ? [`demo:mem:${String(index).padStart(3, "0")}`]
@@ -1343,6 +1345,7 @@ async function seedMemories(ctx: MutationCtx, now: number) {
       }),
       createdAt: ago(now, Math.floor(index / 6), (index % 6) * 41 * MINUTE),
     });
+    await saveEmbedding(ctx, { _id: memoryRecordId, memoryId, lifecycle }, demoEmbedding(row.content));
     memories += 1;
   }
   return { memories };

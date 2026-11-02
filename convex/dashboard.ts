@@ -1,4 +1,5 @@
-import { query } from "./_generated/server";
+import { mutation, query, type QueryCtx } from "./_generated/server";
+import { v } from "convex/values";
 import {
   DEMO_SCAN_LIMIT,
   isDemoAutomationRun,
@@ -13,10 +14,7 @@ import {
 // recent N rows per table; `truncated` surfaces when we've hit the cap.
 const METRICS_SCAN_LIMIT = 5000;
 
-export const metrics = query({
-  args: {},
-  handler: async (ctx) => {
-    const demoMode = await isDemoModeEnabled(ctx);
+async function computeMetrics(ctx: QueryCtx, demoMode: boolean) {
     let [messages, memories, agents, automationRuns, usageRecords] = await Promise.all([
       ctx.db.query("messages").order("desc").take(METRICS_SCAN_LIMIT),
       ctx.db.query("memoryRecords").order("desc").take(METRICS_SCAN_LIMIT),
@@ -140,6 +138,58 @@ export const metrics = query({
       truncated,
       scanLimit: METRICS_SCAN_LIMIT,
     };
+}
+
+/** Live computation; scans up to 5000 rows per table. Prefer cachedMetrics. */
+export const metrics = query({
+  args: {},
+  handler: async (ctx) => computeMetrics(ctx, await isDemoModeEnabled(ctx)),
+});
+
+// ── Cached copy ──────────────────────────────────────────────────────────────
+// computeMetrics reads thousands of rows. Run live, it re-ran on every
+// message, memory and usage write while a dashboard was open. Instead it is
+// computed into one dashboardStats record, at most every STATS_MAX_AGE_MS and
+// only when an open dashboard asks (refreshMetrics). Viewers subscribe to
+// that one small record, which Convex can serve from cache until it changes.
+
+const STATS_MAX_AGE_MS = 10 * 60_000;
+const statsKey = (demoMode: boolean) => (demoMode ? "metrics:demo" : "metrics");
+
+export const cachedMetrics = query({
+  args: {},
+  handler: async (ctx) => {
+    const key = statsKey(await isDemoModeEnabled(ctx));
+    const row = await ctx.db
+      .query("dashboardStats")
+      .withIndex("by_key", (q) => q.eq("key", key))
+      .unique();
+    if (!row) return null;
+    const data = JSON.parse(row.payload) as Awaited<ReturnType<typeof computeMetrics>>;
+    return { ...data, computedAt: row.computedAt };
+  },
+});
+
+/**
+ * Recomputes the cached metrics if they're older than maxAgeMs (default 10
+ * minutes). Cheap when fresh: one small read. Called by open dashboards.
+ */
+export const refreshMetrics = mutation({
+  args: { maxAgeMs: v.optional(v.number()) },
+  handler: async (ctx, args) => {
+    const demoMode = await isDemoModeEnabled(ctx);
+    const key = statsKey(demoMode);
+    const row = await ctx.db
+      .query("dashboardStats")
+      .withIndex("by_key", (q) => q.eq("key", key))
+      .unique();
+    const now = Date.now();
+    const maxAge = Math.max(60_000, args.maxAgeMs ?? STATS_MAX_AGE_MS);
+    if (row && now - row.computedAt < maxAge) return { refreshed: false, computedAt: row.computedAt };
+    const payload = JSON.stringify(await computeMetrics(ctx, demoMode));
+    if (row) await ctx.db.patch(row._id, { payload, computedAt: now });
+    else await ctx.db.insert("dashboardStats", { key, payload, computedAt: now });
+    return { refreshed: true, computedAt: now };
   },
 });
 
