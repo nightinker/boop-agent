@@ -216,7 +216,7 @@ describe("reporting a rolled-back restart", () => {
     await reportPendingRestart();
 
     expect(convexMock.mutation.mock.calls[0][1]).toEqual({ buildId: "b1", status: "shipped" });
-    expect(notifyMock).toHaveBeenCalledWith("debug", "I'm back, running build b1: Add X", "self_build");
+    expect(notifyMock).toHaveBeenCalledWith("debug", "I'm back. Build merged and running.", "self_build");
   });
 
   it("shows the failed-start log in list_self_builds", async () => {

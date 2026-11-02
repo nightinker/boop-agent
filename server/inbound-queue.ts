@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { redactContactHandle } from "./privacy.js";
 import { scanForSecrets } from "./secrets/redact.js";
 
 /**
@@ -9,12 +10,14 @@ import { scanForSecrets } from "./secrets/redact.js";
  * run side by side.
  *
  * With a quiet period (debounceMs > 0) Boop doesn't answer straight away:
- * each new text restarts a per-conversation timer, and only once the sender
- * has been silent that long (and isn't typing) are all waiting texts claimed
- * together and answered as one turn. Texts that arrive while Boop is still
- * answering wait for the next batch. The texts themselves are saved before
- * the timer starts, so a restart mid-wait loses nothing: they're answered
- * when the queue recovers.
+ * each new text (or typing signal) restarts a per-conversation timer, and
+ * once the sender has been silent that long all waiting texts are claimed
+ * together and answered as one turn. Every hold also has a hard deadline
+ * (maxHoldMs, ~15s from the first waiting text) that no text or typing signal
+ * can push out, so a lost "stopped typing" event can never stall a reply.
+ * Texts that arrive while Boop is still answering wait for the next batch.
+ * The texts themselves are saved before the timer starts, so a restart
+ * mid-wait loses nothing: they're answered when the queue recovers.
  */
 
 export interface InboundInput {
@@ -66,9 +69,10 @@ export interface InboundQueue {
   /** On startup: requeue texts a crash cut off, then answer everything waiting. */
   recover(): Promise<{ requeued: number; failed: number }>;
   /**
-   * The sender started or stopped typing. While they type, an open quiet
-   * period is held open (at most maxTypingWaitMs after typing first started
-   * since their last text); when they stop, the quiet period restarts.
+   * The sender started or stopped typing. Either signal restarts an open
+   * quiet period, but never past the hold's hard deadline, so a "started"
+   * with no "stopped" holds at most one more quiet period. Matched to the
+   * waiting conversation by phone digits, so "+1 (555) …" and "555…" agree.
    * Ignored when no text is waiting (unknown numbers, idle conversations) and
    * after an SMS/RCS text. Never throws.
    */
@@ -86,7 +90,8 @@ export interface InboundQueue {
 const FINISH_RETRIES = 3;
 
 export const DEFAULT_DEBOUNCE_MS = 5_000;
-export const DEFAULT_MAX_TYPING_WAIT_MS = 60_000;
+/** Hard cap on how long texts are held, counted from the first waiting text. */
+export const DEFAULT_MAX_HOLD_MS = 15_000;
 
 /** BOOP_MESSAGE_DEBOUNCE_MS: quiet period before answering; 0 turns it off. */
 export function debounceMsFromEnv(value: string | undefined): number {
@@ -95,11 +100,27 @@ export function debounceMsFromEnv(value: string | undefined): number {
   return Number.isFinite(ms) && ms >= 0 ? ms : DEFAULT_DEBOUNCE_MS;
 }
 
-/** BOOP_MAX_TYPING_HOLD_MS: longest "typing…" can hold replies back; 0 = ignore typing. */
+/**
+ * BOOP_MAX_TYPING_HOLD_MS: hard cap on holding texts back (default and
+ * ceiling 15s, so an old 60s setting can't bring back long stalls); 0 = ignore typing.
+ */
 export function maxTypingHoldMsFromEnv(value: string | undefined): number {
-  if (value === undefined || value.trim() === "") return DEFAULT_MAX_TYPING_WAIT_MS;
+  if (value === undefined || value.trim() === "") return DEFAULT_MAX_HOLD_MS;
   const ms = Number(value);
-  return Number.isFinite(ms) && ms >= 0 ? ms : DEFAULT_MAX_TYPING_WAIT_MS;
+  return Number.isFinite(ms) && ms >= 0 ? Math.min(ms, DEFAULT_MAX_HOLD_MS) : DEFAULT_MAX_HOLD_MS;
+}
+
+/**
+ * The part of a conversation id that identifies the contact, for matching
+ * typing signals to waiting texts: phone digits without a US "1" prefix, or
+ * a lowercased email handle.
+ */
+export function contactMatchKey(conversationId: string): string {
+  const handle = conversationId.replace(/^sms:/, "").trim().toLowerCase();
+  if (handle.includes("@")) return handle;
+  const digits = handle.replace(/\D/g, "");
+  if (!digits) return handle;
+  return digits.length === 11 && digits.startsWith("1") ? digits.slice(1) : digits;
 }
 
 /** True unless the service is known and isn't iMessage (SMS, RCS, …). */
@@ -129,7 +150,7 @@ export function combineInbound(items: InboundItem[]): InboundItem {
 export function createInboundQueue(deps: {
   store: InboundStore;
   process: (item: InboundItem) => Promise<void>;
-  log?: Pick<Console, "error" | "warn">;
+  log?: Pick<Console, "error" | "warn"> & Partial<Pick<Console, "log">>;
   retryDelayMs?: number;
   /**
    * Whether this copy of Boop answers texts. A standby copy still saves every
@@ -140,8 +161,9 @@ export function createInboundQueue(deps: {
   /** Quiet period before a conversation's texts are answered together. 0 = answer each at once. */
   debounceMs?: number;
   /**
-   * Longest a "typing…" signal can hold a quiet period open without a new
-   * text, counted from when typing first started. 0 = ignore typing.
+   * Hard cap on a hold, counted from the first waiting text: no text or
+   * typing signal can delay the answer past this. 0 = ignore typing (the
+   * default 15s cap still applies to texts).
    */
   maxTypingWaitMs?: number;
 }): InboundQueue {
@@ -154,44 +176,77 @@ export function createInboundQueue(deps: {
   // running loop checks once more before it stops.
   const again = new Set<string>();
   const debounceMs = Math.max(0, deps.debounceMs ?? 0);
-  const maxTypingWaitMs = Math.max(0, deps.maxTypingWaitMs ?? DEFAULT_MAX_TYPING_WAIT_MS);
+  const maxTypingWaitMs = Math.max(0, deps.maxTypingWaitMs ?? DEFAULT_MAX_HOLD_MS);
+  // The hard deadline of every hold, typing or not. Never shorter than one
+  // quiet period, so a lone text still gets its full wait.
+  const maxHoldMs = Math.max(debounceMs, maxTypingWaitMs > 0 ? maxTypingWaitMs : DEFAULT_MAX_HOLD_MS);
   // Open quiet periods: a conversation in here isn't answered until it fires.
   const timers = new Map<string, ReturnType<typeof setTimeout>>();
-  const typing = new Set<string>();
-  // When typing first held each open quiet period; the hard cap counts from here.
+  // When each open hold started (its first waiting text); the hard cap counts from here.
   const holdStartedAt = new Map<string, number>();
   // Conversations whose latest text came over SMS/RCS: no typing indicators there.
   const noTyping = new Set<string>();
+  // Flushes whose drain failed (e.g. the store was unreachable), retried a few times.
+  const flushRetries = new Map<string, number>();
+  const FLUSH_RETRY_LIMIT = 3;
+  const info = (message: string) => (log.log ? log.log(message) : undefined);
+  const who = (conversationId: string) => redactContactHandle(conversationId.replace(/^sms:/, ""));
 
-  function startQuietPeriod(conversationId: string): void {
+  /** Opens a hold, or extends it by one quiet period, never past its hard deadline. */
+  function startQuietPeriod(conversationId: string, why: string): void {
+    const now = Date.now();
     const pending = timers.get(conversationId);
     if (pending) clearTimeout(pending);
-    let wait = debounceMs;
-    if (typing.has(conversationId)) {
-      // Hold until they stop typing, but never past the cap: a lost
-      // is_typing=false (or a stream of is_typing=true) can't stall replies.
-      const started = holdStartedAt.get(conversationId) ?? Date.now();
-      holdStartedAt.set(conversationId, started);
-      wait = Math.max(0, started + maxTypingWaitMs - Date.now());
-    }
+    const started = pending ? (holdStartedAt.get(conversationId) ?? now) : now;
+    holdStartedAt.set(conversationId, started);
+    const deadline = started + maxHoldMs;
+    const wait = Math.max(0, Math.min(debounceMs, deadline - now));
+    const capped = wait < debounceMs;
+    info(
+      pending
+        ? `[inbound] hold extended for ${who(conversationId)} (${why}): ${wait}ms${capped ? " (max hold)" : ""}, held ${now - started}ms so far`
+        : `[inbound] hold started for ${who(conversationId)} (${why}): ${wait}ms, max ${maxHoldMs}ms`,
+    );
     const timer = setTimeout(() => {
+      if (timers.get(conversationId) !== timer) return;
       timers.delete(conversationId);
-      if (typing.delete(conversationId)) {
-        log.warn(`[inbound] still "typing" after ${maxTypingWaitMs}ms; answering anyway`);
-      }
       holdStartedAt.delete(conversationId);
-      void drain(conversationId);
+      const held = Date.now() - started;
+      info(
+        capped
+          ? `[inbound] max-hold flush for ${who(conversationId)} after ${held}ms`
+          : `[inbound] flush for ${who(conversationId)} after ${held}ms`,
+      );
+      flush(conversationId);
     }, wait);
     timer.unref?.();
     timers.set(conversationId, timer);
+  }
+
+  /** Hands a conversation's waiting texts to the agent; never throws. */
+  function flush(conversationId: string): void {
+    try {
+      void drain(conversationId);
+    } catch (err) {
+      log.error(`[inbound] flush for a conversation failed`, err);
+    }
   }
 
   function cancelQuietPeriod(conversationId: string): void {
     const pending = timers.get(conversationId);
     if (pending) clearTimeout(pending);
     timers.delete(conversationId);
-    typing.delete(conversationId);
     holdStartedAt.delete(conversationId);
+  }
+
+  /** The conversation with an open hold that a typing signal is about, if any. */
+  function heldConversation(conversationId: string): string | null {
+    if (timers.has(conversationId)) return conversationId;
+    const key = contactMatchKey(conversationId);
+    for (const held of timers.keys()) {
+      if (contactMatchKey(held) === key) return held;
+    }
+    return null;
   }
 
   async function claim(conversationId: string): Promise<InboundItem[]> {
@@ -247,7 +302,20 @@ export function createInboundQueue(deps: {
       return running;
     }
     const run = loop(conversationId)
-      .catch((err) => log.error(`[inbound] queue for a conversation stopped`, err))
+      .then(() => void flushRetries.delete(conversationId))
+      .catch((err) => {
+        log.error(`[inbound] queue for a conversation stopped`, err);
+        // Usually the store was unreachable; the texts are still queued, so
+        // try again shortly instead of waiting for the poller's safety net.
+        const tries = (flushRetries.get(conversationId) ?? 0) + 1;
+        if (tries > FLUSH_RETRY_LIMIT) {
+          flushRetries.delete(conversationId);
+          return;
+        }
+        flushRetries.set(conversationId, tries);
+        const retry = setTimeout(() => void drain(conversationId), retryDelayMs * tries);
+        retry.unref?.();
+      })
       .finally(() => {
         draining.delete(conversationId);
         // A text that arrived after the loop's last check but before this
@@ -276,15 +344,14 @@ export function createInboundQueue(deps: {
       // Open (or restart) the quiet period before saving, so a drain already
       // in flight can't claim this text and answer it before the burst ends.
       const wasWaiting = timers.has(conversationId);
-      // A text arriving means they stopped typing; a later "typing…" starts
-      // a fresh hold.
-      typing.delete(conversationId);
-      holdStartedAt.delete(conversationId);
-      startQuietPeriod(conversationId);
+      startQuietPeriod(conversationId, "text");
       const timer = timers.get(conversationId);
       let enqueued = false;
       try {
         enqueued = await store.enqueue(input);
+        // A slow save can outlast the hold: its timer already fired and
+        // drained before this text existed, so answer it now.
+        if (enqueued && !timers.has(conversationId)) flush(conversationId);
         return enqueued;
       } finally {
         // A duplicate (or a failed save) for an idle conversation shouldn't
@@ -299,19 +366,14 @@ export function createInboundQueue(deps: {
         if (debounceMs <= 0 || maxTypingWaitMs <= 0) return "ignored";
         // Typing only matters while texts are waiting to be answered; that also
         // drops signals from numbers that never texted (or were already answered).
-        if (!timers.has(conversationId)) return "ignored";
+        const held = heldConversation(conversationId);
+        if (!held) return "ignored";
         // SMS/RCS keep the plain quiet period.
-        if (noTyping.has(conversationId)) return "ignored";
-        if (isTyping) {
-          // Already holding: a repeat "typing…" doesn't extend the cap.
-          if (typing.has(conversationId)) return "held";
-          typing.add(conversationId);
-          startQuietPeriod(conversationId);
-          return "held";
-        }
-        typing.delete(conversationId);
-        startQuietPeriod(conversationId);
-        return "restarted";
+        if (noTyping.has(held)) return "ignored";
+        // Either way it's a sign of life: one more quiet period, capped by the
+        // hard deadline. A "started" with no "stopped" can't hold any longer.
+        startQuietPeriod(held, isTyping ? "typing" : "stopped typing");
+        return isTyping ? "held" : "restarted";
       } catch (err) {
         log.warn("[inbound] couldn't apply a typing signal", err);
         return "ignored";
@@ -322,8 +384,8 @@ export function createInboundQueue(deps: {
       const waiting = timers.size;
       for (const timer of timers.values()) clearTimeout(timer);
       timers.clear();
-      typing.clear();
       holdStartedAt.clear();
+      flushRetries.clear();
       noTyping.clear();
       return waiting;
     },
@@ -395,6 +457,11 @@ export function typingFromSendblue(payload: unknown): { conversationId: string; 
   if (!payload || typeof payload !== "object") return null;
   const body = payload as Record<string, unknown>;
   if (typeof body.is_typing !== "boolean") return null;
+  // A real text that happens to carry is_typing must still be queued, never
+  // swallowed as a typing hint.
+  if (str(body.content) || str(body.message_handle) || extractSendblueMediaUrls(body.media_url, body.media_urls).length > 0) {
+    return null;
+  }
   const number = str(body.number);
   if (!number) return null;
   return { conversationId: `sms:${number}`, isTyping: body.is_typing };

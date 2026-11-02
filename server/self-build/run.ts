@@ -499,11 +499,11 @@ export async function shipSelfBuild(input: {
       await noteActivity(build.buildId, `Ship failed: ${message.split("\n")[0]}`, { flush: true });
       activityLogs.delete(build.buildId);
       await setStatus(build.buildId, { status: "failed", error: message.slice(0, 4000) }).catch(() => undefined);
-      await notify(build.conversationId, `Shipping build ${build.buildId} failed: ${message.split("\n")[0]}`);
+      await notify(build.conversationId, `Shipping failed: ${message.split("\n")[0]}`);
       await startNextQueuedBuild();
     },
   );
-  return `Shipping build ${build.buildId}: merging, rebuilding and restarting. I'll be offline for a minute or two and text you when I'm back.`;
+  return `Shipping it: merging, rebuilding and restarting. Back in a minute or two.`;
 }
 
 async function prIsMerged(prUrl: string): Promise<boolean> {
@@ -528,7 +528,7 @@ async function shipBuild(input: {
     await noteActivity(buildId, "Merged; restart Boop to load it", { flush: true });
     activityLogs.delete(buildId);
     await setStatus(buildId, { status: "shipped" });
-    await notify(input.conversationId, `Merged build ${buildId}. Restart Boop to load it.`);
+    await notify(input.conversationId, `Build merged. Restart Boop to load it.`);
     await startNextQueuedBuild();
     return;
   }
@@ -543,7 +543,7 @@ async function shipBuild(input: {
       await noteActivity(buildId, "Built the new app; restarting into it", { flush: true });
       activityLogs.delete(buildId);
       await setStatus(buildId, { status: "restarting" });
-      await notify(input.conversationId, `Build ${buildId} is merged and built. Restarting now, back in a minute.`);
+      await notify(input.conversationId, `Build merged. Restarting now, back in a minute.`);
     },
   });
 }
@@ -640,7 +640,7 @@ export async function resumeSelfBuilds(opts: { startQueued?: boolean } = {}): Pr
       await notify(
         build.conversationId,
         build.status === "restarting"
-          ? `I couldn't tell whether build ${build.buildId} started after the restart. Its code is merged; ask me to check which version is running.`
+          ? `Build merged, but I couldn't tell if it started after the restart. Ask me to check.`
           : `Build ${build.buildId} stopped because I restarted while it was ${build.status}. Ask me to start it again if you still want it: ${build.request.slice(0, 120)}`,
       );
     }
@@ -768,7 +768,7 @@ export async function reportPendingRestart(): Promise<void> {
     }
     if (result.status === "shipped") {
       await setStatus(result.buildId, { status: "shipped" });
-      await notify(build.conversationId, `I'm back, running build ${result.buildId}: ${build.request.slice(0, 120)}`);
+      await notify(build.conversationId, `I'm back. Build merged and running.`);
       return;
     }
     const logPath = result.startupLog && existsSync(result.startupLog) ? result.startupLog : undefined;

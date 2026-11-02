@@ -428,7 +428,7 @@ export const inboundQueue = createInboundQueue({
   isActive: isActiveInstance,
   // Wait for a quiet period so a burst of texts gets one answer.
   debounceMs: debounceMsFromEnv(process.env.BOOP_MESSAGE_DEBOUNCE_MS),
-  // While the sender is typing the wait is held open, but never longer than this.
+  // Hard cap on any wait (typing or not), counted from the first waiting text.
   maxTypingWaitMs: maxTypingHoldMsFromEnv(process.env.BOOP_MAX_TYPING_HOLD_MS),
 });
 
