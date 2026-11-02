@@ -1,6 +1,7 @@
-import { action, mutation, query, type QueryCtx } from "./_generated/server";
+import { action, internalMutation, internalQuery, mutation, query, type QueryCtx } from "./_generated/server";
 import { v } from "convex/values";
-import { api } from "./_generated/api";
+import { internal } from "./_generated/api";
+import { deleteEmbedding, isEmbedded, saveEmbedding, syncEmbeddingLifecycle } from "./embeddingStore";
 import type { Doc, Id } from "./_generated/dataModel";
 import { DEMO_SCAN_LIMIT, isDemoId, isDemoModeEnabled } from "./demoMode";
 
@@ -56,6 +57,7 @@ export const upsert = mutation({
           .unique();
         if (target && target.lifecycle === "active") {
           await ctx.db.patch(target._id, { lifecycle: "archived" });
+          await syncEmbeddingLifecycle(ctx, target.memoryId, "archived");
         }
       }
     }
@@ -73,7 +75,6 @@ export const upsert = mutation({
         importance: args.importance,
         decayRate: args.decayRate,
         supersedes: args.supersedes,
-        embedding: args.embedding ?? existing.embedding,
         metadata: args.metadata ?? existing.metadata,
         imageStorageIds:
           args.imageStorageIds === null
@@ -83,11 +84,14 @@ export const upsert = mutation({
               : existing.imageStorageIds,
         lastAccessedAt: now,
       });
+      // A new vector replaces the old one; otherwise move a legacy one over.
+      const vector = args.embedding ?? existing.embedding;
+      if (vector && vector.length > 0) await saveEmbedding(ctx, existing, vector);
       return existing._id;
     }
 
-    const { imageStorageIds, ...rest } = args;
-    return await ctx.db.insert("memoryRecords", {
+    const { imageStorageIds, embedding, ...rest } = args;
+    const id = await ctx.db.insert("memoryRecords", {
       ...rest,
       ...(imageStorageIds && imageStorageIds.length > 0
         ? { imageStorageIds }
@@ -97,6 +101,10 @@ export const upsert = mutation({
       lifecycle: "active",
       createdAt: now,
     });
+    if (embedding && embedding.length > 0) {
+      await saveEmbedding(ctx, { _id: id, memoryId: args.memoryId, lifecycle: "active" }, embedding);
+    }
+    return id;
   },
 });
 
@@ -121,27 +129,65 @@ export const vectorSearch = action({
     Array<{ _id: Id<"memoryRecords">; score: number; record: Doc<"memoryRecords"> }>
   > => {
     const limit = Math.max(1, Math.min(args.limit ?? 20, 256));
-    const results = await ctx.vectorSearch("memoryRecords", "by_embedding", {
-      vector: args.embedding,
-      // Demo vectors share the same index. Oversample enough to filter them
-      // without allowing seeded showcase data into real memory recall.
-      limit: Math.min(256, limit + 100),
-      filter: (q) => q.eq("lifecycle", "active"),
-    });
-    const records = await ctx.runQuery(api.memoryRecords.getByIds, {
-      ids: results.map((r) => r._id),
-    });
-    const byId = new Map(records.map((record) => [record._id, record]));
-    return results
-      .map((r) => ({ _id: r._id, score: r._score, record: byId.get(r._id) }))
-      .filter(
-        (result): result is {
-          _id: Id<"memoryRecords">;
-          score: number;
-          record: Doc<"memoryRecords">;
-        } => Boolean(result.record),
-      )
+    const migrated: boolean = await ctx.runQuery(internal.memoryRecords.embeddingsMigrated, {});
+    const [hits, legacyHits] = await Promise.all([
+      // Only active, non-demo memories carry searchKey "live", so no
+      // oversampling is needed to filter demo or archived ones out.
+      ctx.vectorSearch("memoryEmbeddings", "by_embedding", {
+        vector: args.embedding,
+        limit,
+        filter: (q) => q.eq("searchKey", "live"),
+      }),
+      // Vectors not yet moved off memoryRecords, until the migration is done.
+      migrated
+        ? Promise.resolve([] as Array<{ _id: Id<"memoryRecords">; _score: number }>)
+        : ctx.vectorSearch("memoryRecords", "by_embedding", {
+            vector: args.embedding,
+            limit: Math.min(256, limit + 100),
+            filter: (q) => q.eq("lifecycle", "active"),
+          }),
+    ]);
+    const hydrated: { embeddingHits: Array<Doc<"memoryRecords"> | null>; legacy: Doc<"memoryRecords">[] } =
+      await ctx.runQuery(internal.memoryRecords.hydrateSearchHits, {
+        embeddingIds: hits.map((r) => r._id),
+        recordIds: legacyHits.map((r) => r._id),
+      });
+    const best = new Map<Id<"memoryRecords">, { score: number; record: Doc<"memoryRecords"> }>();
+    const consider = (record: Doc<"memoryRecords"> | null | undefined, score: number) => {
+      if (!record) return;
+      const prev = best.get(record._id);
+      if (!prev || prev.score < score) best.set(record._id, { score, record });
+    };
+    hits.forEach((hit, i) => consider(hydrated.embeddingHits[i], hit._score));
+    const legacyById = new Map(hydrated.legacy.map((record) => [record._id, record]));
+    for (const hit of legacyHits) consider(legacyById.get(hit._id), hit._score);
+    return [...best.entries()]
+      .map(([_id, { score, record }]) => ({ _id, score, record }))
+      .sort((a, b) => b.score - a.score)
       .slice(0, limit);
+  },
+});
+
+/** Looks up the memories behind vector hits, in hit order. Real, active ones only. */
+export const hydrateSearchHits = internalQuery({
+  args: {
+    embeddingIds: v.array(v.id("memoryEmbeddings")),
+    recordIds: v.array(v.id("memoryRecords")),
+  },
+  handler: async (ctx, args) => {
+    const usable = (r: Doc<"memoryRecords"> | null) =>
+      r && r.lifecycle === "active" && !isDemoId(r.memoryId) ? r : null;
+    const embeddingHits = [];
+    for (const id of args.embeddingIds) {
+      const row = await ctx.db.get(id);
+      embeddingHits.push(row ? usable(await ctx.db.get(row.memoryRecordId)) : null);
+    }
+    const legacy = [];
+    for (const id of args.recordIds) {
+      const r = usable(await ctx.db.get(id));
+      if (r) legacy.push(r);
+    }
+    return { embeddingHits, legacy };
   },
 });
 
@@ -239,6 +285,7 @@ export const setLifecycle = mutation({
       .unique();
     if (!mem) return null;
     await ctx.db.patch(mem._id, { lifecycle: args.lifecycle });
+    await syncEmbeddingLifecycle(ctx, mem.memoryId, args.lifecycle);
     return mem._id;
   },
 });
@@ -252,6 +299,7 @@ export const remove = mutation({
       .unique();
     if (!mem) return null;
     await ctx.db.delete(mem._id);
+    await deleteEmbedding(ctx, mem.memoryId);
     await ctx.db.insert("memoryEvents", {
       eventType: "memory.deleted",
       memoryId: args.memoryId,
@@ -281,7 +329,7 @@ export const embeddingStats = query({
     let withEmbedding = 0;
     let withoutEmbedding = 0;
     for (const m of all) {
-      if (m.embedding && m.embedding.length > 0) withEmbedding++;
+      if (isEmbedded(m)) withEmbedding++;
       else withoutEmbedding++;
     }
     return {
@@ -321,7 +369,7 @@ export const listUnembeddedPage = query({
       });
     return {
       page: result.page
-        .filter((m) => !isDemoId(m.memoryId) && (!m.embedding || m.embedding.length === 0))
+        .filter((m) => !isDemoId(m.memoryId) && !isEmbedded(m))
         .map((m) => ({ memoryId: m.memoryId, content: m.content })),
       isDone: result.isDone,
       continueCursor: result.continueCursor,
@@ -343,7 +391,7 @@ export const setEmbedding = mutation({
       .withIndex("by_memory_id", (q) => q.eq("memoryId", args.memoryId))
       .unique();
     if (!mem) return null;
-    await ctx.db.patch(mem._id, { embedding: args.embedding });
+    await saveEmbedding(ctx, mem, args.embedding);
     return mem._id;
   },
 });
@@ -396,5 +444,68 @@ export const findImageRefsPage = query({
       isDone: result.isDone,
       continueCursor: result.continueCursor,
     };
+  },
+});
+
+// ── Moving legacy embeddings off memoryRecords ───────────────────────────────
+// Each batch reads ~20 records (~8 KB each with their vector), moves any
+// vector to memoryEmbeddings and schedules the next batch until done.
+
+const MIGRATION_KEY = "embeddings_migrated";
+const MIGRATION_BATCH = 20;
+
+export const embeddingsMigrated = internalQuery({
+  args: {},
+  handler: async (ctx) =>
+    Boolean(
+      await ctx.db
+        .query("settings")
+        .withIndex("by_key", (q) => q.eq("key", MIGRATION_KEY))
+        .unique(),
+    ),
+});
+
+export const migrateEmbeddingsBatch = internalMutation({
+  args: { cursor: v.union(v.string(), v.null()) },
+  handler: async (ctx, args) => {
+    const page = await ctx.db
+      .query("memoryRecords")
+      .paginate({ cursor: args.cursor, numItems: MIGRATION_BATCH });
+    for (const memory of page.page) {
+      if (memory.embedding && memory.embedding.length > 0) {
+        await saveEmbedding(ctx, memory, memory.embedding);
+      }
+    }
+    if (!page.isDone) {
+      await ctx.scheduler.runAfter(0, internal.memoryRecords.migrateEmbeddingsBatch, {
+        cursor: page.continueCursor,
+      });
+      return null;
+    }
+    const flag = await ctx.db
+      .query("settings")
+      .withIndex("by_key", (q) => q.eq("key", MIGRATION_KEY))
+      .unique();
+    const value = String(Date.now());
+    if (flag) await ctx.db.patch(flag._id, { value, updatedAt: Date.now() });
+    else await ctx.db.insert("settings", { key: MIGRATION_KEY, value, updatedAt: Date.now() });
+    return null;
+  },
+});
+
+/**
+ * Starts moving legacy embeddings unless that's already done. Boop calls it
+ * at startup; it's a single small read once the migration has finished.
+ */
+export const startEmbeddingMigration = mutation({
+  args: {},
+  handler: async (ctx) => {
+    const done = await ctx.db
+      .query("settings")
+      .withIndex("by_key", (q) => q.eq("key", MIGRATION_KEY))
+      .unique();
+    if (done) return { started: false };
+    await ctx.scheduler.runAfter(0, internal.memoryRecords.migrateEmbeddingsBatch, { cursor: null });
+    return { started: true };
   },
 });

@@ -44,7 +44,11 @@ export default defineSchema({
     sourceTurn: v.optional(v.string()),
     lifecycle: v.union(v.literal("active"), v.literal("archived"), v.literal("pruned")),
     supersedes: v.optional(v.array(v.string())),
+    // Legacy: embeddings now live in memoryEmbeddings. Kept optional until
+    // every record has been migrated (memoryRecords.migrateEmbeddingsBatch).
     embedding: v.optional(v.array(v.float64())),
+    // True once this memory's vector is stored in memoryEmbeddings.
+    hasEmbedding: v.optional(v.boolean()),
     // Structured sidecar data (JSON blob). Currently used to carry
     // `corrects` text on correction-segment memories. Intentionally loose
     // so extraction prompts can stash provider-specific hints without
@@ -62,6 +66,32 @@ export default defineSchema({
       dimensions: 1024,
       filterFields: ["lifecycle"],
     }),
+
+  // One vector per memory, kept apart from memoryRecords so that reading a
+  // memory (lists, counts, the dashboard) doesn't also read ~8 KB of floats.
+  memoryEmbeddings: defineTable({
+    memoryId: v.string(),
+    memoryRecordId: v.id("memoryRecords"),
+    // "live" for active real memories (the only ones recall searches), "demo"
+    // for active demo memories, otherwise the memory's lifecycle.
+    searchKey: v.string(),
+    embedding: v.array(v.float64()),
+  })
+    .index("by_memory_id", ["memoryId"])
+    .vectorIndex("by_embedding", {
+      vectorField: "embedding",
+      dimensions: 1024,
+      filterFields: ["searchKey"],
+    }),
+
+  // Precomputed dashboard numbers, refreshed at most every few minutes while
+  // a dashboard is open, so viewers read one small record instead of
+  // scanning messages, memories, agents and usage on every change.
+  dashboardStats: defineTable({
+    key: v.string(),
+    payload: v.string(),
+    computedAt: v.number(),
+  }).index("by_key", ["key"]),
 
   executionAgents: defineTable({
     agentId: v.string(),

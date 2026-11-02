@@ -10,8 +10,7 @@ import {
   MachineRobotIcon,
   WorkflowCircle03Icon,
 } from "@hugeicons/core-free-icons";
-import { api } from "../../../convex/_generated/api.js";
-import { usePolledQuery } from "../lib/usePolledQuery.js";
+import { useDashboardStats } from "../lib/dashboardStats.js";
 import { keepAwakePillLabel, keepAwakeTone, useKeepAwake } from "./KeepAwake.js";
 
 type TimeRange = "all" | "7d" | "30d" | "90d";
@@ -102,9 +101,9 @@ function plural(n: number, singular: string, pluralLabel = `${singular}s`) {
 
 export function DashboardPanel({ isDark }: { isDark: boolean }) {
   const { status: keepAwake } = useKeepAwake();
-  // These stats scan thousands of messages, memories and usage rows. A live
-  // query re-ran that on every message, so refresh every 5 minutes instead.
-  const data = usePolledQuery(api.dashboard.metrics, {}, 5 * 60_000) as DashboardMetrics | undefined;
+  // Cached stats, recomputed at most every 10 minutes (see dashboardStats.ts).
+  // The app shell keeps them fresh; refresh here too when shown on its own.
+  const data = useDashboardStats() as DashboardMetrics | undefined;
   const [range, setRange] = useState<TimeRange>("all");
 
   const filtered = useMemo(() => {

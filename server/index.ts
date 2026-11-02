@@ -357,6 +357,11 @@ async function main() {
     // (e.g. waking from sleep) just start whatever was queued meanwhile.
     // When the Mac comes back online it also installs whatever landed on main
     // while it was off; queued builds wait until that restart is done.
+    // Moves memory embeddings to their own table (one-time, in batches on
+    // Convex). After it has finished this is a single small read.
+    void convex
+      .mutation(api.memoryRecords.startEmbeddingMigration, {})
+      .catch((err) => console.warn("[memory] embedding migration didn't start", err instanceof Error ? err.message : err));
     void (async () => {
       if (!resumedSelfBuilds) {
         resumedSelfBuilds = true;
