@@ -199,3 +199,82 @@ describe("reply outbox", () => {
     expect(send).not.toHaveBeenCalled();
   });
 });
+
+describe("recovering from a flagged network", () => {
+  it("recovers after 3 passing health checks, at least 45s after the last failure", () => {
+    const h = createNetworkHealth({ log: quiet });
+    for (const t of [0, 10_000, 20_000]) h.noteFailure("x", t);
+    h.noteProbe([], 30_000);
+    h.noteProbe([], 45_000);
+    h.noteProbe([], 60_000);
+    expect(h.isDegraded(60_000)).toBe(true); // only 40s since the last failure
+    h.noteProbe([], 75_000);
+    expect(h.isDegraded(75_000)).toBe(false);
+  });
+
+  it("a failing check resets the count and counts as a failure", () => {
+    const h = createNetworkHealth({ log: quiet });
+    for (const t of [0, 10_000, 20_000]) h.noteFailure("x", t);
+    h.noteProbe([], 70_000);
+    h.noteProbe([], 85_000);
+    h.noteProbe(["sendblue"], 100_000);
+    expect(h.status(100_000)).toMatchObject({ degraded: true, probesPassed: 0, lastProbeFailures: ["sendblue"] });
+    h.noteProbe([], 115_000);
+    h.noteProbe([], 130_000);
+    expect(h.isDegraded(130_000)).toBe(true);
+    h.noteProbe([], 145_000);
+    expect(h.isDegraded(145_000)).toBe(false);
+  });
+
+  it("the coordinator probes only while flagged, and a non-network check-in error isn't counted", async () => {
+    const h = createNetworkHealth({ log: quiet });
+    const probe = vi.fn(async () => [] as string[]);
+    let fail: Error | null = new Error("Server Error: something broke");
+    const identity: InstanceIdentity = { instanceId: "mac", label: "mac", platform: "darwin", priority: 100 };
+    const coord = startInstanceCoordinator({
+      identity,
+      checkIn: async () => {
+        if (fail) throw fail;
+        return { activeInstanceId: "mac", instances: [] };
+      },
+      leave: async () => undefined,
+      onActivate: () => undefined,
+      onDeactivate: () => undefined,
+      network: h,
+      probe,
+      intervalMs: 60 * MIN,
+      log: quiet,
+    });
+    for (let i = 0; i < 4; i++) await coord.tick();
+    expect(h.status().recentFailures).toBe(0);
+    expect(probe).not.toHaveBeenCalled();
+
+    fail = new TypeError("fetch failed");
+    for (let i = 0; i < 3; i++) await coord.tick();
+    expect(h.isDegraded()).toBe(true);
+    fail = null;
+    await coord.tick();
+    expect(probe).toHaveBeenCalledTimes(1);
+    await coord.stop();
+  });
+});
+
+describe("probeNetwork", () => {
+  it("counts any HTTP answer as reachable and names what got no answer", async () => {
+    const fetchImpl = (async (url: string) => {
+      if (url.includes("down")) throw new TypeError("fetch failed");
+      return new Response("nope", { status: 404 });
+    }) as unknown as typeof fetch;
+    const { probeNetwork } = await import("../server/network-health.js");
+    expect(
+      await probeNetwork(
+        [
+          { name: "up", url: "https://up.example/" },
+          { name: "down", url: "https://down.example/" },
+          { name: "skipped", url: undefined },
+        ],
+        { fetchImpl },
+      ),
+    ).toEqual(["down"]);
+  });
+});
