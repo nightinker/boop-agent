@@ -110,6 +110,36 @@ function explainSendFailure(body: string, from: string): void {
   }
 }
 
+/** Waits between send attempts; about 40s in all before giving up. */
+export const SEND_RETRY_DELAYS_MS = [2_000, 5_000, 10_000, 20_000];
+const SEND_ATTEMPT_TIMEOUT_MS = 20_000;
+
+/**
+ * POSTs to Sendblue, retrying when the network drops (flaky Wi-Fi, DNS
+ * hiccups) or Sendblue answers 429/5xx. Without this a reply Boop already
+ * wrote was lost to a single "fetch failed". A retry after a timeout can
+ * rarely double-send a text; that beats never sending it.
+ */
+export async function postWithRetry(
+  url: string,
+  init: RequestInit,
+  delaysMs: readonly number[] = SEND_RETRY_DELAYS_MS,
+): Promise<Response> {
+  for (let attempt = 0; ; attempt++) {
+    const last = attempt >= delaysMs.length;
+    try {
+      const res = await fetch(url, { ...init, signal: AbortSignal.timeout(SEND_ATTEMPT_TIMEOUT_MS) });
+      if (last || (res.status !== 429 && res.status < 500)) return res;
+      await res.body?.cancel().catch(() => undefined);
+      console.warn(`[sendblue] send got HTTP ${res.status}; retrying in ${delaysMs[attempt]}ms`);
+    } catch (err) {
+      if (last) throw err;
+      console.warn(`[sendblue] send failed (${String(err)}); retrying in ${delaysMs[attempt]}ms`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, delaysMs[attempt]));
+  }
+}
+
 async function sendTextParts(
   h: Record<string, string>,
   from: string,
@@ -121,7 +151,7 @@ async function sendTextParts(
   const plain = redactPhoneNumbers(stripMarkdown(text));
   if (!plain) return;
   for (const part of chunk(plain)) {
-    const res = await fetch(`${API_BASE}/send-message`, {
+    const res = await postWithRetry(`${API_BASE}/send-message`, {
       method: "POST",
       headers: h,
       body: JSON.stringify({ number: toNumber, content: part, from_number: from }),
@@ -405,7 +435,21 @@ export async function processInboundText(item: InboundItem): Promise<void> {
       console.log(
         `[turn ${turnTag}] → reply (${elapsed}s, ${reply.length} chars): ${JSON.stringify(replyPreview)}`,
       );
-      const sent = await sendImessage(from_number, reply, attachments);
+      let sent: SendImessageResult;
+      try {
+        sent = await sendImessage(from_number, reply, attachments);
+      } catch (err) {
+        // Still keep the reply in the history, marked undelivered, so the
+        // next turn ("any update?") can resend it instead of starting over.
+        await convex
+          .mutation(api.messages.send, {
+            conversationId,
+            role: "assistant",
+            content: `${reply}\n[not delivered: sending the iMessage failed (${String(err)}). Send this again if the user asks.]`,
+          })
+          .catch(() => undefined);
+        throw err;
+      }
       await convex.mutation(api.messages.send, {
         conversationId,
         role: "assistant",
