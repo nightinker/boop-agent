@@ -317,11 +317,10 @@ if (useNgrok && ngrokInstalled) {
     log: (message) => console.warn(`${C.ngrok}ngrok${C.reset}  │ ⚠ ${message}`),
     onRelaunch: () => {
       void (async () => {
-        const url = await waitForNgrokUrl(60000).catch(() => null);
+        const url = await waitForNgrokUrl(5 * 60_000).catch(() => null);
         if (!url || shuttingDown) return;
         console.log(`${C.ngrok}ngrok${C.reset}  │ tunnel is back at ${url}`);
-        await registerSendblueWebhookOnce(url);
-        await autoRegisterComposioWebhook(url);
+        await announceTunnel(url);
       })();
     },
   });
@@ -329,6 +328,22 @@ if (useNgrok && ngrokInstalled) {
     ngrokOutputUrlReady,
     new Promise((resolve) => setTimeout(() => resolve(null), 10000)),
   ]).then((url) => url ?? waitForNgrokUrl().catch(() => null));
+}
+
+/**
+ * A tunnel is up at `url`: point Sendblue and Composio at it and print the
+ * banner (its "Public URL:" line is what the desktop app watches for).
+ */
+async function announceTunnel(url) {
+  // Synchronize both the URL and signing secret. This is required even
+  // for a reserved domain because older dashboard-created webhooks may
+  // not have Boop's signing secret yet.
+  const webhookSyncState = await registerSendblueWebhookOnce(url);
+  // Composio webhook subscription is fully programmatic (PATCHable),
+  // so we can refresh it on every restart regardless of whether the
+  // domain is reserved.
+  await autoRegisterComposioWebhook(url);
+  showBanner(url, Boolean(ngrokDomain), webhookSyncState);
 }
 
 // Wait for all the core services to be ready before printing the banner,
@@ -414,21 +429,16 @@ Promise.all([
   .then(async ([, , , ngrokUrl]) => {
     if (useNgrok && ngrokInstalled) {
       if (ngrokUrl) {
-        // Synchronize both the URL and signing secret. This is required even
-        // for a reserved domain because older dashboard-created webhooks may
-        // not have Boop's signing secret yet.
-        const webhookSyncState = await registerSendblueWebhookOnce(
-          (await readNgrokUrl()) ?? ngrokUrl,
-        );
-        // Composio webhook subscription is fully programmatic (PATCHable),
-        // so we can refresh it on every restart regardless of whether the
-        // domain is reserved.
-        await autoRegisterComposioWebhook(ngrokUrl);
-        showBanner(ngrokUrl, Boolean(ngrokDomain), webhookSyncState);
+        await announceTunnel((await readNgrokUrl()) ?? ngrokUrl);
       } else {
         console.log(
-          `${C.ngrok}ngrok${C.reset} │ could not read tunnel URL from http://127.0.0.1:4040 — check ngrok output above.`,
+          `${C.ngrok}ngrok${C.reset} │ could not read tunnel URL from http://127.0.0.1:4040 yet — still waiting (check ngrok output above).`,
         );
+        // On a slow network the tunnel can take longer than the first wait.
+        // Keep looking, and announce it when it appears: the desktop app only
+        // marks the tunnel and webhook healthy once it sees the banner.
+        const late = await waitForNgrokUrl(5 * 60_000).catch(() => null);
+        if (late && !shuttingDown) await announceTunnel(late);
       }
     } else if (hasStaticUrl) {
       const webhookSyncState = await registerSendblueWebhookOnce(publicUrl);
