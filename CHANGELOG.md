@@ -8,6 +8,11 @@ Format:
 
 ---
 
+## Unreleased — Go orchestrator sidecar: result merger hardening
+
+- Fixed: when the result merger falls back to joining step outputs, a step that succeeded with an empty output no longer shows up as an empty section, and if the final step came back empty the answer uses what earlier steps found instead of being blank.
+- Added: tests that the merged result is in plan order whatever order the steps finish in, and that a panicking merger falls back instead of failing the run.
+
 ## Unreleased — Go orchestrator sidecar: Boop API and result merger (Milestone 3)
 
 - Added: one merged final answer per run. After every step finishes, a report agent (Claude) combines all step outputs, keeps every URL verbatim (any it drops is added back under "Sources"), names failed or skipped steps instead of hiding them, and only uses what's left of the run's token budget. Without an API key, budget or a working model it falls back to joining the results. The answer is in `result` on the run.

@@ -367,14 +367,24 @@ func safeRun(ctx context.Context, agent Agent, in Input) (out Output, err error)
 	return agent.Run(ctx, in)
 }
 
-// sinkOutput joins the outputs of succeeded tasks nothing else depends on.
+// sinkOutput joins, in plan order, the outputs of succeeded tasks nothing else
+// depends on. Steps with an empty output are left out; if none of the final
+// steps has any output, every succeeded step that does is used instead, so a
+// result from earlier in the plan isn't lost.
 func sinkOutput(p plan.Plan, state map[string]TaskState, outputs map[string]string) string {
 	dependents := p.Dependents()
-	var sinks []plan.Task
+	var sinks, withOutput []plan.Task
 	for _, t := range p.Tasks {
-		if len(dependents[t.ID]) == 0 && state[t.ID] == TaskSucceeded {
+		if state[t.ID] != TaskSucceeded || strings.TrimSpace(outputs[t.ID]) == "" {
+			continue
+		}
+		withOutput = append(withOutput, t)
+		if len(dependents[t.ID]) == 0 {
 			sinks = append(sinks, t)
 		}
+	}
+	if len(sinks) == 0 {
+		sinks = withOutput
 	}
 	if len(sinks) == 1 {
 		return outputs[sinks[0].ID]

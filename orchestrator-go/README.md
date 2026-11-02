@@ -102,7 +102,12 @@ using Claude:
   `fallback` when there's no API key, not enough budget, the merge failed or
   the run was cancelled (the final steps' outputs joined, a "Not completed"
   list, and the sources; `merge_error` says why), `none` when no step
-  produced anything.
+  produced anything. The fallback skips steps that succeeded with an empty
+  output; if every final step is empty it uses the earlier steps' outputs.
+- **Order:** steps, sources and `incomplete` are always in plan order, not the
+  order steps happened to finish, so the same results give the same answer.
+- **Never crashes the run:** a merger that errors, panics or returns nothing
+  falls back to the joined answer.
 
 ## Boop side
 
