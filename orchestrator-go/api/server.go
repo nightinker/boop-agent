@@ -54,7 +54,12 @@ type Server struct {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "planner": s.Manager.HasPlanner()})
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":      true,
+			"planner": s.Manager.HasPlanner(),
+			"merger":  s.Manager.HasMerger(),
+			"llm":     s.Manager.LLM(),
+		})
 	})
 	mux.HandleFunc("GET /v1/agents", s.auth(s.agents))
 	mux.HandleFunc("POST /v1/plan", s.auth(s.plan))
@@ -227,6 +232,8 @@ type resultResponse struct {
 	Error       string            `json:"error,omitempty"`
 	TokensUsed  int               `json:"tokens_used"`
 	TokenBudget int               `json:"token_budget"`
+	// PlanFallback says why the run used a one-step plan instead of the planner's.
+	PlanFallback string `json:"plan_fallback,omitempty"`
 }
 
 func (s *Server) result(w http.ResponseWriter, r *http.Request) {
@@ -236,7 +243,7 @@ func (s *Server) result(w http.ResponseWriter, r *http.Request) {
 	}
 	st := run.Snapshot()
 	body := resultResponse{ID: st.ID, State: st.State, Done: st.State.Terminal(), Result: st.Result, Error: st.Error,
-		TokensUsed: st.TokensUsed, TokenBudget: st.TokenBudget}
+		TokensUsed: st.TokensUsed, TokenBudget: st.TokenBudget, PlanFallback: st.PlanFallback}
 	status := http.StatusOK
 	if !body.Done {
 		status = http.StatusAccepted

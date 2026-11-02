@@ -46,11 +46,14 @@ export interface SidecarView {
   restarts: number;
   /** Milliseconds until the next restart attempt, while it's backing off. */
   nextRestartInMs: number | null;
-  /** Whether ANTHROPIC_API_KEY is stored. Never the value. */
+  /** Whether the optional ANTHROPIC_API_KEY override is stored. Never the value. */
   keyPresent: boolean;
   /** Whether the running sidecar was started with the key. */
   keyPassed: boolean;
   planner: boolean | null;
+  merger: boolean | null;
+  /** Where planner and merger calls go: "boop" (Boop's Claude runtime) or "anthropic" (API key override). */
+  llm: "boop" | "anthropic" | null;
   lastHealth: { at: number; ok: boolean; error?: string } | null;
   lastExit: { at: number; code: number | null; signal: string | null } | null;
   lastSelfTest: { at: number; ok: boolean; detail: string } | null;
@@ -163,6 +166,8 @@ export function sidecarView(st: SidecarStatus, now: number = Date.now()): Sideca
     keyPresent: st.keyPresent,
     keyPassed: st.keyPassed,
     planner: st.lastHealth?.ok ? st.lastHealth.planner === true : null,
+    merger: st.lastHealth?.ok && typeof st.lastHealth.merger === "boolean" ? st.lastHealth.merger : null,
+    llm: st.lastHealth?.ok && (st.lastHealth.llm === "boop" || st.lastHealth.llm === "anthropic") ? st.lastHealth.llm : null,
     lastHealth: st.lastHealth
       ? { at: st.lastHealth.at, ok: st.lastHealth.ok, ...(st.lastHealth.error ? { error: scrub(st.lastHealth.error) } : {}) }
       : null,

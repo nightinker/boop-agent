@@ -58,29 +58,41 @@ func run() error {
 	boop := &agents.Boop{BaseURL: *boopURL}
 	registered := []engine.Agent{boop, agents.Join{}, agents.Echo{}}
 
-	var planner engine.Planner
-	var merger engine.Merger
-	provider, err := llm.NewAnthropicFromEnv()
-	if err != nil {
-		log.Printf("planner, llm agent and result merger disabled: %v (plans can still be submitted; results are joined without a model)", err)
-	} else {
-		merger = merge.LLM{Provider: provider}
-		registered = append(registered, agents.LLM{Provider: provider})
-		specs := make([]plan.AgentSpec, 0, len(registered))
-		for _, a := range registered {
-			if a.Spec().Name != "echo" { // keep the test agent out of real plans
-				specs = append(specs, a.Spec())
-			}
-		}
-		planner = &plan.Planner{LLM: provider, Agents: specs, Integrations: boop.Integrations}
+	// The planner, the llm agent and the result merger use Boop's own Claude
+	// runtime by default (over POST /orchestrator/complete), so no API key is
+	// needed. ANTHROPIC_API_KEY, when set, overrides that and calls the API
+	// directly.
+	source := "boop"
+	bridge := &llm.Boop{BaseURL: *boopURL}
+	providerFor := func(purpose string) llm.LLMProvider { return bridge.WithPurpose(purpose) }
+	if anthropic, err := llm.NewAnthropicFromEnv(); err == nil {
+		source = "anthropic"
+		providerFor = func(string) llm.LLMProvider { return anthropic }
 	}
+	merger := merge.LLM{Provider: providerFor("merger")}
+	registered = append(registered, agents.LLM{Provider: providerFor("llm-agent")})
+	specs := make([]plan.AgentSpec, 0, len(registered))
+	for _, a := range registered {
+		if a.Spec().Name != "echo" { // keep the test agent out of real plans
+			specs = append(specs, a.Spec())
+		}
+	}
+	planner := &plan.Planner{LLM: providerFor("planner"), Agents: specs, Integrations: boop.Integrations}
+	log.Printf("planner, llm agent and result merger on, via %s", map[string]string{
+		"boop":      "Boop's Claude runtime (no API key needed)",
+		"anthropic": "the Anthropic API (ANTHROPIC_API_KEY)",
+	}[source])
 
 	m := engine.NewManager(engine.Config{
 		Agents:       registered,
 		Planner:      planner,
 		Merger:       merger,
 		Integrations: boop.Integrations,
-		Options:      engine.Options{MaxTokens: *maxTokens, MaxParallel: *maxParallel, MaxAttempts: *maxAttempts},
+		LLM:          source,
+		// If planning fails (model down, bad plan twice), hand the whole task
+		// to one Boop sub-agent rather than failing the run.
+		FallbackAgent: "boop",
+		Options:       engine.Options{MaxTokens: *maxTokens, MaxParallel: *maxParallel, MaxAttempts: *maxAttempts},
 	})
 	srv := &http.Server{
 		Addr:              *addr,

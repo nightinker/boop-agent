@@ -142,6 +142,7 @@ export default defineSchema({
       v.literal("skill-learn"),
       v.literal("skill-curator"),
       v.literal("slack-watch"),
+      v.literal("orchestrator"),
     ),
     conversationId: v.optional(v.string()),
     turnId: v.optional(v.string()),

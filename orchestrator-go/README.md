@@ -22,12 +22,12 @@ go run ./cmd/orchestrator            # listens on 127.0.0.1:3460
 | Setting | Default | |
 |---|---|---|
 | `-addr` / `ORCHESTRATOR_ADDR` | `127.0.0.1:3460` | Localhost only: any other address is refused, token or not. |
-| `-boop-url` / `BOOP_URL` | `http://127.0.0.1:$PORT` (3456) | Boop's server, for the bridge. |
+| `-boop-url` / `BOOP_URL` | `http://127.0.0.1:$PORT` (3456) | Boop's server, for the bridge and for model calls. |
 | `-max-tokens` | `200000` | Token budget per run (0 = unlimited). |
 | `-max-parallel` | `2` | Tasks running at once per run. |
 | `-max-attempts` | `3` | Tries per task before it fails. |
-| `ANTHROPIC_API_KEY` | – | Turns on the planner, the `llm` agent and the result merger. Without it you can still submit plans; results are then joined without a model. |
-| `ORCHESTRATOR_MODEL` | `claude-opus-5-5` | Model for the planner, `llm` agent and merger. |
+| `ANTHROPIC_API_KEY` | – | Optional override. The planner, the `llm` agent and the result merger are always on and, by default, run their model calls through Boop (see [Model calls](#model-calls)). With this set they call the Anthropic API directly instead. |
+| `ORCHESTRATOR_MODEL` | `claude-opus-5-5` | Model for the planner, `llm` agent and merger when `ANTHROPIC_API_KEY` is set. Through Boop, Boop's own model setting applies. |
 | `ORCHESTRATOR_TOKEN` | – | If set, every `/v1` call needs `Authorization: Bearer <token>` (Boop sends it when the same variable is set for Boop). |
 
 ## API
@@ -68,7 +68,7 @@ Errors are JSON `{"error": "..."}`:
 | `409` | Cancelling a run that already finished (the body has the run). |
 | `413` | Body over 1 MB. |
 | `422` | The plan fails validation; the body has a `problems` list. |
-| `503` | A `task` was sent but no planner is configured, or the sidecar is shutting down. |
+| `503` | A `task` was sent but no planner is configured (only in tests: the real binary always has one), or the sidecar is shutting down. |
 
 `GET /v1/runs/{id}/result` answers `202` with `"done": false` while the run is
 going and `200` once it's finished:
@@ -81,6 +81,34 @@ going and `200` once it's finished:
 
 `?wait=N` (up to 60 seconds) on a run's status or result holds the request
 until the run finishes or N seconds pass, so callers don't need to poll fast.
+
+`GET /healthz` says whether the planner and merger are on and where their
+model calls go: `{"ok":true,"planner":true,"merger":true,"llm":"boop"}`
+(`"anthropic"` when `ANTHROPIC_API_KEY` is set).
+
+## Model calls
+
+The planner, the `llm` agent and the result merger don't need an API key. By
+default each model call goes back to Boop as `POST /orchestrator/complete`
+(`{"system", "messages", "max_tokens", "purpose"}` → `{"text", "usage"}`), and
+Boop runs it through its own model runtime: the Claude Agent SDK, signed in
+with the Claude account already logged in on the Mac (or whichever runtime and
+model Boop is set to). The call has no tools, and its usage is recorded in
+Boop's usage log as `orchestrator`.
+
+- **Token budget:** the tokens Boop reports (fresh input + output) are charged
+  to the run like any step. Planning counts too: what the planner used is
+  added to `tokens_used` before the first step starts. The runtime can't cap
+  output, so `max_tokens` (sized to what's left of the budget) is passed to
+  the model as an instruction.
+- **Failures:** if planning fails (Boop unreachable, model error, usage limit,
+  a bad plan twice), the run doesn't fail: it goes ahead with a one-step plan
+  that gives the whole task to one `boop` sub-agent, and the result says so in
+  `plan_fallback`. If the merge fails, results are joined without the model
+  (`method: "fallback"`, see below).
+- **Override:** with `ANTHROPIC_API_KEY` set (Boop passes it from its secret
+  store when one is saved), the sidecar calls the Anthropic Messages API
+  itself and never uses the bridge for model calls.
 
 ## Result merger (report agent)
 
@@ -99,7 +127,7 @@ using Claude:
   quarter of what's left (max 4,000) and long step outputs are cut to fit the
   rest. Its real usage is added to `tokens_used`.
 - **Fallbacks** (`method`): `single` for one-step plans (no model call),
-  `fallback` when there's no API key, not enough budget, the merge failed or
+  `fallback` when there's no merger, not enough budget, the merge failed (e.g. Boop's runtime errored) or
   the run was cancelled (the final steps' outputs joined, a "Not completed"
   list, and the sources; `merge_error` says why), `none` when no step
   produced anything. The fallback skips steps that succeeded with an empty
@@ -123,13 +151,17 @@ using Claude:
   `ORCHESTRATOR_SIDECAR=off` to run it yourself.
 - **The sidecar is optional:** no Go, a failed build or a crash just means
   Boop runs without the orchestrator tools, with a log line saying why.
-- `ANTHROPIC_API_KEY` comes only from Boop's secret store (Keychain) and is
-  put in the sidecar's environment at spawn time; the sidecar gets a minimal
-  environment, not Boop's. Without the key it runs with hand-written plans
-  only. Saving the key with `request_secret` restarts the sidecar with it.
+- The planner and merger work with no key: their model calls come back to
+  Boop's `POST /orchestrator/complete` (`server/orchestrator-bridge.ts`,
+  `server/orchestrator-llm.ts`), which runs them through Boop's own Claude
+  runtime. `ANTHROPIC_API_KEY` is an optional override: it comes only from
+  Boop's secret store (Keychain) and is put in the sidecar's environment at
+  spawn time; the sidecar gets a minimal environment, not Boop's. Saving or
+  removing the key restarts the sidecar so it switches over.
 - The dispatcher always has `orchestrator_health` ("is the orchestrator
-  working?"): live status, port, last health check, whether the key is
-  stored, and a self-test that runs a two-step `echo` plan and checks the
+  working?"): live status, port, last health check, whether the planner and
+  merger are on and which way they call the model (Boop's runtime or the API
+  key override), whether the key is stored, and a self-test that runs a two-step `echo` plan and checks the
   merged result. Also `GET /orchestrator/sidecar` and
   `POST /orchestrator/sidecar/self-test` on Boop's server.
 - While the sidecar answers its health check, the dispatcher gets three
@@ -138,7 +170,8 @@ using Claude:
   conversation they came from.
 - The dashboard's **Orchestrator** tab shows the sidecar at a glance: running,
   starting, restarting, down or not configured; uptime, restarts and the next
-  restart's backoff; whether `ANTHROPIC_API_KEY` is stored (never its value);
+  restart's backoff; the planner and merger and which model path they use;
+  whether the optional `ANTHROPIC_API_KEY` override is stored (never its value);
   and the last 40 lines of `orchestrator.log`. Below that, the recent runs and,
   for the one you pick, its plan as a dependency graph and a timeline: each
   step's status, agent, duration, output and the merged result. It polls
@@ -159,7 +192,8 @@ checks ids, agents, integrations, cost hints, dependencies and cycles, and a
 limit of 12 tasks.
 
 The planner asks the model for JSON, validates it, and if it's wrong sends the
-problems back for one more try.
+problems back for one more try. If that still fails, or the model can't be
+reached, the run uses a one-step `boop` plan instead (see [Model calls](#model-calls)).
 
 ## Agents
 

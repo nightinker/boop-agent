@@ -302,3 +302,58 @@ func TestShutdownCancelsRuns(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 }
+
+// integrationAgent is a funcAgent that may be given integrations, like Boop.
+type integrationAgent struct{ funcAgent }
+
+func (a integrationAgent) Spec() plan.AgentSpec {
+	return plan.AgentSpec{Name: a.name, Description: "test", UsesIntegrations: true}
+}
+
+func TestPlanningFailureFallsBackToOneStepPlan(t *testing.T) {
+	var got Input
+	boop := integrationAgent{funcAgent{"boop", func(ctx context.Context, in Input) (Output, error) {
+		got = in
+		return Output{Text: "did it", Tokens: 10}, nil
+	}}}
+	failing := &plan.Planner{LLM: &llm.Mock{Replies: []llm.MockReply{{Err: errors.New("bridge down")}}}, Agents: []plan.AgentSpec{boop.Spec()}}
+	m := NewManager(Config{
+		Agents:        []Agent{boop},
+		Planner:       failing,
+		FallbackAgent: "boop",
+		Integrations:  func(context.Context) ([]string, error) { return []string{"gmail"}, nil },
+		Options:       fast(Options{}),
+	})
+	st, err := m.SubmitTask("check my inbox", Overrides{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, _ := m.Run(st.ID)
+	final := wait(t, r)
+	if final.State != RunSucceeded || final.Output != "did it" || !strings.Contains(final.PlanFallback, "bridge down") {
+		t.Fatalf("%+v", final)
+	}
+	if got.Task.Input != "check my inbox" || len(got.Task.Integrations) != 1 || got.Task.Integrations[0] != "gmail" {
+		t.Fatalf("fallback task %+v", got.Task)
+	}
+}
+
+func TestPlannerTokensCountAgainstBudget(t *testing.T) {
+	reply := `{"goal":"g","tasks":[{"id":"a","agent":"t","input":"x","cost_hint":"low"}]}`
+	agents := []Agent{funcAgent{"t", func(ctx context.Context, in Input) (Output, error) { return Output{Text: "done", Tokens: 7}, nil }}}
+	planner := &plan.Planner{LLM: &llm.Mock{Replies: []llm.MockReply{{Text: reply, Tokens: 300}}}, Agents: []plan.AgentSpec{agents[0].Spec()}}
+	m := NewManager(Config{Agents: agents, Planner: planner, Options: fast(Options{})})
+	st, _ := m.SubmitTask("x", Overrides{})
+	r, _ := m.Run(st.ID)
+	if final := wait(t, r); final.TokensUsed != 307 || final.PlannerTokens != 300 {
+		t.Fatalf("%+v", final)
+	}
+
+	// A planner that spends the whole budget leaves nothing for the steps.
+	m = NewManager(Config{Agents: agents, Planner: planner, Options: fast(Options{MaxTokens: 300})})
+	st, _ = m.SubmitTask("x", Overrides{})
+	r, _ = m.Run(st.ID)
+	if final := wait(t, r); final.Tasks[0].State != TaskSkipped {
+		t.Fatalf("%+v", final)
+	}
+}

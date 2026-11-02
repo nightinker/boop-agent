@@ -17,6 +17,8 @@ import { startConsolidationLoop } from "./consolidation.js";
 import { runCurator, startCuratorLoop } from "./skills/curator.js";
 import { availableIntegrations, cancelAgent, retryAgent, spawnExecutionAgent } from "./execution-agent.js";
 import { createOrchestratorBridgeRouter } from "./orchestrator-bridge.js";
+import { completeWithRuntime } from "./orchestrator-llm.js";
+import { runAgentRuntime } from "./runtimes/index.js";
 import { orchestratorSidecar, SIDECAR_KEY_NAME } from "./orchestrator-sidecar.js";
 import { createOrchestratorDashboardRouter } from "./orchestrator-dashboard.js";
 import { createComposioRouter } from "./composio-routes.js";
@@ -83,7 +85,9 @@ async function main() {
   startBuildWakeLockLoop(awake);
 
   // The Go orchestrator sidecar, run as a child of this process. Its planner
-  // key comes only from the secret store (Keychain), never from Boop's env.
+  // and merger call back to /orchestrator/complete (Boop's Claude runtime); an
+  // optional ANTHROPIC_API_KEY override comes only from the secret store
+  // (Keychain), never from Boop's env.
   const sidecar = orchestratorSidecar({
     getApiKey: async () => (secretsSupported() ? secretStore().get(SIDECAR_KEY_NAME) : null),
   });
@@ -249,7 +253,32 @@ async function main() {
   app.use("/keep-awake", createKeepAwakeRouter(awake));
   app.use(
     "/orchestrator",
-    createOrchestratorBridgeRouter({ spawn: spawnExecutionAgent, integrations: availableIntegrations }),
+    createOrchestratorBridgeRouter({
+      spawn: spawnExecutionAgent,
+      integrations: availableIntegrations,
+      // The sidecar's planner, llm agent and merger run through Boop's own
+      // runtime here, so they work without ANTHROPIC_API_KEY.
+      complete: (req) =>
+        completeWithRuntime(req, {
+          runtimeConfig: getRuntimeConfig,
+          run: runAgentRuntime,
+          recordUsage: async ({ usage, config, durationMs }) => {
+            if (usage.costUsd <= 0 && usage.inputTokens <= 0) return;
+            await convex.mutation(api.usageRecords.record, {
+              source: "orchestrator",
+              runtime: config.runtime,
+              billingMode: config.billingMode,
+              model: usage.model,
+              inputTokens: usage.inputTokens,
+              outputTokens: usage.outputTokens,
+              cacheReadTokens: usage.cacheReadTokens,
+              cacheCreationTokens: usage.cacheCreationTokens,
+              costUsd: usage.costUsd,
+              durationMs,
+            });
+          },
+        }),
+    }),
   );
   // "Is the orchestrator working?" for the dashboard and curl, same as the tool.
   app.get("/orchestrator/sidecar", async (_req, res) => {

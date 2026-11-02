@@ -2,7 +2,15 @@ import express from "express";
 import type { AddressInfo } from "node:net";
 import { describe, expect, it } from "vitest";
 import type { SpawnOptions, SpawnResult } from "../server/execution-agent.js";
-import { createOrchestratorBridgeRouter, parseBridgeSpawnBody } from "../server/orchestrator-bridge.js";
+import {
+  CompletionUsageLimitError,
+  createOrchestratorBridgeRouter,
+  MAX_COMPLETE_CHARS,
+  parseBridgeCompleteBody,
+  parseBridgeSpawnBody,
+  type BridgeCompleteRequest,
+  type OrchestratorBridgeDeps,
+} from "../server/orchestrator-bridge.js";
 
 async function serve(spawn: (opts: SpawnOptions) => Promise<SpawnResult>) {
   const app = express();
@@ -125,6 +133,109 @@ describe("orchestrator bridge route", () => {
       ctl.abort();
       await req;
       await wasAborted;
+    } finally {
+      await close();
+    }
+  });
+});
+
+describe("parseBridgeCompleteBody", () => {
+  it("accepts system, messages, max_tokens and purpose", () => {
+    const r = parseBridgeCompleteBody({
+      system: "sys",
+      messages: [{ role: "user", content: "q" }],
+      max_tokens: 900,
+      purpose: "merger",
+    });
+    expect(r).toEqual({ ok: true, value: { system: "sys", messages: [{ role: "user", content: "q" }], maxTokens: 900, purpose: "merger" } });
+  });
+
+  it("rejects bad bodies", () => {
+    expect(parseBridgeCompleteBody({}).ok).toBe(false);
+    expect(parseBridgeCompleteBody({ messages: [] }).ok).toBe(false);
+    expect(parseBridgeCompleteBody({ messages: [{ role: "system", content: "x" }] }).ok).toBe(false);
+    expect(parseBridgeCompleteBody({ messages: [{ role: "user", content: "q" }, { role: "assistant", content: "a" }] }).ok).toBe(false);
+    expect(parseBridgeCompleteBody({ messages: [{ role: "user", content: "q" }], max_tokens: -1 }).ok).toBe(false);
+    expect(parseBridgeCompleteBody({ messages: [{ role: "user", content: "q" }], purpose: "anything" }).ok).toBe(false);
+    expect(parseBridgeCompleteBody({ messages: [{ role: "user", content: "x".repeat(MAX_COMPLETE_CHARS + 1) }] }).ok).toBe(false);
+  });
+});
+
+describe("orchestrator bridge completion route", () => {
+  async function serveComplete(complete?: OrchestratorBridgeDeps["complete"]) {
+    const app = express();
+    app.use(express.json({ limit: "2mb" }));
+    app.use(
+      "/orchestrator",
+      createOrchestratorBridgeRouter({ spawn: async () => ({ agentId: "x", status: "completed", result: "", attachments: [] }), integrations: () => [], complete }),
+    );
+    const server = app.listen(0);
+    await new Promise((r) => server.once("listening", r));
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const call = (body: unknown, signal?: AbortSignal) =>
+      fetch(`${base}/orchestrator/complete`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal });
+    return { call, close: () => new Promise((r) => server.close(r)) };
+  }
+  const body = { system: "sys", messages: [{ role: "user", content: "merge these" }], max_tokens: 800, purpose: "merger" };
+
+  it("runs the completion and returns its text and usage", async () => {
+    const calls: BridgeCompleteRequest[] = [];
+    const { call, close } = await serveComplete(async (req) => {
+      calls.push(req);
+      return { text: "merged", usage: { inputTokens: 100, outputTokens: 20 } };
+    });
+    try {
+      const res = await call(body);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ text: "merged", usage: { inputTokens: 100, outputTokens: 20 } });
+      expect(calls[0]).toMatchObject({ system: "sys", maxTokens: 800, purpose: "merger" });
+      expect(calls[0].signal).toBeInstanceOf(AbortSignal);
+    } finally {
+      await close();
+    }
+  });
+
+  it("answers 400 for a bad body, 503 without a runtime, and 500 (+usageLimited) on failure", async () => {
+    let fail: Error = new Error("Claude Code process exited with code 1");
+    const { call, close } = await serveComplete(async () => {
+      throw fail;
+    });
+    try {
+      expect((await call({ messages: [] })).status).toBe(400);
+      let res = await call(body);
+      expect(res.status).toBe(500);
+      expect(await res.json()).toEqual({ error: "Claude Code process exited with code 1" });
+      fail = new CompletionUsageLimitError("usage limit: you've hit your limit");
+      res = await call(body);
+      expect(await res.json()).toMatchObject({ usageLimited: true });
+    } finally {
+      await close();
+    }
+    const none = await serveComplete(undefined);
+    try {
+      expect((await none.call(body)).status).toBe(503);
+    } finally {
+      await none.close();
+    }
+  });
+
+  it("aborts the completion when the sidecar drops the request", async () => {
+    let seen: AbortSignal | null = null;
+    const { call, close } = await serveComplete(
+      (req) =>
+        new Promise((resolve) => {
+          seen = req.signal;
+          req.signal.addEventListener("abort", () => resolve({ text: "late" }));
+        }),
+    );
+    try {
+      const ac = new AbortController();
+      const pending = call(body, ac.signal).catch(() => null);
+      for (let i = 0; i < 100 && !seen; i++) await new Promise((r) => setTimeout(r, 10));
+      ac.abort();
+      await pending;
+      for (let i = 0; i < 100 && !seen!.aborted; i++) await new Promise((r) => setTimeout(r, 10));
+      expect(seen!.aborted).toBe(true);
     } finally {
       await close();
     }

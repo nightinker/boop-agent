@@ -1,5 +1,7 @@
 // End to end: the real Go sidecar binary, Boop's real bridge router, and
-// Boop's client. Only the sub-agent itself (spawnExecutionAgent) is faked.
+// Boop's client. Only the sub-agent itself (spawnExecutionAgent) and the model
+// behind POST /orchestrator/complete are faked. No ANTHROPIC_API_KEY anywhere:
+// the planner and merger come back to Boop.
 // Skipped where Go isn't installed.
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import express from "express";
@@ -9,7 +11,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { SpawnOptions, SpawnResult } from "../server/execution-agent.js";
-import { createOrchestratorBridgeRouter } from "../server/orchestrator-bridge.js";
+import {
+  createOrchestratorBridgeRouter,
+  type BridgeCompleteRequest,
+  type BridgeCompleteResult,
+} from "../server/orchestrator-bridge.js";
 import { OrchestratorClient, probeOrchestrator } from "../server/orchestrator-client.js";
 
 function hasGo(): boolean {
@@ -35,6 +41,12 @@ describe.skipIf(!hasGo())("orchestrator sidecar end to end", () => {
   let boop: import("node:http").Server | null = null;
   let client: OrchestratorClient;
   const spawned: SpawnOptions[] = [];
+  const completions: BridgeCompleteRequest[] = [];
+  // The model behind Boop's runtime. Unavailable unless a test says otherwise,
+  // so the planner falls back and the merger joins without it.
+  let model: (req: BridgeCompleteRequest) => Promise<BridgeCompleteResult> = async () => {
+    throw new Error("model unavailable in this test");
+  };
   const logs: string[] = [];
 
   beforeAll(async () => {
@@ -49,6 +61,10 @@ describe.skipIf(!hasGo())("orchestrator sidecar end to end", () => {
       "/orchestrator",
       createOrchestratorBridgeRouter({
         integrations: () => ["gmail", "browser"],
+        complete: (req) => {
+          completions.push(req);
+          return model(req);
+        },
         spawn: async (opts): Promise<SpawnResult> => {
           spawned.push(opts);
           if (opts.task.includes("slow")) {
@@ -76,7 +92,7 @@ describe.skipIf(!hasGo())("orchestrator sidecar end to end", () => {
     const boopUrl = `http://127.0.0.1:${(boop.address() as AddressInfo).port}`;
 
     const port = await freePort();
-    const env: NodeJS.ProcessEnv = { PATH: process.env.PATH, HOME: process.env.HOME };
+    const env: NodeJS.ProcessEnv = { PATH: process.env.PATH, HOME: process.env.HOME }; // no ANTHROPIC_API_KEY
     sidecar = spawn(bin, ["-addr", `127.0.0.1:${port}`, "-boop-url", boopUrl, "-max-tokens", "50000"], { env });
     sidecar.stderr?.on("data", (d) => logs.push(String(d)));
     client = new OrchestratorClient({ baseUrl: `http://127.0.0.1:${port}` });
@@ -129,8 +145,60 @@ describe.skipIf(!hasGo())("orchestrator sidecar end to end", () => {
     await expect(
       client.submitRun({ plan: { tasks: [{ id: "a", agent: "boop", input: "x", integrations: ["slack"], cost_hint: "low" }] } }),
     ).rejects.toMatchObject({ status: 422 });
-    await expect(client.submitRun({ task: "plan this" })).rejects.toMatchObject({ status: 503 }); // no API key, no planner
     await expect(client.getRun("run_0000000000000000")).rejects.toMatchObject({ status: 404 });
+  });
+
+  it("reports the planner and merger on via Boop with no API key", async () => {
+    expect(await client.health()).toEqual({ ok: true, planner: true, merger: true, llm: "boop" });
+  });
+
+  it("plans and merges through Boop's runtime, charging its tokens to the budget", async () => {
+    completions.length = 0;
+    model = async (req) => {
+      if (req.purpose === "planner") {
+        return {
+          text: JSON.stringify({
+            goal: "Compare flights",
+            tasks: [
+              { id: "a", title: "Airline A", agent: "boop", input: "Find flights on A", integrations: ["browser"], cost_hint: "low" },
+              { id: "b", title: "Airline B", agent: "boop", input: "Find flights on B", integrations: ["browser"], cost_hint: "low" },
+            ],
+          }),
+          usage: { inputTokens: 900, outputTokens: 100 },
+        };
+      }
+      return { text: "Best deal: $120 at https://flights.example/deal?id=7&src=boop", usage: { inputTokens: 400, outputTokens: 50 } };
+    };
+    const run = await client.submitRun({ task: "Compare flights on A and B", maxTokens: 40_000 });
+    const res = await client.waitForResult(run.id, 20_000);
+    expect(res.state).toBe("SUCCEEDED");
+    expect(res.result?.method).toBe("llm");
+    expect(res.result?.answer).toContain("https://flights.example/deal?id=7&src=boop");
+    expect(res.plan_fallback).toBeUndefined();
+    expect(completions.map((c) => c.purpose)).toEqual(["planner", "merger"]);
+    expect(completions[1].maxTokens).toBeGreaterThan(0);
+    expect(completions[1].maxTokens).toBeLessThanOrEqual(4_000);
+    // Planner 1000 + two sub-agents at 1000 each + merger 450.
+    expect(res.tokens_used).toBe(3_450);
+    const st = await client.getRun(run.id);
+    expect(st.planner_tokens).toBe(1_000);
+  });
+
+  it("falls back to a one-step plan and a plain join when Boop's model fails", async () => {
+    completions.length = 0;
+    model = async () => {
+      throw new Error("Claude Code process exited with code 1");
+    };
+    const before = spawned.length;
+    const run = await client.submitRun({ task: "Find a cheap flight to Lisbon" });
+    const res = await client.waitForResult(run.id, 20_000);
+    expect(res.state).toBe("SUCCEEDED");
+    expect(res.plan_fallback).toContain("Claude Code process exited");
+    const sub = spawned.slice(before);
+    expect(sub).toHaveLength(1);
+    expect(sub[0].task).toContain("Find a cheap flight to Lisbon");
+    expect(res.result?.answer).toContain("https://flights.example/deal?id=7&src=boop");
+    expect(completions.every((c) => c.purpose === "planner")).toBe(true);
   });
 
   it("cancels a run and the Boop sub-agent with it", async () => {
