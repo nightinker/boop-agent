@@ -24,6 +24,15 @@ export interface KeepAwakeStatus {
   lastError: string | null;
   command: string;
   caveat: string;
+  /** Why this Mac is flagged for a bad network, from /network (added here). */
+  network?: NetworkStatus | null;
+}
+
+export interface NetworkStatus {
+  degraded: boolean;
+  lastSource: string | null;
+  probesPassed: number;
+  lastProbeFailures: string[];
 }
 
 const POLL_MS = 10_000;
@@ -35,9 +44,13 @@ export function useKeepAwake() {
 
   const load = useCallback(async () => {
     try {
-      const res = await fetch("/api/keep-awake", { cache: "no-store" });
+      const [res, net] = await Promise.all([
+        fetch("/api/keep-awake", { cache: "no-store" }),
+        fetch("/api/network", { cache: "no-store" }).catch(() => null),
+      ]);
       if (!res.ok) throw new Error(`Keep-awake status failed (${res.status})`);
-      setStatus((await res.json()) as KeepAwakeStatus);
+      const network = net?.ok ? ((await net.json().catch(() => null)) as NetworkStatus | null) : null;
+      setStatus({ ...((await res.json()) as KeepAwakeStatus), network });
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -59,7 +72,7 @@ export function useKeepAwake() {
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(body.error ?? `Keep-awake update failed (${res.status})`);
-      setStatus(body as KeepAwakeStatus);
+      setStatus((prev) => ({ ...(body as KeepAwakeStatus), network: prev?.network ?? null }));
       setError(null);
       // caffeinate starts asynchronously; refresh shortly to show its pid.
       setTimeout(() => void load(), 1_000);
@@ -93,8 +106,14 @@ export function keepAwakeLabel(status: KeepAwakeStatus): string {
         ? `Restarting caffeinate${who ? ` ${who}` : ""} (${status.lastError})`
         : `Starting caffeinate${who ? ` ${who}` : ""}…`;
     }
-    case "standby":
+    case "standby": {
+      const net = status.network;
+      if (net?.degraded) {
+        const failing = net.lastProbeFailures.length ? `${net.lastProbeFailures.join(", ")} failing` : `${net.probesPassed}/3 checks passed`;
+        return `Standing by: network flagged, server is answering (${failing})`;
+      }
       return "Standing by: another copy is active, so this Mac may sleep";
+    }
     case "disabled":
       return "Off: the Mac may sleep";
     case "stopped":

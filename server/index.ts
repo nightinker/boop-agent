@@ -48,7 +48,7 @@ import { mountDashboard } from "./dashboard.js";
 import { installMissedUpdates, resumeSelfBuilds, startNextQueuedBuild } from "./self-build/run.js";
 import { instanceIdentity, isActiveInstance, resolvePublicUrl, startInstanceCoordinator } from "./instance.js";
 import type { Id } from "../convex/_generated/dataModel.js";
-import { networkHealth } from "./network-health.js";
+import { networkHealth, probeNetwork } from "./network-health.js";
 import { startReplyOutbox } from "./reply-outbox.js";
 import { startSelfUpdateLoop } from "./self-update.js";
 import { keepAwake } from "./keep-awake.js";
@@ -254,6 +254,10 @@ async function main() {
   app.use("/apple", createAppleRouter());
   app.use("/changelog", createChangelogRouter());
   app.use("/keep-awake", createKeepAwakeRouter(awake));
+  // Why this copy is (or isn't) flagged for a bad network, for the dashboard.
+  app.get("/network", (_req, res) => {
+    res.json({ ...networkHealth.status(), active: isActiveInstance() });
+  });
   app.use(
     "/orchestrator",
     createOrchestratorBridgeRouter({
@@ -470,6 +474,17 @@ async function main() {
       publicUrl: () => resolvePublicUrl(),
       // Flaky Wi-Fi: hand over to a healthier copy instead of losing replies.
       network: networkHealth,
+      // While flagged, prove the network is good again: texts come in through
+      // this copy's public URL (ngrok on the Mac), replies go out via
+      // Sendblue, and turns need the model API.
+      probe: async () => {
+        const publicUrl = await resolvePublicUrl().catch(() => undefined);
+        return probeNetwork([
+          { name: "public url", url: publicUrl ? `${publicUrl}/health` : undefined },
+          { name: "sendblue", url: "https://api.sendblue.com/" },
+          { name: "model api", url: "https://api.anthropic.com/" },
+        ]);
+      },
       onActivate: ({ othersOnline }) => onActivate(othersOnline),
       onDeactivate: () => {
         // Standing by: let this machine sleep; the active copy keeps answering.

@@ -1,5 +1,6 @@
 import { hostname } from "node:os";
 import { INSTANCE_OFFLINE_AFTER_MS } from "../convex/instanceRules.js";
+import { isNetworkError } from "./network-health.js";
 
 /**
  * Boop can run in more than one place at once: the owner's Mac (primary) and a
@@ -115,10 +116,19 @@ export interface CoordinatorDeps {
   graceMs?: number;
   /**
    * This machine's network health. While degraded the copy checks in at
-   * DEGRADED_PRIORITY so a healthier copy takes over; failed check-ins count
-   * as network failures.
+   * DEGRADED_PRIORITY so a healthier copy takes over; check-ins that fail
+   * for network reasons count as network failures.
    */
-  network?: { isDegraded: () => boolean; noteFailure: (source: string) => void };
+  network?: {
+    isDegraded: () => boolean;
+    noteFailure: (source: string) => void;
+    noteProbe?: (failed: string[]) => void;
+  };
+  /**
+   * While degraded, runs every check-in: the names of the checks that got no
+   * answer. Passing rounds let the network recover in about a minute.
+   */
+  probe?: () => Promise<string[]>;
   degradedPriority?: number;
   /** How long check-ins may fail before this copy stops acting as active. */
   offlineAfterMs?: number;
@@ -158,6 +168,11 @@ export function startInstanceCoordinator(deps: CoordinatorDeps): { stop: () => P
   const checkInOnce = async () => {
     try {
       const publicUrl = await deps.publicUrl?.().catch(() => undefined);
+      if (deps.probe && deps.network?.noteProbe && deps.network.isDegraded()) {
+        const failed = await deps.probe().catch((e) => [`probe error: ${e instanceof Error ? e.message : String(e)}`]);
+        if (failed.length) log.warn(`[instance] health check failed: ${failed.join(", ")}`);
+        deps.network.noteProbe(failed);
+      }
       const degraded = deps.network?.isDegraded() ?? false;
       if (degraded !== wasDegraded) {
         log.log(
@@ -205,7 +220,9 @@ export function startInstanceCoordinator(deps: CoordinatorDeps): { stop: () => P
       }
     } catch (err) {
       log.warn("[instance] check-in failed", err instanceof Error ? err.message : err);
-      deps.network?.noteFailure("convex check-in");
+      // Only a failure to reach Convex says anything about the network; a bug
+      // in the activate/deactivate steps must not keep this copy flagged.
+      if (isNetworkError(err)) deps.network?.noteFailure("convex check-in");
       if (current?.active && now() - lastCheckInAt > offlineAfterMs) {
         log.log(`[instance] this copy (${deps.identity.label}) lost contact; standing by until it can check in again`);
         const summary = current.summary ?? { activeInstanceId: null, instances: [] };
