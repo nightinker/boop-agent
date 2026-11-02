@@ -8,6 +8,12 @@ Format:
 
 ---
 
+## Unreleased — Boop waits until you've finished typing
+
+- Fixed: Boop could reply while you were still typing, about 10s in. Sendblue only sends "started typing" and "stopped typing" (nothing in between), but a "started" held the wait for just one more 5s, and the 15s hard cap counted from your first text cut it off anyway. Now "started typing" holds the reply until "stopped typing", then waits the usual 5s.
+- Changed: a "started typing" with no "stopped" is trusted for 30s after the latest typing event, and once you've been seen typing the hard cap is `BOOP_MAX_TYPING_HOLD_MS` (default 60s, at most 120s), so a lost event still can't stall replies for long. Waits with texts only keep the 15s cap.
+- Added: log lines for every typing webhook Sendblue sends (`[sendblue] typing event … → held/restarted/ignored`, or the field names when the payload has no usable typing event), for why a typing signal was ignored, and for typing-timeout flushes. Phone numbers stay hidden.
+
 ## Unreleased — Replies can't get stuck behind "typing…"
 
 - Fixed: after the typing indicator shipped, a "started typing" with no matching "stopped typing" could hold your texts for up to a minute (longer with retries and the poller), so replies seemed to stop. Now every text or typing signal only restarts the 5s quiet period, and every wait has a hard cap of 15s from your first waiting text that nothing can push out. `BOOP_MAX_TYPING_HOLD_MS` defaults to 15s and can't go higher.
