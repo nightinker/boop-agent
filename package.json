@@ -91,6 +91,7 @@
       "assets/**",
       "convex/**",
       "debug/**",
+      "orchestrator-go/**",
       "scripts/**",
       "server/**",
       ".env.example",

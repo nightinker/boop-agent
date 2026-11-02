@@ -17,7 +17,7 @@ import { startConsolidationLoop } from "./consolidation.js";
 import { runCurator, startCuratorLoop } from "./skills/curator.js";
 import { availableIntegrations, cancelAgent, retryAgent, spawnExecutionAgent } from "./execution-agent.js";
 import { createOrchestratorBridgeRouter } from "./orchestrator-bridge.js";
-import { probeOrchestrator } from "./orchestrator-client.js";
+import { orchestratorSidecar, SIDECAR_KEY_NAME } from "./orchestrator-sidecar.js";
 import { createComposioRouter } from "./composio-routes.js";
 import { ensureProactiveWatcher } from "./proactive-email.js";
 import { ensureSlackWatcher, sendSlackDigest, startSlackDigestLoop } from "./proactive-slack.js";
@@ -80,6 +80,12 @@ async function main() {
   startKeepAwakeSettingLoop(awake);
   // A self-build in progress also holds it, toggle or not, until it's done.
   startBuildWakeLockLoop(awake);
+
+  // The Go orchestrator sidecar, run as a child of this process. Its planner
+  // key comes only from the secret store (Keychain), never from Boop's env.
+  const sidecar = orchestratorSidecar({
+    getApiKey: async () => (secretsSupported() ? secretStore().get(SIDECAR_KEY_NAME) : null),
+  });
 
   const app = express();
   // Behind Cloudflare Access (CF_ACCESS_TEAM_DOMAIN + CF_ACCESS_AUD), a visitor
@@ -244,10 +250,23 @@ async function main() {
     "/orchestrator",
     createOrchestratorBridgeRouter({ spawn: spawnExecutionAgent, integrations: availableIntegrations }),
   );
+  // "Is the orchestrator working?" for the dashboard and curl, same as the tool.
+  app.get("/orchestrator/sidecar", async (_req, res) => {
+    await sidecar.checkHealth();
+    res.json(sidecar.status());
+  });
+  app.post("/orchestrator/sidecar/self-test", async (_req, res) => {
+    const result = await sidecar.selfTest();
+    res.json({ selfTest: result, status: sidecar.status() });
+  });
   app.use(
     "/secrets",
     createSecretsRouter({
-      onChanged: () => broadcast("secrets_changed", {}),
+      onChanged: () => {
+        broadcast("secrets_changed", {});
+        // A newly saved ANTHROPIC_API_KEY restarts the sidecar with it.
+        void sidecar.refreshKey().catch(() => undefined);
+      },
       // Tell the owner it's done (name only), so the chat can pick up again.
       onSaved: async (request) => {
         const text = `🔐 Saved ${request.name} securely on your Mac. Tell me when you want me to carry on.`;
@@ -406,9 +425,10 @@ async function main() {
     console.log(`  sendblue    POST http://localhost:${port}/sendblue/webhook`);
     console.log(`  typing      POST http://localhost:${port}/sendblue/typing`);
     console.log(`  websocket   WS   ws://localhost:${port}/ws`);
-    // The Go orchestrator sidecar is optional: just log whether it's there.
-    // probeOrchestrator never throws, so a missing sidecar can't stop Boop.
-    void probeOrchestrator();
+    // Build (if needed) and start the Go orchestrator sidecar now that the
+    // bridge it calls back into is listening. Non-fatal: start() never
+    // throws, and without it Boop just runs without the orchestrator tools.
+    void sidecar.start();
   });
 
   const signalExitCodes = { SIGTERM: 143, SIGINT: 130, SIGHUP: 129 } as const;
@@ -425,7 +445,11 @@ async function main() {
       if (waiting) console.log(`[inbound] ${waiting} conversation(s) left queued for the next start`);
       // Hand over to another copy right away instead of after a timeout.
       const leaving = coordinator?.stop() ?? Promise.resolve();
-      Promise.allSettled([closeLocalBrowser(), Promise.race([leaving, new Promise((r) => setTimeout(r, 3_000))])])
+      Promise.allSettled([
+        closeLocalBrowser(),
+        sidecar.stop(),
+        Promise.race([leaving, new Promise((r) => setTimeout(r, 3_000))]),
+      ])
         .finally(() => process.exit(signalExitCodes[sig]));
     });
   }

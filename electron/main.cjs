@@ -23,6 +23,7 @@ const runtimeItems = [
   "assets",
   "convex",
   "debug",
+  "orchestrator-go",
   "package-lock.json",
   "package.json",
   "scripts",

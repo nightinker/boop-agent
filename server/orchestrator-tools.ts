@@ -8,6 +8,7 @@ import {
   type RunResultResponse,
   type RunStatus,
 } from "./orchestrator-client.js";
+import { formatSidecarStatus, orchestratorSidecar, type OrchestratorSidecar } from "./orchestrator-sidecar.js";
 
 // Dispatcher tools for the Go orchestrator sidecar. They're only offered on a
 // turn when the sidecar answered recently (see orchestratorAvailable), so
@@ -20,6 +21,14 @@ export const ORCHESTRATOR_ALLOWED_TOOLS = [
   `mcp__${ORCHESTRATOR_NAMESPACE}__orchestration_status`,
   `mcp__${ORCHESTRATOR_NAMESPACE}__cancel_orchestration`,
 ];
+
+/** Always offered, so "is the orchestrator working?" gets a real answer even when it's down. */
+export const ORCHESTRATOR_HEALTH_TOOL = `mcp__${ORCHESTRATOR_NAMESPACE}__orchestrator_health`;
+
+export const ORCHESTRATOR_HEALTH_PROMPT = `
+
+Orchestrator health:
+- When the owner asks whether the orchestrator is working (or why multi-step orchestration isn't available), call orchestrator_health with selfTest: true and answer from what it returns: running or not, port, last health check, whether ANTHROPIC_API_KEY is stored, and the self-test result. If it says the key isn't stored, offer to request it with request_secret("ANTHROPIC_API_KEY").`;
 
 export const ORCHESTRATOR_DISPATCHER_PROMPT = `
 
@@ -144,4 +153,28 @@ export function createOrchestratorTools(conversationId: string, deps: Orchestrat
       },
     ),
   ];
+}
+
+export function createOrchestratorHealthTool(deps: { sidecar?: () => OrchestratorSidecar } = {}): RuntimeTool {
+  const get = deps.sidecar ?? (() => orchestratorSidecar());
+  return defineRuntimeTool(
+    ORCHESTRATOR_NAMESPACE,
+    "orchestrator_health",
+    "Is the Go orchestrator sidecar working? Checks it live and reports: running or not, port, last health check, whether ANTHROPIC_API_KEY is stored (never its value), restarts and the log file. With selfTest: true it also submits a tiny two-step test plan and confirms a merged result comes back (takes a few seconds).",
+    {
+      selfTest: z.boolean().optional().describe("Also run the end-to-end self-test. Default false."),
+    },
+    async (args) => {
+      try {
+        const sidecar = get();
+        // Picks up a key saved since boot (restarting the sidecar with it).
+        await sidecar.refreshKey();
+        await sidecar.checkHealth();
+        if (args.selfTest) await sidecar.selfTest();
+        return runtimeText(formatSidecarStatus(sidecar.status()));
+      } catch (err) {
+        return runtimeText(`Couldn't check the orchestrator: ${err instanceof Error ? err.message : String(err)}`, false);
+      }
+    },
+  );
 }

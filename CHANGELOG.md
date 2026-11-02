@@ -8,6 +8,15 @@ Format:
 
 ---
 
+## Unreleased — Go orchestrator sidecar runs with Boop
+
+- Added: Boop now runs the Go orchestrator sidecar itself. On startup it builds `orchestrator-go` with `go build` when the binary is missing or the Go source changed (binary in `data/orchestrator/bin/`), starts it on `127.0.0.1:3460` as a child process, and logs its output to `data/orchestrator/orchestrator.log`. It restarts the sidecar with backoff (1s, doubling, up to 60s) if it dies or stops answering, and stops it on shutdown. A sidecar a crashed Boop left behind is stopped on the next start; one you started by hand is used instead of starting a second.
+- Added: startup is non-fatal. No Go, a failed build or a sidecar that won't start is logged once (`[orchestrator] … Boop continues without the orchestrator tools`) and Boop boots normally.
+- Added: the planner and result merger's `ANTHROPIC_API_KEY` comes only from Boop's secret store (the Mac's Keychain), passed to the sidecar's environment at spawn time. It's never read from chat or Boop's own env, and never logged. Without it the sidecar starts with hand-written plans only and says to use `request_secret("ANTHROPIC_API_KEY")`; saving the key restarts the sidecar with it. The sidecar gets a minimal environment, not Boop's other keys.
+- Added: `orchestrator_health` dispatcher tool, always available: ask "is the orchestrator working?" and Boop checks it live (running or not, port, last health check, key stored or not, restarts, log file) and runs a self-test that submits a small two-step plan and confirms a merged result comes back. Also `GET /orchestrator/sidecar` and `POST /orchestrator/sidecar/self-test` (local only).
+- Changed: the orchestrator tools switch on as soon as the sidecar answers its health check (every 15s) and off as soon as it goes down, instead of a once-a-minute probe.
+- Fixed: the Mac app's runtime copy now includes `orchestrator-go/`, so the packaged Boop can build and run the sidecar, not just the dev checkout. Set `ORCHESTRATOR_SIDECAR=off` to manage the sidecar yourself.
+
 ## Unreleased — Go orchestrator sidecar: result merger hardening
 
 - Fixed: when the result merger falls back to joining step outputs, a step that succeeded with an empty output no longer shows up as an empty section, and if the final step came back empty the answer uses what earlier steps found instead of being blank.

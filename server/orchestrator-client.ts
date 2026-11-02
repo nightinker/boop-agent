@@ -4,7 +4,7 @@
 //
 // The sidecar is optional. Nothing here throws at import or startup: when it
 // isn't running, calls fail with an OrchestratorError whose `unreachable` is
-// true, and probeOrchestrator() just logs. Boop starts either way.
+// true. Boop starts either way; orchestrator-sidecar.ts runs and health-checks it.
 //
 // The sidecar only ever listens on localhost, so the URL must be a loopback
 // one; anything else is refused before a request is made.
@@ -242,7 +242,7 @@ export class OrchestratorClient {
       throw new OrchestratorError(
         timedOut
           ? `the orchestrator at ${this.baseUrl} didn't answer in ${Math.round(timeoutMs / 1000)}s`
-          : `the orchestrator isn't running at ${this.baseUrl} (start it with: cd orchestrator-go && go run ./cmd/orchestrator)`,
+          : `the orchestrator isn't running at ${this.baseUrl} (Boop starts it on boot; ask "is the orchestrator working" for why it isn't up)`,
         { unreachable: !timedOut },
       );
     }
@@ -309,6 +309,15 @@ export async function probeOrchestrator(
 export async function orchestratorAvailable(client: OrchestratorClient = OrchestratorClient.fromEnv()): Promise<boolean> {
   if (lastProbe && Date.now() - lastProbe.at < PROBE_TTL_MS) return lastProbe.up;
   return probeOrchestrator(client, () => {});
+}
+
+/**
+ * Records a health check made elsewhere (the sidecar supervisor checks every
+ * few seconds), so the dispatcher's tools switch on as soon as the sidecar
+ * answers and off as soon as it goes down, instead of waiting out the cache.
+ */
+export function recordOrchestratorHealth(up: boolean, at: number = Date.now()): void {
+  lastProbe = { at, up };
 }
 
 /** For tests. */

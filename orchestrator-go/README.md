@@ -114,9 +114,25 @@ using Claude:
 - `server/orchestrator-client.ts` talks to this API: submit, status,
   long-polled result, cancel. It only accepts a localhost `ORCHESTRATOR_URL`
   (default `http://127.0.0.1:3460`) and sends `ORCHESTRATOR_TOKEN` if set.
-- On startup Boop checks once whether the sidecar is up and logs the answer.
-  **The sidecar is optional:** if it's down, Boop starts and works as before.
-- When the sidecar answered within the last minute, the dispatcher gets three
+- `server/orchestrator-sidecar.ts` runs it: on startup Boop builds the binary
+  into `data/orchestrator/bin/` when it's missing or the Go source changed,
+  starts it on `127.0.0.1:3460` (or `ORCHESTRATOR_URL`'s port), logs its
+  output to `data/orchestrator/orchestrator.log`, health-checks it every 15s,
+  restarts it with backoff if it dies or hangs, and stops it on shutdown. If a
+  sidecar is already answering on the port, Boop uses it instead. Set
+  `ORCHESTRATOR_SIDECAR=off` to run it yourself.
+- **The sidecar is optional:** no Go, a failed build or a crash just means
+  Boop runs without the orchestrator tools, with a log line saying why.
+- `ANTHROPIC_API_KEY` comes only from Boop's secret store (Keychain) and is
+  put in the sidecar's environment at spawn time; the sidecar gets a minimal
+  environment, not Boop's. Without the key it runs with hand-written plans
+  only. Saving the key with `request_secret` restarts the sidecar with it.
+- The dispatcher always has `orchestrator_health` ("is the orchestrator
+  working?"): live status, port, last health check, whether the key is
+  stored, and a self-test that runs a two-step `echo` plan and checks the
+  merged result. Also `GET /orchestrator/sidecar` and
+  `POST /orchestrator/sidecar/self-test` on Boop's server.
+- While the sidecar answers its health check, the dispatcher gets three
   tools: `run_orchestration` (submit a task, wait for the merged answer),
   `orchestration_status` and `cancel_orchestration`. Runs are tied to the
   conversation they came from.
