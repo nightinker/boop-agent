@@ -176,6 +176,13 @@ export interface SpawnResult {
    * real answer. Background callers must not forward it to the user.
    */
   usageLimited?: boolean;
+  /** Tokens the agent's model calls used (the orchestrator charges these to its run budget). */
+  usage?: {
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    cacheCreationTokens: number;
+  };
 }
 
 export async function spawnExecutionAgent(opts: SpawnExecutionAgentOpts): Promise<SpawnResult> {
@@ -396,6 +403,12 @@ export async function spawnExecutionAgent(opts: SpawnExecutionAgentOpts): Promis
     status,
     attachments,
     ...(usageLimited ? { usageLimited } : {}),
+    usage: {
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
+      cacheReadTokens: usage.cacheReadTokens,
+      cacheCreationTokens: usage.cacheCreationTokens,
+    },
   };
 }
 

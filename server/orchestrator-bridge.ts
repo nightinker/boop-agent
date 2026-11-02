@@ -83,6 +83,8 @@ export function createOrchestratorBridgeRouter(deps: OrchestratorBridgeDeps): ex
         status: result.status,
         result: result.result,
         ...(result.usageLimited ? { usageLimited: true } : {}),
+        // The sidecar charges these to the run's token budget.
+        ...(result.usage ? { usage: result.usage } : {}),
       });
     } catch (err) {
       if (abort.signal.aborted) return;

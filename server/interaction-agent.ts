@@ -29,6 +29,12 @@ import {
   scanForSecrets,
 } from "./secrets/redact.js";
 import { recoveryHint, tryRescueCommand } from "./rescue-commands.js";
+import { orchestratorAvailable } from "./orchestrator-client.js";
+import {
+  ORCHESTRATOR_ALLOWED_TOOLS,
+  ORCHESTRATOR_DISPATCHER_PROMPT,
+  createOrchestratorTools,
+} from "./orchestrator-tools.js";
 import { otherAccountNames, rescueDeps, syncClaudeAccount } from "./rescue-wiring.js";
 import {
   getRuntimeConfig,
@@ -500,11 +506,18 @@ export async function handleUserMessageWithAttachments(
     .map((m) => `${m.role.toUpperCase()}: ${m.content}`)
     .join("\n");
 
+  // The Go orchestrator sidecar is optional: only offer its tools when it
+  // answered recently (cached; a down sidecar costs one refused connection a minute).
+  const orchestratorUp = opts.kind !== "proactive" && (await orchestratorAvailable());
+
   const systemPrompt =
     INTERACTION_SYSTEM.replace(
       "{{INTEGRATIONS}}",
       integrationSummary || "(no integrations configured yet)",
-    ) + hostPlatformPromptNote() + instancePromptNote();
+    ) +
+    hostPlatformPromptNote() +
+    instancePromptNote() +
+    (orchestratorUp ? ORCHESTRATOR_DISPATCHER_PROMPT : "");
 
   const userText = opts.mediaError
     ? `[user sent images but they couldn't be downloaded: ${opts.mediaError}]\n${opts.content}`
@@ -639,6 +652,11 @@ export async function handleUserMessageWithAttachments(
     ...createSelfBuildTools(opts.conversationId),
     ...createLearnTools(opts.conversationId),
     ...createSecretDispatcherTools(opts.conversationId),
+    ...(orchestratorUp
+      ? createOrchestratorTools(opts.conversationId, {
+          redact: (text) => redactSecrets(redactPhoneNumbers(text)),
+        })
+      : []),
     defineRuntimeTool(
       "boop-ack",
       "send_ack",
@@ -741,6 +759,7 @@ export async function handleUserMessageWithAttachments(
               ...SELF_BUILD_ALLOWED_TOOLS,
               ...LEARN_ALLOWED_TOOLS,
               ...SECRETS_DISPATCHER_ALLOWED_TOOLS,
+              ...(orchestratorUp ? ORCHESTRATOR_ALLOWED_TOOLS : []),
               "mcp__boop-draft-decisions__reject_draft",
               "mcp__boop-ack__send_ack",
               "mcp__boop-self__get_config",

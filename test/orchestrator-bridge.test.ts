@@ -55,6 +55,23 @@ describe("orchestrator bridge route", () => {
     }
   });
 
+  it("passes the sub-agent's token usage back for the run budget", async () => {
+    const usage = { inputTokens: 1200, outputTokens: 300, cacheReadTokens: 9000, cacheCreationTokens: 0 };
+    const { base, close } = await serve(async () => ({
+      agentId: "agent_u",
+      status: "completed",
+      result: "ok",
+      attachments: [],
+      usage,
+    }));
+    try {
+      const res = await post(base, { task: "x", integrations: [], conversationId: "sms:1" });
+      expect(await res.json()).toEqual({ agentId: "agent_u", status: "completed", result: "ok", usage });
+    } finally {
+      await close();
+    }
+  });
+
   it("passes failures through, including usage limits", async () => {
     const { base, close } = await serve(async () => ({
       agentId: "agent_2",

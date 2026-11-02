@@ -8,6 +8,14 @@ Format:
 
 ---
 
+## Unreleased — Go orchestrator sidecar: Boop API and result merger (Milestone 3)
+
+- Added: one merged final answer per run. After every step finishes, a report agent (Claude) combines all step outputs, keeps every URL verbatim (any it drops is added back under "Sources"), names failed or skipped steps instead of hiding them, and only uses what's left of the run's token budget. Without an API key, budget or a working model it falls back to joining the results. The answer is in `result` on the run.
+- Added: `GET /v1/runs/{id}/result` and `?wait=N` long-polling on run status and result; `conversation_id` on `POST /v1/runs`; stricter request checks with clear errors (empty body, both/neither of task and plan, limits, bad run ids, body size).
+- Added: Boop can use the sidecar: `run_orchestration`, `orchestration_status` and `cancel_orchestration` dispatcher tools, offered only while the sidecar is up. Boop checks for it once at startup and starts normally if it's down. Set `ORCHESTRATOR_URL` (localhost only) if it's not on `127.0.0.1:3460`.
+- Changed: the sidecar now only binds to localhost; a token no longer allows other addresses.
+- Fixed: Boop sub-agents run by the sidecar now report their token usage, so they're charged real tokens instead of an estimate, and they're tied to the conversation the run came from.
+
 ## Unreleased — Boop waits until you've finished typing
 
 - Fixed: Boop could reply while you were still typing, about 10s in. Sendblue only sends "started typing" and "stopped typing" (nothing in between), but a "started" held the wait for just one more 5s, and the 15s hard cap counted from your first text cut it off anyway. Now "started typing" holds the reply until "stopped typing", then waits the usual 5s.

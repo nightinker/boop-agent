@@ -81,11 +81,18 @@ func (r *Run) setTokensUsed(n int) {
 	r.mu.Unlock()
 }
 
-func (r *Run) finish(state RunState, output, errMsg string) {
+func (r *Run) setState(s RunState) {
+	r.mu.Lock()
+	r.status.State = s
+	r.mu.Unlock()
+}
+
+func (r *Run) finish(state RunState, result RunResult, errMsg string) {
 	r.mu.Lock()
 	now := time.Now().UTC()
 	r.status.State = state
-	r.status.Output = output
+	r.status.Output = result.Answer
+	r.status.Result = &result
 	if errMsg != "" {
 		r.status.Error = errMsg
 	}
@@ -104,7 +111,7 @@ type taskResult struct {
 }
 
 // execute runs p to completion and finishes r. ctx cancellation cancels the run.
-func execute(ctx context.Context, r *Run, p plan.Plan, agents map[string]Agent, o Options) {
+func execute(ctx context.Context, r *Run, p plan.Plan, agents map[string]Agent, o Options, merger Merger) {
 	o = o.WithDefaults()
 	r.setPlan(p, o)
 
@@ -214,7 +221,7 @@ func execute(ctx context.Context, r *Run, p plan.Plan, agents map[string]Agent, 
 				estimates[t.ID] = est
 				reserved += est
 				running++
-				in := Input{RunID: r.status.ID, Task: t}
+				in := Input{RunID: r.status.ID, ConversationID: r.status.ConversationID, Task: t}
 				for _, d := range t.DependsOn {
 					in.Deps = append(in.Deps, DepOutput{ID: d, Title: byID[d].Title, Output: outputs[d]})
 				}
@@ -271,6 +278,14 @@ func execute(ctx context.Context, r *Run, p plan.Plan, agents map[string]Agent, 
 		}
 	}
 
+	// Every step has settled: write the final answer (the report agent),
+	// within what's left of the budget.
+	result := finalize(ctx, r, p, state, outputs, merger, o, used)
+	if result.Tokens > 0 {
+		used += result.Tokens
+		r.setTokensUsed(used)
+	}
+
 	final := RunSucceeded
 	if ctx.Err() != nil {
 		final = RunCancelled
@@ -282,7 +297,7 @@ func execute(ctx context.Context, r *Run, p plan.Plan, agents map[string]Agent, 
 			}
 		}
 	}
-	r.finish(final, sinkOutput(p, state, outputs), "")
+	r.finish(final, result, "")
 }
 
 // blockedBy says whether t can no longer run because of a dependency: BLOCKED

@@ -142,10 +142,10 @@ func TestSubmitBadRequests(t *testing.T) {
 	if code, _ := do(t, "POST", srv.URL+"/v1/runs", map[string]string{"task": "x"}, ""); code != http.StatusServiceUnavailable {
 		t.Errorf("no planner: got %d", code)
 	}
-	if code, _ := do(t, "GET", srv.URL+"/v1/runs/run_nope", nil, ""); code != http.StatusNotFound {
+	if code, _ := do(t, "GET", srv.URL+"/v1/runs/run_0000000000000000", nil, ""); code != http.StatusNotFound {
 		t.Errorf("unknown run: got %d", code)
 	}
-	if code, _ := do(t, "POST", srv.URL+"/v1/runs/run_nope/cancel", nil, ""); code != http.StatusNotFound {
+	if code, _ := do(t, "POST", srv.URL+"/v1/runs/run_0000000000000000/cancel", nil, ""); code != http.StatusNotFound {
 		t.Errorf("unknown cancel: got %d", code)
 	}
 }
