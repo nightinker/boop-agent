@@ -32,7 +32,7 @@ import { SelfBuildsPanel } from "./components/SelfBuildsPanel.js";
 import { ChangelogDrawer } from "./components/ChangelogDrawer.js";
 import { RuntimeProviderLogo, type RuntimeProvider } from "./lib/branding.js";
 import { CLAUDE_ACCOUNT_CHANGED_EVENT } from "./components/ClaudeAccountRow.js";
-import { isActive as isSelfBuildActive } from "./lib/selfBuilds.js";
+import { usePolledQuery } from "./lib/usePolledQuery.js";
 import { navDrawerClasses, useMobileNav } from "./lib/mobileNav.js";
 import boopGif from "../../assets/boop.gif";
 
@@ -59,10 +59,6 @@ interface MemoryTierCounts {
   short: number;
   long: number;
   permanent: number;
-}
-
-interface AgentSummary {
-  status: string;
 }
 
 interface DesktopStatus {
@@ -141,10 +137,14 @@ export function App() {
   const { connected } = useSocket();
   const mobileNav = useMobileNav();
 
-  const counts = useQuery(api.memoryRecords.countsByTier, {}) as
+  // The tier counts scan every memory (embeddings included), so refresh them
+  // every 10 minutes rather than on every memory write.
+  const counts = usePolledQuery(api.memoryRecords.countsByTier, {}, 10 * 60_000) as
     | MemoryTierCounts
     | undefined;
-  const agents = useQuery(api.agents.listForDashboard, {}) as AgentSummary[] | undefined;
+  // Badges read only the running agents and in-progress builds, by index.
+  const activeAgentCount = useQuery(api.agents.activeCount, {}) ?? 0;
+  const pendingSelfBuildCount = new Set((useQuery(api.selfBuilds.inProgress, {}) ?? []).map((b) => b.buildId)).size;
   const demoStatus = useQuery(api.demo.status);
   const storedRuntime = useQuery(api.settings.get, { key: "runtime" }) as
     | string
@@ -158,18 +158,6 @@ export function App() {
     | string
     | null
     | undefined;
-  const activeAgentCount = (agents ?? []).filter(
-    (a) => a.status === "running" || a.status === "spawned",
-  ).length;
-  // Same args as the Self-builds page, so both share one live subscription.
-  const selfBuilds = useQuery(api.selfBuilds.forDashboard, { limit: 25 });
-  const pendingSelfBuildCount = selfBuilds
-    ? new Set(
-        [...selfBuilds.recent, ...selfBuilds.queued]
-          .filter((b) => b.status === "queued" || isSelfBuildActive(b.status))
-          .map((b) => b.buildId),
-      ).size
-    : 0;
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", theme === "dark");
