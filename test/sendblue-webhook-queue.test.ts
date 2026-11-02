@@ -137,6 +137,8 @@ describe("Sendblue webhook with the inbound queue", () => {
     // Same contact without the "+": still applies to the waiting text.
     const res = await post({ number: "15553334444", is_typing: true });
     expect(await res.json()).toEqual({ ok: true, typing: true, outcome: "held" });
+    const stopped = await post({ number: "(555) 333-4444", is_typing: false });
+    expect(await stopped.json()).toEqual({ ok: true, typing: true, outcome: "restarted" });
     await vi.waitFor(() => expect(memory.current!.rows.find((r) => r.handle === "t2")?.status).toBe("done"));
   });
 

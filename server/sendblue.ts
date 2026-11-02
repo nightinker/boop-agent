@@ -428,7 +428,8 @@ export const inboundQueue = createInboundQueue({
   isActive: isActiveInstance,
   // Wait for a quiet period so a burst of texts gets one answer.
   debounceMs: debounceMsFromEnv(process.env.BOOP_MESSAGE_DEBOUNCE_MS),
-  // Hard cap on any wait (typing or not), counted from the first waiting text.
+  // Hard cap on a wait while the sender is typing (texts alone stop at 15s),
+  // counted from the first waiting text.
   maxTypingWaitMs: maxTypingHoldMsFromEnv(process.env.BOOP_MAX_TYPING_HOLD_MS),
 });
 
@@ -440,8 +441,17 @@ export const inboundQueue = createInboundQueue({
 function handleTypingWebhook(body: unknown): { ok: true; typing: boolean; outcome?: string } {
   try {
     const typing = typingFromSendblue(body);
-    if (!typing) return { ok: true, typing: false };
-    return { ok: true, typing: true, outcome: inboundQueue.noteTyping(typing.conversationId, typing.isTyping) };
+    if (!typing) {
+      // Field names only, never values, so a payload-shape change is visible without leaking numbers.
+      const keys = body && typeof body === "object" ? Object.keys(body).sort().join(",") : typeof body;
+      console.log(`[sendblue] typing webhook without a usable typing event (fields: ${keys || "none"})`);
+      return { ok: true, typing: false };
+    }
+    const outcome = inboundQueue.noteTyping(typing.conversationId, typing.isTyping);
+    console.log(
+      `[sendblue] typing event from ${redactContactHandle(typing.conversationId.replace(/^sms:/, ""))}: is_typing=${typing.isTyping} → ${outcome}`,
+    );
+    return { ok: true, typing: true, outcome };
   } catch (err) {
     console.warn("[sendblue] ignored a typing indicator", err);
     return { ok: true, typing: false };
