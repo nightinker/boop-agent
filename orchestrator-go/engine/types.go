@@ -186,10 +186,12 @@ type RunStatus struct {
 	TokenBudget    int          `json:"token_budget"`
 	TokensUsed     int          `json:"tokens_used"`
 	PlannerTokens  int          `json:"planner_tokens,omitempty"`
-	MaxParallel    int          `json:"max_parallel"`
-	Output         string       `json:"output,omitempty"` // the final answer (same as Result.Answer)
-	Result         *RunResult   `json:"result,omitempty"` // set once the run has finished
-	Error          string       `json:"error,omitempty"`
-	CreatedAt      time.Time    `json:"created_at"`
-	FinishedAt     *time.Time   `json:"finished_at,omitempty"`
+	// PlanFallback says why the run uses the hand-written one-step plan instead of the planner's.
+	PlanFallback string     `json:"plan_fallback,omitempty"`
+	MaxParallel  int        `json:"max_parallel"`
+	Output       string     `json:"output,omitempty"` // the final answer (same as Result.Answer)
+	Result       *RunResult `json:"result,omitempty"` // set once the run has finished
+	Error        string     `json:"error,omitempty"`
+	CreatedAt    time.Time  `json:"created_at"`
+	FinishedAt   *time.Time `json:"finished_at,omitempty"`
 }

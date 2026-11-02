@@ -29,6 +29,14 @@ type Config struct {
 	Integrations func(ctx context.Context) ([]string, error)
 	MaxTasks     int // 0 means plan.DefaultMaxTasks
 	KeepRuns     int // finished runs kept in memory; 0 means 100
+	// LLM names where the planner and merger's model calls go: "boop" (Boop's
+	// own Claude runtime, over its local bridge) or "anthropic" (the API, with
+	// ANTHROPIC_API_KEY). Reported by /healthz; empty when there's no model.
+	LLM string
+	// FallbackAgent, when set and registered, is used if planning a task fails:
+	// the run goes ahead with a one-step plan that hands the whole task to that
+	// agent (e.g. "boop") instead of failing.
+	FallbackAgent string
 }
 
 // Overrides adjust the options for one run. Zero fields keep the defaults.
@@ -43,7 +51,7 @@ type Overrides struct {
 const MaxParallelLimit = 8
 
 // ErrNoPlanner is returned by SubmitTask when no planner is configured.
-var ErrNoPlanner = errors.New("no planner configured (set ANTHROPIC_API_KEY)")
+var ErrNoPlanner = errors.New("no planner configured")
 
 // ErrShuttingDown is returned once Shutdown has been called.
 var ErrShuttingDown = errors.New("orchestrator is shutting down")
@@ -89,6 +97,12 @@ func (m *Manager) Specs() []plan.AgentSpec { return append([]plan.AgentSpec(nil)
 // HasPlanner reports whether SubmitTask can be used.
 func (m *Manager) HasPlanner() bool { return m.cfg.Planner != nil }
 
+// HasMerger reports whether finished runs are merged by a model.
+func (m *Manager) HasMerger() bool { return m.cfg.Merger != nil }
+
+// LLM names where model calls go ("boop", "anthropic" or "").
+func (m *Manager) LLM() string { return m.cfg.LLM }
+
 // Rules are what submitted plans are validated against.
 func (m *Manager) Rules(ctx context.Context) plan.Rules {
 	r := plan.Rules{Agents: m.specs, MaxTasks: m.cfg.MaxTasks}
@@ -130,7 +144,7 @@ func (m *Manager) SubmitPlan(ctx context.Context, p plan.Plan, o Overrides) (Run
 		return RunStatus{}, err
 	}
 	opts := m.options(o)
-	return m.start(func(rctx context.Context, r *Run) { execute(rctx, r, p, m.agents, opts, m.cfg.Merger) }, "", o.ConversationID,
+	return m.start(func(rctx context.Context, r *Run) { execute(rctx, r, p, m.agents, opts, m.cfg.Merger, 0) }, "", o.ConversationID,
 		func(r *Run) { r.setPlan(p, opts.WithDefaults()) })
 }
 
@@ -148,16 +162,45 @@ func (m *Manager) SubmitTask(task string, o Overrides) (RunStatus, error) {
 		r.mu.Lock()
 		r.status.PlannerTokens = res.Tokens
 		r.mu.Unlock()
+		p := res.Plan
 		if err != nil {
-			state := RunFailed
-			if rctx.Err() != nil {
-				state = RunCancelled
+			fallback, ok := m.fallbackPlan(rctx, task)
+			if !ok || rctx.Err() != nil {
+				state := RunFailed
+				if rctx.Err() != nil {
+					state = RunCancelled
+				}
+				r.finish(state, RunResult{Method: MergeNone}, "planning failed: "+err.Error())
+				return
 			}
-			r.finish(state, RunResult{Method: MergeNone}, "planning failed: "+err.Error())
-			return
+			p = fallback
+			r.mu.Lock()
+			r.status.PlanFallback = "planning failed: " + err.Error()
+			r.mu.Unlock()
 		}
-		execute(rctx, r, res.Plan, m.agents, opts, m.cfg.Merger)
+		// What planning cost counts against the run's token budget.
+		execute(rctx, r, p, m.agents, opts, m.cfg.Merger, res.Tokens)
 	}, task, o.ConversationID, nil)
+}
+
+// fallbackPlan is the hand-written plan used when the planner fails: one step
+// that gives the whole task to FallbackAgent, with every integration Boop's
+// sub-agents can use (the planner could have picked any of them too).
+func (m *Manager) fallbackPlan(ctx context.Context, task string) (plan.Plan, bool) {
+	a, ok := m.agents[m.cfg.FallbackAgent]
+	if m.cfg.FallbackAgent == "" || !ok {
+		return plan.Plan{}, false
+	}
+	t := plan.Task{ID: "task", Title: "Do the whole task", Agent: m.cfg.FallbackAgent, Input: task, CostHint: plan.CostHigh}
+	if a.Spec().UsesIntegrations {
+		t.Integrations = m.Rules(ctx).Integrations
+	}
+	p := plan.Plan{Goal: task, Tasks: []plan.Task{t}}
+	plan.Normalize(&p)
+	if err := plan.Validate(p, m.Rules(ctx)); err != nil {
+		return plan.Plan{}, false
+	}
+	return p, true
 }
 
 func (m *Manager) start(work func(context.Context, *Run), task, conversationID string, init func(*Run)) (RunStatus, error) {

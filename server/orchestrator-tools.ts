@@ -28,7 +28,7 @@ export const ORCHESTRATOR_HEALTH_TOOL = `mcp__${ORCHESTRATOR_NAMESPACE}__orchest
 export const ORCHESTRATOR_HEALTH_PROMPT = `
 
 Orchestrator health:
-- When the owner asks whether the orchestrator is working (or why multi-step orchestration isn't available), call orchestrator_health with selfTest: true and answer from what it returns: running or not, port, last health check, whether ANTHROPIC_API_KEY is stored, and the self-test result. If it says the key isn't stored, offer to request it with request_secret("ANTHROPIC_API_KEY").`;
+- When the owner asks whether the orchestrator is working (or why multi-step orchestration isn't available), call orchestrator_health with selfTest: true and answer from what it returns: running or not, port, last health check, whether the planner and merger are on and how (Boop's own Claude runtime by default; ANTHROPIC_API_KEY is only an optional override, not needed), and the self-test result. Don't ask for ANTHROPIC_API_KEY unless the owner wants the sidecar to call the Anthropic API directly.`;
 
 export const ORCHESTRATOR_DISPATCHER_PROMPT = `
 
@@ -74,6 +74,7 @@ export function formatRunResult(res: RunResultResponse): string {
     for (const s of r.incomplete) lines.push(`- ${s.title || s.id}: ${s.state.toLowerCase()}${s.note ? ` (${s.note})` : ""}`);
   }
   if (r?.method === "fallback" && r.merge_error) lines.push("", `(Results joined without merging: ${r.merge_error})`);
+  if (res.plan_fallback) lines.push("", `(The planner didn't work, so the whole task ran as one step: ${res.plan_fallback})`);
   if (res.error) lines.push("", `Error: ${res.error}`);
   return lines.join("\n");
 }
@@ -160,7 +161,7 @@ export function createOrchestratorHealthTool(deps: { sidecar?: () => Orchestrato
   return defineRuntimeTool(
     ORCHESTRATOR_NAMESPACE,
     "orchestrator_health",
-    "Is the Go orchestrator sidecar working? Checks it live and reports: running or not, port, last health check, whether ANTHROPIC_API_KEY is stored (never its value), restarts and the log file. With selfTest: true it also submits a tiny two-step test plan and confirms a merged result comes back (takes a few seconds).",
+    "Is the Go orchestrator sidecar working? Checks it live and reports: running or not, port, last health check, whether the planner and merger are on (they use Boop's own Claude runtime; ANTHROPIC_API_KEY is an optional override, never shown), restarts and the log file. With selfTest: true it also submits a tiny two-step test plan and confirms a merged result comes back (takes a few seconds).",
     {
       selfTest: z.boolean().optional().describe("Also run the end-to-end self-test. Default false."),
     },

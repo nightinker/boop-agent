@@ -238,19 +238,28 @@ function SidecarCard({ overview, isDark, now }: { overview: OrchestratorOverview
           <span className="mono">{s.restarts}</span>
           {backingOff && <span className="ml-1 text-amber-500">· next in {formatMs(s.nextRestartInMs)}</span>}
         </Field>
-        <Field label="Anthropic key" isDark={isDark}>
+        <Field label="Anthropic key (override)" isDark={isDark}>
           {s.keyPresent ? (
             <span className="text-emerald-500" data-key-present="true">
               Stored{s.managed && !s.keyPassed && s.health === "running" ? " (used on next restart)" : ""}
             </span>
           ) : (
-            <span className="text-amber-500" data-key-present="false">
-              Not stored
+            <span className={muted} data-key-present="false">
+              Not stored (optional; not needed)
             </span>
           )}
         </Field>
-        <Field label="Planner" isDark={isDark}>
-          {s.planner === null ? <span className={muted}>—</span> : s.planner ? "On" : "Off (hand-written plans only)"}
+        <Field label="Planner & merger" isDark={isDark}>
+          {s.planner === null ? (
+            <span className={muted}>—</span>
+          ) : s.planner ? (
+            <span data-llm={s.llm ?? ""}>
+              On{s.merger === false ? "" : " · merger on"}
+              {s.llm === "boop" ? " · Boop's Claude runtime" : s.llm === "anthropic" ? " · Anthropic API" : ""}
+            </span>
+          ) : (
+            "Off (hand-written plans only)"
+          )}
         </Field>
         <Field label="Last health check" isDark={isDark}>
           {s.lastHealth ? (

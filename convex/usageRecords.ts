@@ -14,6 +14,7 @@ const sourceV = v.union(
   v.literal("skill-learn"),
   v.literal("skill-curator"),
   v.literal("slack-watch"),
+  v.literal("orchestrator"),
 );
 
 export const record = mutation({

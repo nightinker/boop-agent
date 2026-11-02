@@ -110,8 +110,10 @@ type taskResult struct {
 	ran    bool // at least one attempt reached the agent and finished
 }
 
-// execute runs p to completion and finishes r. ctx cancellation cancels the run.
-func execute(ctx context.Context, r *Run, p plan.Plan, agents map[string]Agent, o Options, merger Merger) {
+// execute runs p to completion and finishes r. ctx cancellation cancels the
+// run. spent is what the run already used before its steps (planning); it
+// counts against the token budget.
+func execute(ctx context.Context, r *Run, p plan.Plan, agents map[string]Agent, o Options, merger Merger, spent int) {
 	o = o.WithDefaults()
 	r.setPlan(p, o)
 
@@ -124,7 +126,10 @@ func execute(ctx context.Context, r *Run, p plan.Plan, agents map[string]Agent, 
 	outputs := map[string]string{}
 	estimates := map[string]int{}
 	results := make(chan taskResult)
-	running, reserved, used := 0, 0, 0
+	running, reserved, used := 0, 0, max(spent, 0)
+	if used > 0 {
+		r.setTokensUsed(used)
+	}
 	shortCircuitBy := ""
 	ctxDone := ctx.Done()
 

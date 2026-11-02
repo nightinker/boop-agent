@@ -76,6 +76,8 @@ export interface RunStatus {
   token_budget: number;
   tokens_used: number;
   planner_tokens?: number;
+  /** Set when planning failed and the run used a one-step plan instead. */
+  plan_fallback?: string;
   output?: string;
   result?: RunResult;
   error?: string;
@@ -92,6 +94,8 @@ export interface RunResultResponse {
   error?: string;
   tokens_used: number;
   token_budget: number;
+  /** Set when planning failed and the run used a one-step plan instead. */
+  plan_fallback?: string;
 }
 
 export interface SubmitRunRequest {
@@ -194,7 +198,8 @@ export class OrchestratorClient {
     });
   }
 
-  async health(): Promise<{ ok: boolean; planner: boolean }> {
+  /** planner/merger: on or off; llm: "boop" (Boop's Claude runtime) or "anthropic" (API key override). */
+  async health(): Promise<{ ok: boolean; planner: boolean; merger?: boolean; llm?: "boop" | "anthropic" | "" }> {
     return this.request("GET", "/healthz", undefined, 2_000);
   }
 

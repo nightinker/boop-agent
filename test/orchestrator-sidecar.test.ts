@@ -1,6 +1,7 @@
 import { execFileSync, type ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer as createHttpServer } from "node:http";
 import { createServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -133,7 +134,8 @@ function harness(over: Partial<SidecarOptions> & { goMissing?: boolean; buildFai
     baseUrl: "http://127.0.0.1:3460",
     health: async () => {
       if (!h.up.value) throw new Error("connection refused");
-      return { ok: true, planner: h.envs.at(-1)?.ANTHROPIC_API_KEY !== undefined };
+      // Like the real sidecar: planner and merger always on; the key only changes where calls go.
+      return { ok: true, planner: true, merger: true, llm: h.envs.at(-1)?.ANTHROPIC_API_KEY !== undefined ? "anthropic" : "boop" };
     },
   } as unknown as OrchestratorClient;
   h.sidecar = new OrchestratorSidecar({
@@ -215,15 +217,32 @@ describe("orchestrator sidecar supervisor", () => {
     await again.stop();
   });
 
-  it("starts without the key when it isn't stored and says it needs request_secret", async () => {
+  it("runs the planner and merger through Boop's Claude runtime when no key is stored", async () => {
     const h = harness();
     await h.sidecar.start();
     expect(h.envs[0].ANTHROPIC_API_KEY).toBeUndefined();
-    expect(h.logs.join("\n")).toContain('request_secret("ANTHROPIC_API_KEY")');
-    const text = formatSidecarStatus(h.sidecar.status());
+    expect(h.envs[0].BOOP_URL).toBe("http://127.0.0.1:3456");
+    expect(h.logs.join("\n")).not.toContain("request_secret");
+    expect(h.logs.join("\n")).toContain("planner and merger via Boop's Claude runtime");
+    const st = h.sidecar.status();
+    expect(st.lastHealth).toMatchObject({ ok: true, planner: true, merger: true, llm: "boop" });
+    const text = formatSidecarStatus(st);
     expect(text).toContain("running");
-    expect(text).toContain("not stored");
-    expect(text).toContain("request_secret");
+    expect(text).toContain("Planner and result merger: planner on, merger on, via Boop's own Claude runtime (no API key needed)");
+    expect(text).toContain("not stored, and not needed");
+    expect(text).not.toContain("request_secret");
+    expect(text).not.toMatch(/disabled|hand-written plans only/);
+    await h.sidecar.stop();
+  });
+
+  it("reports the stored key as an optional override that sends calls to the Anthropic API", async () => {
+    const h = harness();
+    h.key.value = FAKE_KEY;
+    await h.sidecar.start();
+    const text = formatSidecarStatus(h.sidecar.status());
+    expect(text).toContain("via the Anthropic API (ANTHROPIC_API_KEY override)");
+    expect(text).toContain("optional override");
+    expect(text).not.toContain(FAKE_KEY);
     await h.sidecar.stop();
   });
 
@@ -313,9 +332,49 @@ async function freePort(): Promise<number> {
   return port;
 }
 
+/**
+ * Stands in for Boop's server so the real sidecar never reaches a live Boop:
+ * POST /orchestrator/complete echoes every URL in the prompt back as the
+ * "merged" answer (or fails when fail is set).
+ */
+async function startFakeBoop() {
+  const state = { completions: 0, fail: false };
+  const server = createHttpServer((req, res) => {
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", () => {
+      res.setHeader("content-type", "application/json");
+      if (req.url === "/orchestrator/integrations") {
+        res.end(JSON.stringify({ integrations: [] }));
+        return;
+      }
+      if (req.method !== "POST" || req.url !== "/orchestrator/complete") {
+        res.statusCode = 404;
+        res.end(JSON.stringify({ error: "not found" }));
+        return;
+      }
+      state.completions++;
+      if (state.fail) {
+        res.statusCode = 500;
+        res.end(JSON.stringify({ error: "Claude Code process exited with code 1" }));
+        return;
+      }
+      const prompt = (JSON.parse(body) as { messages: Array<{ content: string }> }).messages.map((m) => m.content).join("\n");
+      const urls = [...new Set(prompt.match(/https:\/\/\S+/g) ?? [])];
+      res.end(JSON.stringify({ text: `Merged: ${urls.join(" and ")}`, usage: { inputTokens: 100, outputTokens: 20 } }));
+    });
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+  return Object.assign(state, {
+    url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+    close: () => new Promise<void>((r) => server.close(() => r())),
+  });
+}
+
 describe.skipIf(!hasGo())("orchestrator sidecar for real", () => {
   it("builds the binary, runs it, passes the self-test and stops it", async () => {
     const port = await freePort();
+    const fakeBoop = await startFakeBoop();
     const logs: string[] = [];
     const stateDir = tmp();
     const sidecar = new OrchestratorSidecar({
@@ -323,7 +382,8 @@ describe.skipIf(!hasGo())("orchestrator sidecar for real", () => {
       stateDir,
       url: `http://127.0.0.1:${port}`,
       env: { PATH: process.env.PATH, HOME: process.env.HOME },
-      getApiKey: async () => null, // no key: the merge falls back to joining, no model call
+      getApiKey: async () => null, // no key: the merger calls back to Boop (the fake below), never a real model
+      boopUrl: fakeBoop.url,
       log: (m) => logs.push(m),
       healthIntervalMs: 500,
     });
@@ -332,11 +392,18 @@ describe.skipIf(!hasGo())("orchestrator sidecar for real", () => {
       const st = sidecar.status();
       expect(st.state, logs.join("\n")).toBe("running");
       expect(existsSync(st.binary)).toBe(true);
-      expect(st.lastHealth).toMatchObject({ ok: true, planner: false });
+      expect(st.lastHealth).toMatchObject({ ok: true, planner: true, merger: true, llm: "boop" });
 
       const test = await sidecar.selfTest({ maxWaitMs: 20_000 });
       expect(test.ok, test.detail).toBe(true);
-      expect(test.method).toBe("fallback");
+      expect(test.method).toBe("llm");
+      expect(fakeBoop.completions).toBe(1);
+
+      // Boop's runtime failing: the self-test still passes, joined without the model.
+      fakeBoop.fail = true;
+      const failed = await sidecar.selfTest({ maxWaitMs: 20_000 });
+      expect(failed.ok, failed.detail).toBe(true);
+      expect(failed.method).toBe("fallback");
       expect(formatSidecarStatus(sidecar.status())).toContain("Last self-test: 0s ago, passed");
 
       const pid = st.pid!;
@@ -345,6 +412,7 @@ describe.skipIf(!hasGo())("orchestrator sidecar for real", () => {
       expect(readFileSync(st.logFile, "utf8")).toContain("orchestrator listening on");
     } finally {
       await sidecar.stop();
+      await fakeBoop.close();
     }
   }, 180_000);
 });

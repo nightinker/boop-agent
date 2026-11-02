@@ -22,10 +22,14 @@ import {
 // won't start is logged once and Boop carries on without the orchestrator
 // tools. Nothing in this file throws out of start().
 //
-// The planner and merger need ANTHROPIC_API_KEY. It comes only from Boop's
-// secret store (the Mac's Keychain), never from Boop's own environment or
-// chat, and is handed to the child in its environment at spawn time. It is
-// never logged or returned: status only says whether it's present.
+// The planner, llm agent and result merger are on whenever the sidecar runs:
+// by default their model calls come back to Boop (POST /orchestrator/complete)
+// and run through Boop's own Claude runtime, so no API key is needed.
+// ANTHROPIC_API_KEY is an optional override: when the secret store (the Mac's
+// Keychain) has it, it's handed to the child in its environment at spawn time
+// and the sidecar calls the Anthropic API directly. It's never read from
+// Boop's own environment or chat, never logged and never returned: status only
+// says whether it's present.
 
 export const SIDECAR_KEY_NAME = "ANTHROPIC_API_KEY";
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -47,10 +51,15 @@ export type SidecarState =
   | "failed"
   | "stopped";
 
+/** Where the sidecar's planner and merger send model calls ("" = no model). */
+export type OrchestratorLlm = "boop" | "anthropic" | "";
+
 export interface HealthRecord {
   at: number;
   ok: boolean;
   planner?: boolean;
+  merger?: boolean;
+  llm?: OrchestratorLlm;
   error?: string;
 }
 
@@ -72,7 +81,7 @@ export interface SidecarStatus {
   pid: number | null;
   binary: string;
   logFile: string;
-  /** ANTHROPIC_API_KEY is stored in the secret store (the value is never exposed). */
+  /** The optional ANTHROPIC_API_KEY override is stored in the secret store (the value is never exposed). */
   keyPresent: boolean;
   /** The sidecar it's running was started with the key. */
   keyPassed: boolean;
@@ -219,6 +228,18 @@ function ago(ms: number, now: number): string {
   return `${Math.round(s / 3600)}h ago`;
 }
 
+/** Says whether the planner and merger are on, and which model path they use. */
+export function describeModelUse(h: HealthRecord | null): string {
+  if (!h || !h.ok) return "unknown until the sidecar answers.";
+  const parts = [h.planner ? "planner on" : "planner off", h.merger === false ? "merger off" : h.merger ? "merger on" : null]
+    .filter(Boolean)
+    .join(", ");
+  if (h.llm === "boop") return `${parts}, via Boop's own Claude runtime (no API key needed). If a model call fails, runs fall back to a one-step plan and results are joined without the model.`;
+  if (h.llm === "anthropic") return `${parts}, via the Anthropic API (${SIDECAR_KEY_NAME} override).`;
+  if (!h.planner) return `${parts}: only hand-written plans work and results are joined without the model.`;
+  return `${parts}.`;
+}
+
 /** The plain answer to "is the orchestrator working?". */
 export function formatSidecarStatus(st: SidecarStatus, now: number = Date.now()): string {
   const up = st.lastHealth?.ok === true;
@@ -233,21 +254,20 @@ export function formatSidecarStatus(st: SidecarStatus, now: number = Date.now())
   lines.push(`Tools: ${up ? "on" : "off"}.`);
   if (st.lastHealth) {
     lines.push(
-      `Last health check: ${ago(st.lastHealth.at, now)}, ${st.lastHealth.ok ? `ok${st.lastHealth.planner === false ? " (planner off)" : st.lastHealth.planner ? " (planner on)" : ""}` : `failed${st.lastHealth.error ? ` (${st.lastHealth.error})` : ""}`}.`,
+      `Last health check: ${ago(st.lastHealth.at, now)}, ${st.lastHealth.ok ? "ok" : `failed${st.lastHealth.error ? ` (${st.lastHealth.error})` : ""}`}.`,
     );
   } else {
     lines.push("Last health check: none yet.");
   }
+  lines.push(`Planner and result merger: ${describeModelUse(st.lastHealth)}`);
   if (st.keyPresent) {
     lines.push(
       st.keyPassed || st.state === "external"
-        ? `${SIDECAR_KEY_NAME}: stored in the Keychain${st.state === "external" ? "" : " and passed to the sidecar"}; planner and result merger available.`
-        : `${SIDECAR_KEY_NAME}: stored in the Keychain, but the running sidecar started without it (it picks it up on its next restart).`,
+        ? `${SIDECAR_KEY_NAME}: stored in the Keychain (optional override)${st.state === "external" ? "" : " and passed to the sidecar"}, so the planner and merger call the Anthropic API directly.`
+        : `${SIDECAR_KEY_NAME}: stored in the Keychain, but the running sidecar started without it; until its next restart the planner and merger use Boop's Claude runtime.`,
     );
   } else {
-    lines.push(
-      `${SIDECAR_KEY_NAME}: not stored. Only hand-written plans work and results are joined without the model. To turn on the planner and merger, call request_secret("${SIDECAR_KEY_NAME}") and send the owner the link; the sidecar restarts with it once it's saved.`,
-    );
+    lines.push(`${SIDECAR_KEY_NAME}: not stored, and not needed (the planner and merger use Boop's own Claude runtime). It's only an optional override.`);
   }
   if (st.restarts) lines.push(`Restarts since boot: ${st.restarts}.`);
   if (st.lastExit) lines.push(`Last exit: ${ago(st.lastExit.at, now)} (${st.lastExit.signal ? `signal ${st.lastExit.signal}` : `code ${st.lastExit.code}`}).`);
@@ -571,17 +591,15 @@ export class OrchestratorSidecar {
     const key = await this.readKey();
     this.keyPresent = key !== null;
     this.keyFingerprint = key ? createHash("sha256").update(key).digest("hex") : null;
-    if (!key && this.restarts === 0) {
-      this.log(
-        `[orchestrator] ${SIDECAR_KEY_NAME} isn't in the secret store: starting without the planner and result merger (hand-written plans only). Ask the owner for it with request_secret("${SIDECAR_KEY_NAME}")`,
-      );
+    if (key && this.restarts === 0) {
+      this.log(`[orchestrator] ${SIDECAR_KEY_NAME} is in the secret store: the planner and merger will call the Anthropic API with it instead of Boop's Claude runtime`);
     }
     await this.rotateLog();
     this.state = this.restarts > 0 ? "restarting" : "starting";
     const fd = openSync(this.logFile, "a");
     let child: ChildProcess;
     try {
-      writeSync(fd, `${new Date(this.now()).toISOString()} [boop] starting sidecar on ${this.addr} (planner key ${key ? "present" : "absent"})\n`);
+      writeSync(fd, `${new Date(this.now()).toISOString()} [boop] starting sidecar on ${this.addr} (planner and merger via ${key ? "the Anthropic API" : "Boop's Claude runtime"})\n`);
       child = (this.opts.spawn ?? spawn)(this.binary, [], {
         cwd: this.stateDir,
         env: sidecarEnv({ addr: this.addr, boopUrl: this.boopUrl(), apiKey: key, base: this.env }),
@@ -613,7 +631,7 @@ export class OrchestratorSidecar {
     while (this.child === child && this.now() < deadline) {
       if (await this.checkHealth()) {
         this.state = "running";
-        this.log(`[orchestrator] sidecar running on ${this.url} (pid ${child.pid}${this.lastHealth?.planner ? ", planner on" : ", no planner: hand-written plans only"}); orchestrator tools on`);
+        this.log(`[orchestrator] sidecar running on ${this.url} (pid ${child.pid}${this.lastHealth?.planner ? `, planner and merger via ${this.lastHealth.llm === "anthropic" ? "the Anthropic API" : "Boop's Claude runtime"}` : ", no planner: hand-written plans only"}); orchestrator tools on`);
         return;
       }
       await sleep(250);
@@ -708,7 +726,13 @@ export class OrchestratorSidecar {
     try {
       const h = await this.client.health();
       const ok = h?.ok !== false;
-      this.lastHealth = { at, ok, planner: h?.planner === true };
+      this.lastHealth = {
+        at,
+        ok,
+        planner: h?.planner === true,
+        ...(typeof h?.merger === "boolean" ? { merger: h.merger } : {}),
+        ...(h?.llm === "boop" || h?.llm === "anthropic" || h?.llm === "" ? { llm: h.llm } : {}),
+      };
       recordOrchestratorHealth(ok, at);
       return ok;
     } catch (err) {

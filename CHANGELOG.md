@@ -8,6 +8,15 @@ Format:
 
 ---
 
+## Unreleased — Orchestrator planner and merger use Boop's Claude runtime
+
+- Changed: the Go orchestrator sidecar's planner, `llm` agent and result merger no longer need `ANTHROPIC_API_KEY`. Their model calls go back to Boop over a new local endpoint, `POST /orchestrator/complete`, which runs the prompt through Boop's own runtime (the Claude Agent SDK, signed in with the Claude account already logged in on the Mac) with no tools, and returns the text and token usage. They're on by default whenever the sidecar runs. The calls show up in the usage log as `orchestrator`.
+- Changed: `ANTHROPIC_API_KEY` is now an optional override. When it's in the secret store the sidecar calls the Anthropic API directly, as before. Boop no longer says the key is missing or offers `request_secret` for it.
+- Changed: `orchestrator_health`, `GET /orchestrator/sidecar` and the dashboard's Orchestrator tab report the planner and merger as on and say how they reach the model ("via Boop's own Claude runtime" or "via the Anthropic API"), instead of "disabled without key". The sidecar's `/healthz` now returns `merger` and `llm` (`"boop"` or `"anthropic"`) next to `planner`.
+- Added: if planning fails (Boop unreachable, model error, usage limit, a bad plan twice), the run goes ahead with a one-step plan that gives the whole task to one Boop sub-agent, instead of failing. The result says so (`plan_fallback`) and `run_orchestration` tells the dispatcher. A failed merge still falls back to joining the step results.
+- Changed: the planner's tokens now count against the run's token budget, and the merger's output limit (sized to what's left of the budget) is passed to the model, since Boop's runtime can't cap output itself.
+- Changed: the `usageRecords.source` validator gains `"orchestrator"` (a Convex schema change; push it with `npx convex dev` or `npx convex deploy`). Until it's pushed, recording these calls fails quietly and the calls still work.
+
 ## Unreleased — Self-build checks use the branch's own dependencies
 
 - Fixed: self-build checks could fail even when every test passed. A build's worktree borrowed the running app's `node_modules`, which can be missing packages `origin/main` added since the app last installed (e.g. `@edge-runtime/vm` for `convex/memoryEmbeddings.test.ts`), so vitest exited with an unhandled "Cannot find package" error. The worktree now borrows `node_modules` only when it has every package in the branch's `package.json`, and otherwise runs its own `npm ci` (rechecked before the checks, in case the build added packages). It never installs into the running app's `node_modules`.

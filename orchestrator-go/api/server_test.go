@@ -206,3 +206,30 @@ func TestTokenAuth(t *testing.T) {
 }
 
 func toJSON(v any) string { b, _ := json.Marshal(v); return string(b) }
+
+func TestHealthzReportsPlannerMergerAndLLM(t *testing.T) {
+	m := engine.NewManager(engine.Config{
+		Agents:  []engine.Agent{echoAgent{}},
+		Planner: &plan.Planner{LLM: &llm.Mock{Replies: []llm.MockReply{{Text: plannerReply}}}},
+		Merger:  mergerFunc(nil),
+		LLM:     "boop",
+	})
+	srv := httptest.NewServer((&Server{Manager: m}).Handler())
+	defer srv.Close()
+	code, body := do(t, "GET", srv.URL+"/healthz", nil, "")
+	if code != http.StatusOK || body["planner"] != true || body["merger"] != true || body["llm"] != "boop" {
+		t.Fatalf("%d %v", code, body)
+	}
+
+	bare, _ := newServer(t, "", false)
+	_, body = do(t, "GET", bare.URL+"/healthz", nil, "")
+	if body["planner"] != false || body["merger"] != false || body["llm"] != "" {
+		t.Fatalf("%v", body)
+	}
+}
+
+type mergerFunc func(ctx context.Context, in engine.MergeInput) (engine.MergeOutput, error)
+
+func (f mergerFunc) Merge(ctx context.Context, in engine.MergeInput) (engine.MergeOutput, error) {
+	return f(ctx, in)
+}

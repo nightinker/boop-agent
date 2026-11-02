@@ -404,6 +404,19 @@ describe("Orchestrator page", () => {
     expect(html).toContain("next in 8s");
   });
 
+  it("shows the planner and merger on via Boop's Claude runtime with no key stored", () => {
+    const sidecar = sidecarView(
+      status({ keyPresent: false, keyPassed: false, lastHealth: { at: NOW - 1_000, ok: true, planner: true, merger: true, llm: "boop" } }),
+      NOW,
+    );
+    expect(sidecar).toMatchObject({ planner: true, merger: true, llm: "boop", keyPresent: false });
+    const html = renderToStaticMarkup(createElement(OrchestratorView, { isDark: false, now: NOW, overview: overview({ sidecar }), selectedId: null }));
+    expect(html).toContain('data-llm="boop"');
+    expect(html).toContain("Boop&#x27;s Claude runtime");
+    expect(html).toContain("Not stored (optional; not needed)");
+    expect(html).not.toContain("hand-written plans only");
+  });
+
   it("shows health, key presence (never a value), the log and the run list", () => {
     const html = renderToStaticMarkup(createElement(OrchestratorView, { isDark: false, now: NOW, overview: overview(), selectedId: "run_0123456789abcdef" }));
     expect(html).toContain('data-sidecar-health="running"');
