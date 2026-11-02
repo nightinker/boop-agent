@@ -623,6 +623,9 @@ const RESTART_RESULT_WAIT_MS = 3 * 60_000;
  * build.
  */
 export async function resumeSelfBuilds(opts: { startQueued?: boolean } = {}): Promise<void> {
+  // Builds run on the Mac. A copy that can't build (a server) never ran the
+  // ones marked coding, so restarting it interrupted nothing: leave them be.
+  if (!sourceDir()) return;
   try {
     const recent = await convex.query(api.selfBuilds.recent, { limit: 10 });
     // The restart script writes its result only after this server answers

@@ -729,13 +729,29 @@ function pipeOutput(stream, shouldIngest = () => true) {
   });
 }
 
-function runBootstrap(command, args) {
+// One `convex dev --once` can hang for many minutes on a connection that
+// stays open but stops moving data (flaky hotel or café Wi-Fi). Each attempt
+// gets this long; a stuck one is stopped and counts as a failed attempt.
+const CONVEX_SYNC_ATTEMPT_TIMEOUT_MS = 75_000;
+
+function runBootstrap(command, args, { timeoutMs } = {}) {
   return new Promise((resolve, reject) => {
-    bootstrapProcess = spawn(command, args, {
+    const child = spawn(command, args, {
       cwd: runtimeRoot,
       env: childEnv(),
       stdio: ["ignore", "pipe", "pipe"],
     });
+    bootstrapProcess = child;
+    let timedOut = false;
+    const timer = timeoutMs
+      ? setTimeout(() => {
+          timedOut = true;
+          writeStartupLog(`[electron] ${command} ${args.join(" ")} did not finish in ${Math.round(timeoutMs / 1000)}s; stopping it`);
+          child.kill("SIGTERM");
+          setTimeout(() => child.exitCode === null && child.signalCode === null && child.kill("SIGKILL"), 5000).unref();
+        }, timeoutMs)
+      : null;
+    child.on("exit", () => timer && clearTimeout(timer));
     pipeOutput(bootstrapProcess.stdout);
     pipeOutput(bootstrapProcess.stderr);
     bootstrapProcess.on("error", (error) => {
@@ -747,7 +763,13 @@ function runBootstrap(command, args) {
       if (code === 0) {
         resolve();
       } else {
-        reject(new Error(`${command} ${args.join(" ")} exited with code ${code}`));
+        reject(
+          new Error(
+            timedOut
+              ? `${command} ${args.join(" ")} timed out after ${Math.round(timeoutMs / 1000)}s`
+              : `${command} ${args.join(" ")} exited with code ${code}`,
+          ),
+        );
       }
     });
   });
@@ -780,7 +802,10 @@ async function syncConvexRuntime(isSuperseded = () => false) {
   });
   startupPhase("convex sync: started");
   const result = await retryWithBackoff(
-    () => runBootstrap(convex.cmd, [...convex.args, "dev", "--once", "--typecheck=disable"]),
+    () =>
+      runBootstrap(convex.cmd, [...convex.args, "dev", "--once", "--typecheck=disable"], {
+        timeoutMs: CONVEX_SYNC_ATTEMPT_TIMEOUT_MS,
+      }),
     {
       budgetMs: hasGenerated ? CONVEX_SYNC_BUDGET_WITH_GENERATED_MS : CONVEX_SYNC_BUDGET_FIRST_RUN_MS,
       shouldStop: () => intentionalStop || isSuperseded(),
