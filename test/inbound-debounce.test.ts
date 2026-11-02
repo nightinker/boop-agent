@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   combineInbound,
+  contactMatchKey,
   createInboundQueue,
   debounceMsFromEnv,
   maxTypingHoldMsFromEnv,
@@ -139,7 +140,7 @@ describe("inbound queue with a quiet period", () => {
     release();
   });
 
-  it("waits while the sender is typing, then restarts the quiet period", async () => {
+  it("typing extends the quiet period, then answers 5s after the last signal", async () => {
     const { store } = memoryInboundStore();
     const worker = recorder();
     const queue = createInboundQueue({
@@ -147,13 +148,14 @@ describe("inbound queue with a quiet period", () => {
       process: worker.process,
       log: quiet,
       debounceMs: 5_000,
-      maxTypingWaitMs: 30_000,
+      maxTypingWaitMs: 15_000,
     });
 
     await queue.enqueue(text("a", "one"));
     await vi.advanceTimersByTimeAsync(3_000);
     queue.noteTyping("sms:a", true);
-    await vi.advanceTimersByTimeAsync(20_000);
+    await vi.advanceTimersByTimeAsync(4_000);
+    // 7s after the text, 4s after typing: still waiting.
     expect(worker.turns).toHaveLength(0);
 
     queue.noteTyping("sms:a", false);
@@ -164,22 +166,46 @@ describe("inbound queue with a quiet period", () => {
     expect(worker.turns.map((t) => t.content)).toEqual(["one"]);
   });
 
-  it("stops waiting on a typing signal that never ends", async () => {
+  it("logs hold start, extend and flush", async () => {
     const { store } = memoryInboundStore();
-    const worker = recorder();
+    const lines: string[] = [];
     const queue = createInboundQueue({
       store,
-      process: worker.process,
-      log: quiet,
+      process: async () => undefined,
+      log: { ...quiet, log: (line: string) => void lines.push(line) },
       debounceMs: 5_000,
-      maxTypingWaitMs: 30_000,
+    });
+
+    await queue.enqueue(text("+15551234567", "one"));
+    queue.noteTyping("sms:+15551234567", true);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await settle();
+    expect(lines[0]).toMatch(/hold started/);
+    expect(lines[1]).toMatch(/hold extended .*typing/);
+    expect(lines[2]).toMatch(/\] flush for/);
+    // Phone numbers stay out of the logs.
+    expect(lines.join("\n")).not.toContain("5551234567");
+  });
+
+  it("logs a max-hold flush when the cap cuts the wait short", async () => {
+    const { store } = memoryInboundStore();
+    const lines: string[] = [];
+    const queue = createInboundQueue({
+      store,
+      process: async () => undefined,
+      log: { ...quiet, log: (line: string) => void lines.push(line) },
+      debounceMs: 5_000,
+      maxTypingWaitMs: 15_000,
     });
 
     await queue.enqueue(text("a", "one"));
-    queue.noteTyping("sms:a", true);
-    await vi.advanceTimersByTimeAsync(30_000);
+    for (let i = 0; i < 4; i++) {
+      await vi.advanceTimersByTimeAsync(4_000);
+      queue.noteTyping("sms:a", true);
+    }
+    await vi.advanceTimersByTimeAsync(5_000);
     await settle();
-    expect(worker.turns.map((t) => t.content)).toEqual(["one"]);
+    expect(lines.at(-1)).toMatch(/max-hold flush .* after 15000ms/);
   });
 
   it("ignores typing when nothing is waiting", async () => {
@@ -263,7 +289,7 @@ describe("quiet period with Sendblue typing indicators", () => {
       process: worker.process,
       log: quiet,
       debounceMs: 5_000,
-      maxTypingWaitMs: 45_000,
+      maxTypingWaitMs: 15_000,
     });
     return { queue, rows, turns: worker.turns };
   }
@@ -271,10 +297,10 @@ describe("quiet period with Sendblue typing indicators", () => {
   it("holds the window open while the sender is typing", async () => {
     const { queue, turns } = typingQueue();
     await queue.enqueue(text("a", "one"), { service: "iMessage" });
-    await vi.advanceTimersByTimeAsync(2_000);
+    await vi.advanceTimersByTimeAsync(4_000);
     expect(queue.noteTyping("sms:a", true)).toBe("held");
-    // Well past the 5s quiet period: still holding.
-    await vi.advanceTimersByTimeAsync(30_000);
+    // Past the text's own 5s, but within 5s of the typing signal.
+    await vi.advanceTimersByTimeAsync(4_000);
     await settle();
     expect(turns).toHaveLength(0);
     expect(queue.isBusy()).toBe(true);
@@ -284,7 +310,7 @@ describe("quiet period with Sendblue typing indicators", () => {
     const { queue, turns } = typingQueue();
     await queue.enqueue(text("a", "one"), { service: "iMessage" });
     queue.noteTyping("sms:a", true);
-    await vi.advanceTimersByTimeAsync(10_000);
+    await vi.advanceTimersByTimeAsync(3_000);
     expect(queue.noteTyping("sms:a", false)).toBe("restarted");
     await vi.advanceTimersByTimeAsync(4_999);
     expect(turns).toHaveLength(0);
@@ -293,11 +319,11 @@ describe("quiet period with Sendblue typing indicators", () => {
     expect(turns.map((t) => t.content)).toEqual(["one"]);
   });
 
-  it("a new text while typing ends the hold and restarts the 5s window", async () => {
+  it("a new text while typing restarts the 5s window", async () => {
     const { queue, turns } = typingQueue();
     await queue.enqueue(text("a", "one"));
     queue.noteTyping("sms:a", true);
-    await vi.advanceTimersByTimeAsync(8_000);
+    await vi.advanceTimersByTimeAsync(3_000);
     await queue.enqueue(text("a", "two"));
     await vi.advanceTimersByTimeAsync(4_999);
     expect(turns).toHaveLength(0);
@@ -306,12 +332,13 @@ describe("quiet period with Sendblue typing indicators", () => {
     expect(turns.map((t) => t.content)).toEqual(["one\ntwo"]);
   });
 
-  it("answers once the max hold passes if is_typing=false never arrives", async () => {
+  it("a typing start with no stop event holds only one more quiet period", async () => {
     const { queue, turns } = typingQueue();
     await queue.enqueue(text("a", "one"));
     await vi.advanceTimersByTimeAsync(1_000);
     queue.noteTyping("sms:a", true);
-    await vi.advanceTimersByTimeAsync(44_999);
+    // is_typing=false never arrives.
+    await vi.advanceTimersByTimeAsync(4_999);
     expect(turns).toHaveLength(0);
     await vi.advanceTimersByTimeAsync(1);
     await settle();
@@ -319,19 +346,96 @@ describe("quiet period with Sendblue typing indicators", () => {
     expect(queue.isBusy()).toBe(false);
   });
 
-  it("repeated is_typing=true signals don't push the max hold out", async () => {
+  it("repeated is_typing=true signals can't hold past the 15s max", async () => {
     const { queue, turns } = typingQueue();
     await queue.enqueue(text("a", "one"));
-    queue.noteTyping("sms:a", true);
-    for (let i = 0; i < 8; i++) {
-      await vi.advanceTimersByTimeAsync(5_000);
+    for (let i = 0; i < 3; i++) {
+      await vi.advanceTimersByTimeAsync(4_000);
       queue.noteTyping("sms:a", true);
     }
-    // 40s in: still holding; the cap is counted from the first signal.
+    // 12s in; the next 5s would end at 17s, but the cap is 15s.
+    await vi.advanceTimersByTimeAsync(2_999);
     expect(turns).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(1);
+    await settle();
+    expect(turns.map((t) => t.content)).toEqual(["one"]);
+  });
+
+  it("a steady stream of texts and typing is still answered within 15s", async () => {
+    const { queue, turns } = typingQueue();
+    await queue.enqueue(text("a", "t0"));
+    for (let i = 1; i <= 4; i++) {
+      await vi.advanceTimersByTimeAsync(2_000);
+      queue.noteTyping("sms:a", true);
+      await vi.advanceTimersByTimeAsync(2_000);
+      await queue.enqueue(text("a", `t${i}`));
+    }
+    // 16s of constant activity: the first batch went out at 15s.
+    await settle();
+    expect(turns.map((t) => t.content)).toEqual(["t0\nt1\nt2\nt3"]);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await settle();
+    expect(turns.map((t) => t.content)).toEqual(["t0\nt1\nt2\nt3", "t4"]);
+  });
+
+  it("matches typing for the same number written differently", async () => {
+    const { queue, turns } = typingQueue();
+    await queue.enqueue(text("+15551234567", "one"), { service: "iMessage" });
+    await vi.advanceTimersByTimeAsync(4_000);
+    expect(queue.noteTyping("sms:15551234567", true)).toBe("held");
+    expect(queue.noteTyping("sms:(555) 123-4567", true)).toBe("held");
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(turns).toHaveLength(0);
+    expect(queue.noteTyping("sms:555.123.4567", false)).toBe("restarted");
+    await vi.advanceTimersByTimeAsync(5_000);
+    await settle();
+    // Answered once, under the conversation the text came in on.
+    expect(turns.map((t) => [t.conversationId, t.content])).toEqual([["sms:+15551234567", "one"]]);
+    expect(queue.isBusy()).toBe(false);
+  });
+
+  it("typing for a different number never holds a waiting text", async () => {
+    const { queue, turns } = typingQueue();
+    await queue.enqueue(text("+15551234567", "one"));
+    expect(queue.noteTyping("sms:+15559876543", true)).toBe("ignored");
     await vi.advanceTimersByTimeAsync(5_000);
     await settle();
     expect(turns.map((t) => t.content)).toEqual(["one"]);
+  });
+
+  it("retries a flush whose store call failed instead of leaving texts held", async () => {
+    const { store } = memoryInboundStore();
+    const worker = recorder();
+    const claimQueued = store.claimQueued.bind(store);
+    let failures = 1;
+    store.claimQueued = async (id) => {
+      if (failures-- > 0) throw new Error("network down");
+      return claimQueued(id);
+    };
+    const queue = createInboundQueue({ store, process: worker.process, log: quiet, debounceMs: 5_000, retryDelayMs: 1_000 });
+    await queue.enqueue(text("a", "one"));
+    await vi.advanceTimersByTimeAsync(5_000);
+    await settle();
+    expect(worker.turns).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await settle();
+    expect(worker.turns.map((t) => t.content)).toEqual(["one"]);
+  });
+
+  it("answers a text whose save outlasted the hold", async () => {
+    const { store } = memoryInboundStore();
+    const worker = recorder();
+    const enqueue = store.enqueue.bind(store);
+    store.enqueue = async (input) => {
+      await new Promise((resolve) => setTimeout(resolve, 6_000));
+      return enqueue(input);
+    };
+    const queue = createInboundQueue({ store, process: worker.process, log: quiet, debounceMs: 5_000 });
+    const saved = queue.enqueue(text("a", "slow"));
+    await vi.advanceTimersByTimeAsync(6_000);
+    await saved;
+    await settle();
+    expect(worker.turns.map((t) => t.content)).toEqual(["slow"]);
   });
 
   it("ignores typing from a number with nothing waiting", async () => {
@@ -391,13 +495,23 @@ describe("quiet period with Sendblue typing indicators", () => {
 });
 
 describe("quiet period helpers", () => {
-  it("reads BOOP_MAX_TYPING_HOLD_MS with a 60s default", () => {
-    expect(maxTypingHoldMsFromEnv(undefined)).toBe(60_000);
-    expect(maxTypingHoldMsFromEnv(" ")).toBe(60_000);
-    expect(maxTypingHoldMsFromEnv("30000")).toBe(30_000);
+  it("reads BOOP_MAX_TYPING_HOLD_MS with a 15s default that's also the ceiling", () => {
+    expect(maxTypingHoldMsFromEnv(undefined)).toBe(15_000);
+    expect(maxTypingHoldMsFromEnv(" ")).toBe(15_000);
+    expect(maxTypingHoldMsFromEnv("10000")).toBe(10_000);
+    expect(maxTypingHoldMsFromEnv("60000")).toBe(15_000);
     expect(maxTypingHoldMsFromEnv("0")).toBe(0);
-    expect(maxTypingHoldMsFromEnv("soon")).toBe(60_000);
-    expect(maxTypingHoldMsFromEnv("-5")).toBe(60_000);
+    expect(maxTypingHoldMsFromEnv("soon")).toBe(15_000);
+    expect(maxTypingHoldMsFromEnv("-5")).toBe(15_000);
+  });
+
+  it("matches a contact across number formats", () => {
+    const key = contactMatchKey("sms:+15551234567");
+    expect(contactMatchKey("sms:15551234567")).toBe(key);
+    expect(contactMatchKey("sms:5551234567")).toBe(key);
+    expect(contactMatchKey("sms:+1 (555) 123-4567")).toBe(key);
+    expect(contactMatchKey("sms:+15559876543")).not.toBe(key);
+    expect(contactMatchKey("sms:Someone@Example.com")).toBe("someone@example.com");
   });
 
   it("only iMessage (or an unstated service) supports typing", () => {
@@ -437,5 +551,7 @@ describe("quiet period helpers", () => {
     });
     expect(typingFromSendblue({ number: "+15551234567", is_typing: false })?.isTyping).toBe(false);
     expect(typingFromSendblue({ content: "hi", from_number: "+1555" })).toBeNull();
+    // A real text carrying is_typing is a text, not a typing hint.
+    expect(typingFromSendblue({ number: "+15551234567", is_typing: false, content: "hi", message_handle: "m1" })).toBeNull();
   });
 });

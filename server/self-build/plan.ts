@@ -300,7 +300,7 @@ export const ROLLBACK_LOG_LINES = 50;
 
 export function rollbackMessage(input: { buildId: string; logPath?: string; logTail?: string; healthTimeoutSec?: number }): string {
   const lines = [
-    `Build ${input.buildId} didn't start properly${input.healthTimeoutSec ? ` (no health check answer within ${input.healthTimeoutSec}s)` : ""}, so I rolled back to the previous version. The code is still merged; ask me to look into it.`,
+    `The new build didn't start${input.healthTimeoutSec ? ` (no health check within ${input.healthTimeoutSec}s)` : ""}, so I rolled back. The code is still merged; ask me to look into it.`,
   ];
   if (input.logPath) {
     lines.push("", `Startup log: ${input.logPath}`);

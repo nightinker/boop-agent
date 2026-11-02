@@ -131,4 +131,18 @@ describe("Sendblue webhook with the inbound queue", () => {
     expect(await stopped.json()).toEqual({ ok: true, typing: true, outcome: "restarted" });
     await vi.waitFor(() => expect(memory.current!.rows.find((r) => r.handle === "t1")?.status).toBe("done"));
   });
+
+  it("matches a typing event that writes the number differently", async () => {
+    await post({ ...textFrom("t2", "format test"), from_number: "+15553334444", service: "iMessage" });
+    // Same contact without the "+": still applies to the waiting text.
+    const res = await post({ number: "15553334444", is_typing: true });
+    expect(await res.json()).toEqual({ ok: true, typing: true, outcome: "held" });
+    await vi.waitFor(() => expect(memory.current!.rows.find((r) => r.handle === "t2")?.status).toBe("done"));
+  });
+
+  it("queues a text that also carries is_typing instead of swallowing it", async () => {
+    const res = await post({ ...textFrom("t3", "real text"), from_number: "+15556667777", is_typing: false });
+    expect(await res.json()).toEqual({ ok: true });
+    await vi.waitFor(() => expect(memory.current!.rows.find((r) => r.handle === "t3")?.status).toBe("done"));
+  });
 });

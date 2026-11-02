@@ -8,6 +8,15 @@ Format:
 
 ---
 
+## Unreleased — Replies can't get stuck behind "typing…"
+
+- Fixed: after the typing indicator shipped, a "started typing" with no matching "stopped typing" could hold your texts for up to a minute (longer with retries and the poller), so replies seemed to stop. Now every text or typing signal only restarts the 5s quiet period, and every wait has a hard cap of 15s from your first waiting text that nothing can push out. `BOOP_MAX_TYPING_HOLD_MS` defaults to 15s and can't go higher.
+- Fixed: typing events are matched to your waiting texts by phone digits, so `+15551234567`, `15551234567` and `(555) 123-4567` are the same person.
+- Fixed: a Sendblue message that also carries `is_typing` is queued as a text instead of being dropped as a typing hint.
+- Fixed: if the database is briefly unreachable when a wait ends, Boop retries the flush a few times instead of leaving the texts for the poller; a text whose save outlasted the wait is answered right after it's saved.
+- Added: `[inbound]` log lines for hold started, hold extended, flush and max-hold flush (phone numbers hidden).
+- Changed: ship and restart texts are shorter and no longer include the build ID ("Build merged. Restarting now, back in a minute.").
+
 ## Unreleased — Wait while you're typing
 
 - Added: a dedicated `POST /sendblue/typing` route for Sendblue's `typing_indicator` webhook (the old `/sendblue/webhook` URL still accepts them). Junk or failing typing events are acknowledged and ignored; they can never break the webhook or hold up a reply.
