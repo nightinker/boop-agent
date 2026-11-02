@@ -10,6 +10,7 @@ import { getFunctionName } from "convex/server";
 const queryResults = new Map<string, unknown>();
 vi.mock("convex/react", () => ({
   useQuery: (ref: any) => queryResults.get(getFunctionName(ref)),
+  useConvex: () => ({ query: async (ref: any) => queryResults.get(getFunctionName(ref)) }),
   useMutation: () => async () => undefined,
   useAction: () => async () => undefined,
 }));

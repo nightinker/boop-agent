@@ -86,13 +86,16 @@ async function readAgents(
   demoOnly: boolean,
 ) {
   const limit = args.limit ?? 50;
+  // Read a few more rows than asked for (demo rows are filtered out below),
+  // not the whole table: a live dashboard query re-runs on every agent write.
+  const scan = Math.min(DEMO_SCAN_LIMIT, limit * 2 + 50);
   const rows = args.status
     ? await ctx.db
         .query("executionAgents")
         .withIndex("by_status", (q) => q.eq("status", args.status!))
         .order("desc")
-        .take(DEMO_SCAN_LIMIT)
-    : await ctx.db.query("executionAgents").order("desc").take(DEMO_SCAN_LIMIT);
+        .take(scan)
+    : await ctx.db.query("executionAgents").order("desc").take(scan);
   return rows.filter((agent) => isDemoId(agent.agentId) === demoOnly).slice(0, limit);
 }
 
@@ -157,5 +160,25 @@ export const getLogsForDashboard = query({
       .withIndex("by_agent", (q) => q.eq("agentId", args.agentId))
       .order("asc")
       .take(args.limit ?? 500);
+  },
+});
+
+/**
+ * How many agents are running, for the dashboard's sidebar badge. Reads only
+ * running and spawned agents through the status index, not the whole table.
+ */
+export const activeCount = query({
+  args: {},
+  handler: async (ctx) => {
+    const demoOnly = await isDemoModeEnabled(ctx);
+    let count = 0;
+    for (const status of ["running", "spawned"] as const) {
+      const rows = await ctx.db
+        .query("executionAgents")
+        .withIndex("by_status", (q) => q.eq("status", status))
+        .take(200);
+      count += rows.filter((agent) => isDemoId(agent.agentId) === demoOnly).length;
+    }
+    return count;
   },
 });

@@ -210,7 +210,9 @@ async function setStatus(
   }
 }
 
-const ACTIVITY_FLUSH_MS = 3_000;
+// Every save re-runs the live dashboard queries that read this build, so
+// batch activity lines instead of writing one every few seconds.
+const ACTIVITY_FLUSH_MS = 15_000;
 const activityLogs = new Map<string, { text?: string; timer?: ReturnType<typeof setTimeout> }>();
 
 /**

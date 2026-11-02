@@ -31,13 +31,9 @@ const BUILD_REFRESH_MS = 15_000;
 
 export type BuildLister = () => Promise<{ buildId: string; status: string; createdAt?: number }[]>;
 
-const listBuilds: BuildLister = async () => {
-  const [recent, queued] = await Promise.all([
-    convex.query(api.selfBuilds.recent, { limit: 20 }),
-    convex.query(api.selfBuilds.queued, {}),
-  ]);
-  return [...recent, ...queued];
-};
+// Only queued and running builds, without their text, so the 15s poll reads
+// a few small rows instead of the last 20 builds in full.
+const listBuilds: BuildLister = () => convex.query(api.selfBuilds.inProgress, {});
 
 /**
  * Returns a function that reads the builds in progress and hands them to the

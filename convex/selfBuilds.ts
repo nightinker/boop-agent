@@ -200,3 +200,23 @@ export const forDashboard = query({
     return { recent, queued };
   },
 });
+
+/**
+ * Builds queued or running, with only what a badge or the keep-awake check
+ * needs. Reads just those rows through the status index instead of the recent
+ * builds' full text (requests, summaries, logs), so polling it stays cheap.
+ */
+export const inProgress = query({
+  args: {},
+  handler: async (ctx) => {
+    const rows = [];
+    for (const status of [...ACTIVE, "queued"] as const) {
+      const builds = await ctx.db
+        .query("selfBuilds")
+        .withIndex("by_status_and_createdAt", (q) => q.eq("status", status))
+        .take(50);
+      for (const b of builds) rows.push({ buildId: b.buildId, status: b.status, createdAt: b.createdAt });
+    }
+    return rows;
+  },
+});

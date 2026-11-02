@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { useQuery } from "convex/react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
   Activity01Icon,
@@ -12,6 +11,7 @@ import {
   WorkflowCircle03Icon,
 } from "@hugeicons/core-free-icons";
 import { api } from "../../../convex/_generated/api.js";
+import { usePolledQuery } from "../lib/usePolledQuery.js";
 import { keepAwakePillLabel, keepAwakeTone, useKeepAwake } from "./KeepAwake.js";
 
 type TimeRange = "all" | "7d" | "30d" | "90d";
@@ -102,7 +102,9 @@ function plural(n: number, singular: string, pluralLabel = `${singular}s`) {
 
 export function DashboardPanel({ isDark }: { isDark: boolean }) {
   const { status: keepAwake } = useKeepAwake();
-  const data = useQuery(api.dashboard.metrics, {}) as DashboardMetrics | undefined;
+  // These stats scan thousands of messages, memories and usage rows. A live
+  // query re-ran that on every message, so refresh every 5 minutes instead.
+  const data = usePolledQuery(api.dashboard.metrics, {}, 5 * 60_000) as DashboardMetrics | undefined;
   const [range, setRange] = useState<TimeRange>("all");
 
   const filtered = useMemo(() => {
