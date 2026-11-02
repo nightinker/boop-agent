@@ -149,3 +149,45 @@ export function failureDetails(
 export function prNumber(prUrl: string): string | null {
   return prUrl.match(/\/pull\/(\d+)/)?.[1] ?? null;
 }
+
+/** Status filters for the Self-builds page, in the order the tabs show. */
+export type SelfBuildFilter =
+  | "all"
+  | "running"
+  | "queued"
+  | "pr_open"
+  | "shipped"
+  | "failed"
+  | "rolled_back"
+  | "cancelled";
+
+export const SELF_BUILD_FILTERS: { id: SelfBuildFilter; label: string; empty: string }[] = [
+  { id: "all", label: "All", empty: "No self-builds yet." },
+  { id: "running", label: "Running", empty: "Nothing is building right now." },
+  { id: "queued", label: "Queued", empty: "Nothing is waiting in the queue." },
+  { id: "pr_open", label: "PR open", empty: "No builds are waiting on a PR." },
+  { id: "shipped", label: "Shipped", empty: "No shipped builds in this list." },
+  { id: "failed", label: "Failed", empty: "No failed builds in this list." },
+  { id: "rolled_back", label: "Rolled back", empty: "No rolled-back builds in this list." },
+  { id: "cancelled", label: "Cancelled", empty: "No cancelled builds in this list." },
+];
+
+/** Whether a build belongs under a filter. "Running" covers every active step. */
+export function matchesFilter(status: SelfBuildStatus, filter: SelfBuildFilter): boolean {
+  if (filter === "all") return true;
+  if (filter === "running") return isActive(status);
+  return status === filter;
+}
+
+export function filterBuilds<T extends Pick<SelfBuildRow, "status">>(builds: T[], filter: SelfBuildFilter): T[] {
+  return filter === "all" ? builds : builds.filter((b) => matchesFilter(b.status, filter));
+}
+
+/** How many builds each filter would show. */
+export function filterCounts(builds: Pick<SelfBuildRow, "status">[]): Record<SelfBuildFilter, number> {
+  const counts = Object.fromEntries(SELF_BUILD_FILTERS.map((f) => [f.id, 0])) as Record<SelfBuildFilter, number>;
+  for (const build of builds) {
+    for (const { id } of SELF_BUILD_FILTERS) if (matchesFilter(build.status, id)) counts[id]++;
+  }
+  return counts;
+}

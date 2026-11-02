@@ -5,9 +5,12 @@ import {
   dashboardBuilds,
   elapsedMs,
   failureDetails,
+  filterBuilds,
+  filterCounts,
   formatAgo,
   formatDuration,
   prNumber,
+  SELF_BUILD_FILTERS,
   STATUS_META,
   type SelfBuildRow,
   type SelfBuildStatus,
@@ -111,5 +114,62 @@ describe("self-build activity log", () => {
     expect(describeToolUse("Grep", { pattern: "selfBuilds" })).toBe("Grep: selfBuilds");
     expect(describeToolUse("mcp__boop-self-build__list_self_builds", {})).toBe("list_self_builds");
     expect(describeToolUse("TodoWrite", null)).toBe("TodoWrite");
+  });
+});
+
+describe("self-build status filter", () => {
+  const rows = [
+    build("c", "coding", 1),
+    build("t", "testing", 2),
+    build("q", "queued", 3),
+    build("p", "pr_open", 4),
+    build("s", "shipped", 5),
+    build("f", "failed", 6),
+    build("r", "rolled_back", 7),
+    build("x", "cancelled", 8),
+  ];
+
+  it("offers All first, then a tab for every status group", () => {
+    expect(SELF_BUILD_FILTERS.map((f) => f.label)).toEqual([
+      "All",
+      "Running",
+      "Queued",
+      "PR open",
+      "Shipped",
+      "Failed",
+      "Rolled back",
+      "Cancelled",
+    ]);
+  });
+
+  it("filters by status, grouping every active step under Running", () => {
+    expect(filterBuilds(rows, "all")).toBe(rows);
+    expect(filterBuilds(rows, "running").map((b) => b.buildId)).toEqual(["c", "t"]);
+    expect(filterBuilds(rows, "queued").map((b) => b.buildId)).toEqual(["q"]);
+    expect(filterBuilds(rows, "failed").map((b) => b.buildId)).toEqual(["f"]);
+    expect(filterBuilds(rows, "rolled_back").map((b) => b.buildId)).toEqual(["r"]);
+    expect(filterBuilds([build("s", "shipped", 1)], "queued")).toEqual([]);
+  });
+
+  it("keeps the dashboard order inside a filter", () => {
+    const ordered = dashboardBuilds([build("q2", "queued", 20), build("s", "shipped", 30)], [build("q1", "queued", 10), build("q2", "queued", 20)]);
+    expect(filterBuilds(ordered, "queued").map((b) => [b.buildId, b.queuePosition])).toEqual([
+      ["q1", 1],
+      ["q2", 2],
+    ]);
+  });
+
+  it("counts every filter", () => {
+    expect(filterCounts(rows)).toEqual({
+      all: 8,
+      running: 2,
+      queued: 1,
+      pr_open: 1,
+      shipped: 1,
+      failed: 1,
+      rolled_back: 1,
+      cancelled: 1,
+    });
+    expect(filterCounts([]).all).toBe(0);
   });
 });
