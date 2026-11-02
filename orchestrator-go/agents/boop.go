@@ -63,6 +63,20 @@ type spawnResponse struct {
 	Result       string `json:"result"`
 	UsageLimited bool   `json:"usageLimited"`
 	Error        string `json:"error"`
+	Usage        *struct {
+		InputTokens  int `json:"inputTokens"`
+		OutputTokens int `json:"outputTokens"`
+	} `json:"usage"`
+}
+
+// tokens is what the sub-agent's run is charged against the run's budget:
+// fresh input plus output tokens. Cache reads and writes aren't charged until
+// token calibration lands (they'd swamp the cost-hint estimates).
+func (s spawnResponse) tokens() int {
+	if s.Usage == nil {
+		return 0
+	}
+	return max(s.Usage.InputTokens, 0) + max(s.Usage.OutputTokens, 0)
 }
 
 // BridgeError is a sub-agent failure reported by Boop.
@@ -90,7 +104,11 @@ func (b *Boop) Run(ctx context.Context, in engine.Input) (engine.Output, error) 
 	if in.Task.Title != "" {
 		name = in.Task.Title
 	}
-	body, err := json.Marshal(spawnRequest{Task: TaskText(in), Integrations: integrations, Name: name, ConversationID: b.ConversationID})
+	conversationID := in.ConversationID
+	if conversationID == "" {
+		conversationID = b.ConversationID
+	}
+	body, err := json.Marshal(spawnRequest{Task: TaskText(in), Integrations: integrations, Name: name, ConversationID: conversationID})
 	if err != nil {
 		return engine.Output{}, engine.Permanent(err)
 	}
@@ -127,7 +145,7 @@ func (b *Boop) Run(ctx context.Context, in engine.Input) (engine.Output, error) 
 	}
 	switch out.Status {
 	case "completed":
-		return engine.Output{Text: out.Result}, nil
+		return engine.Output{Text: out.Result, Tokens: out.tokens()}, nil
 	case "cancelled":
 		if ctx.Err() != nil {
 			return engine.Output{}, ctx.Err()
@@ -138,9 +156,9 @@ func (b *Boop) Run(ctx context.Context, in engine.Input) (engine.Output, error) 
 		err := &BridgeError{AgentID: out.AgentID, Status: "failed", Message: firstNonEmpty(out.Result, out.Error, "no details")}
 		if out.UsageLimited {
 			// The model's spend limit: retrying now just fails again.
-			return engine.Output{}, engine.Permanent(err)
+			return engine.Output{Tokens: out.tokens()}, engine.Permanent(err)
 		}
-		return engine.Output{}, err
+		return engine.Output{Tokens: out.tokens()}, err
 	default:
 		return engine.Output{}, fmt.Errorf("Boop answered with unknown status %q", out.Status)
 	}

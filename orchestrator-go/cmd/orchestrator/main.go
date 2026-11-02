@@ -21,6 +21,7 @@ import (
 	"boop-agent/orchestrator/api"
 	"boop-agent/orchestrator/engine"
 	"boop-agent/orchestrator/llm"
+	"boop-agent/orchestrator/merge"
 	"boop-agent/orchestrator/plan"
 )
 
@@ -50,7 +51,7 @@ func run() error {
 	flag.Parse()
 
 	token := os.Getenv("ORCHESTRATOR_TOKEN")
-	if err := checkExposure(*addr, token); err != nil {
+	if err := checkExposure(*addr); err != nil {
 		return err
 	}
 
@@ -58,10 +59,12 @@ func run() error {
 	registered := []engine.Agent{boop, agents.Join{}, agents.Echo{}}
 
 	var planner engine.Planner
+	var merger engine.Merger
 	provider, err := llm.NewAnthropicFromEnv()
 	if err != nil {
-		log.Printf("planner and llm agent disabled: %v (plans can still be submitted)", err)
+		log.Printf("planner, llm agent and result merger disabled: %v (plans can still be submitted; results are joined without a model)", err)
 	} else {
+		merger = merge.LLM{Provider: provider}
 		registered = append(registered, agents.LLM{Provider: provider})
 		specs := make([]plan.AgentSpec, 0, len(registered))
 		for _, a := range registered {
@@ -75,6 +78,7 @@ func run() error {
 	m := engine.NewManager(engine.Config{
 		Agents:       registered,
 		Planner:      planner,
+		Merger:       merger,
 		Integrations: boop.Integrations,
 		Options:      engine.Options{MaxTokens: *maxTokens, MaxParallel: *maxParallel, MaxAttempts: *maxAttempts},
 	})
@@ -105,18 +109,20 @@ func run() error {
 	return m.Shutdown(shutdownCtx)
 }
 
-// checkExposure refuses to listen beyond loopback without a token: the API
-// can make Boop's sub-agents act on the owner's accounts.
-func checkExposure(addr, token string) error {
+// checkExposure refuses to listen anywhere but loopback, token or not: the
+// API can make Boop's sub-agents act on the owner's accounts, and only Boop
+// on the same Mac should reach it. ORCHESTRATOR_TOKEN adds a second check on
+// top, for other local processes.
+func checkExposure(addr string) error {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
 		return fmt.Errorf("bad -addr %q: %w", addr, err)
 	}
-	if token != "" || host == "localhost" {
+	if host == "localhost" {
 		return nil
 	}
 	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
 		return nil
 	}
-	return fmt.Errorf("refusing to listen on %s without ORCHESTRATOR_TOKEN; bind to 127.0.0.1 or set a token", addr)
+	return fmt.Errorf("refusing to listen on %s: the orchestrator only binds to localhost (use 127.0.0.1:<port>)", addr)
 }

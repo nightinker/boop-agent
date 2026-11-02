@@ -17,6 +17,7 @@ import { startConsolidationLoop } from "./consolidation.js";
 import { runCurator, startCuratorLoop } from "./skills/curator.js";
 import { availableIntegrations, cancelAgent, retryAgent, spawnExecutionAgent } from "./execution-agent.js";
 import { createOrchestratorBridgeRouter } from "./orchestrator-bridge.js";
+import { probeOrchestrator } from "./orchestrator-client.js";
 import { createComposioRouter } from "./composio-routes.js";
 import { ensureProactiveWatcher } from "./proactive-email.js";
 import { ensureSlackWatcher, sendSlackDigest, startSlackDigestLoop } from "./proactive-slack.js";
@@ -400,6 +401,9 @@ async function main() {
     console.log(`  sendblue    POST http://localhost:${port}/sendblue/webhook`);
     console.log(`  typing      POST http://localhost:${port}/sendblue/typing`);
     console.log(`  websocket   WS   ws://localhost:${port}/ws`);
+    // The Go orchestrator sidecar is optional: just log whether it's there.
+    // probeOrchestrator never throws, so a missing sidecar can't stop Boop.
+    void probeOrchestrator();
   });
 
   const signalExitCodes = { SIGTERM: 143, SIGINT: 130, SIGHUP: 129 } as const;

@@ -21,6 +21,9 @@ type Config struct {
 	Agents  []Agent
 	Options Options
 	Planner Planner // optional; without it only plans can be submitted
+	// Merger writes a run's final answer from its step outputs. Optional;
+	// without it the final steps' outputs are joined as they are.
+	Merger Merger
 	// Integrations lists what Boop's sub-agents can use, for checking submitted
 	// plans. Optional.
 	Integrations func(ctx context.Context) ([]string, error)
@@ -32,6 +35,8 @@ type Config struct {
 type Overrides struct {
 	MaxTokens   int `json:"max_tokens,omitempty"`
 	MaxParallel int `json:"max_parallel,omitempty"`
+	// ConversationID ties Boop sub-agents spawned by the run to a Boop conversation.
+	ConversationID string `json:"conversation_id,omitempty"`
 }
 
 // MaxParallelLimit caps a per-run max_parallel override.
@@ -125,7 +130,7 @@ func (m *Manager) SubmitPlan(ctx context.Context, p plan.Plan, o Overrides) (Run
 		return RunStatus{}, err
 	}
 	opts := m.options(o)
-	return m.start(func(rctx context.Context, r *Run) { execute(rctx, r, p, m.agents, opts) }, "",
+	return m.start(func(rctx context.Context, r *Run) { execute(rctx, r, p, m.agents, opts, m.cfg.Merger) }, "", o.ConversationID,
 		func(r *Run) { r.setPlan(p, opts.WithDefaults()) })
 }
 
@@ -148,14 +153,14 @@ func (m *Manager) SubmitTask(task string, o Overrides) (RunStatus, error) {
 			if rctx.Err() != nil {
 				state = RunCancelled
 			}
-			r.finish(state, "", "planning failed: "+err.Error())
+			r.finish(state, RunResult{Method: MergeNone}, "planning failed: "+err.Error())
 			return
 		}
-		execute(rctx, r, res.Plan, m.agents, opts)
-	}, task, nil)
+		execute(rctx, r, res.Plan, m.agents, opts, m.cfg.Merger)
+	}, task, o.ConversationID, nil)
 }
 
-func (m *Manager) start(work func(context.Context, *Run), task string, init func(*Run)) (RunStatus, error) {
+func (m *Manager) start(work func(context.Context, *Run), task, conversationID string, init func(*Run)) (RunStatus, error) {
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
@@ -164,6 +169,7 @@ func (m *Manager) start(work func(context.Context, *Run), task string, init func
 	rctx, cancel := context.WithCancel(m.base)
 	r := newRun(newID(), cancel)
 	r.status.Task = task
+	r.status.ConversationID = conversationID
 	if init != nil {
 		init(r)
 	}

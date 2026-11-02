@@ -7,8 +7,9 @@ Go-native agents and some with Boop's own TypeScript sub-agents (the same path
 
 Standard library only. The module path `boop-agent/orchestrator` is a placeholder.
 
-**Milestone 2 status:** planner, engine, bridge and HTTP API. Runs live in
-memory and are **lost on restart**; trace persistence is the next milestone.
+**Status:** Milestone 2 (planner, engine, bridge) and Milestone 3 (Boop ⇄
+sidecar HTTP API, result merger). Runs live in memory and are **lost on
+restart**; saved run traces are next.
 
 ## Run it
 
@@ -20,14 +21,14 @@ go run ./cmd/orchestrator            # listens on 127.0.0.1:3460
 
 | Setting | Default | |
 |---|---|---|
-| `-addr` / `ORCHESTRATOR_ADDR` | `127.0.0.1:3460` | Won't bind past loopback unless `ORCHESTRATOR_TOKEN` is set. |
+| `-addr` / `ORCHESTRATOR_ADDR` | `127.0.0.1:3460` | Localhost only: any other address is refused, token or not. |
 | `-boop-url` / `BOOP_URL` | `http://127.0.0.1:$PORT` (3456) | Boop's server, for the bridge. |
 | `-max-tokens` | `200000` | Token budget per run (0 = unlimited). |
 | `-max-parallel` | `2` | Tasks running at once per run. |
 | `-max-attempts` | `3` | Tries per task before it fails. |
-| `ANTHROPIC_API_KEY` | – | Turns on the planner and the `llm` agent. Without it you can still submit plans. |
-| `ORCHESTRATOR_MODEL` | `claude-opus-5-5` | Model for the planner and `llm` agent. |
-| `ORCHESTRATOR_TOKEN` | – | If set, every `/v1` call needs `Authorization: Bearer <token>`. |
+| `ANTHROPIC_API_KEY` | – | Turns on the planner, the `llm` agent and the result merger. Without it you can still submit plans; results are then joined without a model. |
+| `ORCHESTRATOR_MODEL` | `claude-opus-5-5` | Model for the planner, `llm` agent and merger. |
+| `ORCHESTRATOR_TOKEN` | – | If set, every `/v1` call needs `Authorization: Bearer <token>` (Boop sends it when the same variable is set for Boop). |
 
 ## API
 
@@ -44,14 +45,76 @@ curl -s localhost:3460/v1/runs -d '{"plan":{"goal":"…","tasks":[
    "scout":{"narrow":["subject:invoice","last 7 days"]}},
   {"id":"brief","agent":"llm","input":"Write a 3-line brief","depends_on":["mail"],"cost_hint":"low"}]}}'
 
-curl -s localhost:3460/v1/runs/<id>            # status
+curl -s localhost:3460/v1/runs/<id>                  # status + every step's state and output
+curl -s 'localhost:3460/v1/runs/<id>?wait=30'        # same, but waits up to 30s for the run to finish
+curl -s 'localhost:3460/v1/runs/<id>/result?wait=30' # the merged final answer
 curl -s -X POST localhost:3460/v1/runs/<id>/cancel
-curl -s localhost:3460/v1/runs                 # all runs in memory
-curl -s localhost:3460/v1/agents               # agents + Boop's integrations
+curl -s localhost:3460/v1/runs                       # all runs in memory
+curl -s localhost:3460/v1/agents                     # agents + Boop's integrations
 ```
 
-`POST /v1/runs` answers `202` with the run. A plan that fails validation gets
-`422` with a `problems` list. Asking for a task with no planner configured gets `503`.
+`POST /v1/runs` takes exactly one of `task` or `plan`, plus optional
+`max_tokens` (1–2,000,000), `max_parallel` (1–8) and `conversation_id` (Boop
+sub-agents spawned by the run are tied to that conversation). It answers
+`202` with the run.
+
+Errors are JSON `{"error": "..."}`:
+
+| Status | When |
+|---|---|
+| `400` | Empty or malformed body, unknown fields, both/neither of `task` and `plan`, out-of-range limits, a task over 20,000 characters, a bad run id. |
+| `401` | `ORCHESTRATOR_TOKEN` is set and the bearer token is missing or wrong. |
+| `404` | No such run (runs are lost when the sidecar restarts). |
+| `409` | Cancelling a run that already finished (the body has the run). |
+| `413` | Body over 1 MB. |
+| `422` | The plan fails validation; the body has a `problems` list. |
+| `503` | A `task` was sent but no planner is configured, or the sidecar is shutting down. |
+
+`GET /v1/runs/{id}/result` answers `202` with `"done": false` while the run is
+going and `200` once it's finished:
+
+```json
+{"id":"run_…","state":"SUCCEEDED","done":true,"tokens_used":14200,"token_budget":60000,
+ "result":{"answer":"…","method":"llm","sources":["https://…"],
+           "incomplete":[{"id":"cal","state":"FAILED","note":"…"}],"tokens":1800}}
+```
+
+`?wait=N` (up to 60 seconds) on a run's status or result holds the request
+until the run finishes or N seconds pass, so callers don't need to poll fast.
+
+## Result merger (report agent)
+
+Once every step has settled, the run is `MERGING` while the report agent
+writes the final answer from **all** step outputs (not just the last step's),
+using Claude:
+
+- **Sources:** every URL in any step's output is collected and kept verbatim.
+  The model is told to copy them exactly, and any URL missing from its answer
+  is added under a `Sources:` list afterwards, so none is lost or rewritten.
+- **Failed, blocked and skipped steps** are shown to the model with their
+  reason; it answers with what it has and says what's missing. They're also
+  listed in `result.incomplete`. A run with failures still gets a merged answer.
+- **Token budget:** the merge only uses what's left of the run's budget. It's
+  skipped if fewer than 2,000 tokens remain; otherwise the answer gets up to a
+  quarter of what's left (max 4,000) and long step outputs are cut to fit the
+  rest. Its real usage is added to `tokens_used`.
+- **Fallbacks** (`method`): `single` for one-step plans (no model call),
+  `fallback` when there's no API key, not enough budget, the merge failed or
+  the run was cancelled (the final steps' outputs joined, a "Not completed"
+  list, and the sources; `merge_error` says why), `none` when no step
+  produced anything.
+
+## Boop side
+
+- `server/orchestrator-client.ts` talks to this API: submit, status,
+  long-polled result, cancel. It only accepts a localhost `ORCHESTRATOR_URL`
+  (default `http://127.0.0.1:3460`) and sends `ORCHESTRATOR_TOKEN` if set.
+- On startup Boop checks once whether the sidecar is up and logs the answer.
+  **The sidecar is optional:** if it's down, Boop starts and works as before.
+- When the sidecar answered within the last minute, the dispatcher gets three
+  tools: `run_orchestration` (submit a task, wait for the merged answer),
+  `orchestration_status` and `cancel_orchestration`. Runs are tied to the
+  conversation they came from.
 
 ## Plans
 
@@ -80,8 +143,9 @@ problems back for one more try.
 - **Token budget:** before a task starts, its cost-hint estimate is reserved
   (low 2k, med 8k, high 24k). A task waits if running tasks hold the room it
   needs, and is **SKIPPED** if it can never fit. When an agent reports real
-  usage it's charged that, otherwise the estimate. (Boop's sub-agents don't
-  report usage over the bridge yet, so they're charged the estimate.)
+  usage it's charged that, otherwise the estimate. Boop's sub-agents report
+  their usage over the bridge; they're charged fresh input + output tokens
+  (cache reads/writes aren't charged until token calibration).
 - **Retries:** failures are retried with exponential backoff (500ms, doubling,
   max 10s). Permanent failures (bad request, spend limit, refusal, cancelled in
   Boop) aren't retried.

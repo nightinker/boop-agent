@@ -189,3 +189,24 @@ func TestTaskTextTruncatesLongDeps(t *testing.T) {
 		t.Fatal("not truncated")
 	}
 }
+
+func TestBoopBridgeReportsUsageAndConversation(t *testing.T) {
+	var got spawnRequest
+	b, _ := boopServer(t, func(w http.ResponseWriter, r *http.Request, body spawnRequest) {
+		got = body
+		_, _ = w.Write([]byte(`{"agentId":"agent_1","status":"completed","result":"ok","usage":{"inputTokens":1200,"outputTokens":300,"cacheReadTokens":90000}}`))
+	})
+	b.ConversationID = "fallback"
+	in := input()
+	in.ConversationID = "sms:run"
+	out, err := b.Run(context.Background(), in)
+	if err != nil || out.Tokens != 1500 {
+		t.Fatalf("out %+v err %v (cache reads aren't charged)", out, err)
+	}
+	if got.ConversationID != "sms:run" {
+		t.Fatalf("conversation %q", got.ConversationID)
+	}
+	if _, err := b.Run(context.Background(), input()); err != nil || got.ConversationID != "fallback" {
+		t.Fatalf("fallback conversation %q %v", got.ConversationID, err)
+	}
+}

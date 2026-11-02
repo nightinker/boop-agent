@@ -34,8 +34,10 @@ func (s TaskState) Terminal() bool { return s != TaskPending && s != TaskRunning
 type RunState string
 
 const (
-	RunPlanning  RunState = "PLANNING"
-	RunRunning   RunState = "RUNNING"
+	RunPlanning RunState = "PLANNING"
+	RunRunning  RunState = "RUNNING"
+	// RunMerging: every step has finished; the report agent is writing the final answer.
+	RunMerging   RunState = "MERGING"
 	RunSucceeded RunState = "SUCCEEDED" // every task succeeded or was skipped
 	RunFailed    RunState = "FAILED"    // planning failed, or a task failed or was blocked
 	RunCancelled RunState = "CANCELLED"
@@ -46,9 +48,11 @@ func (s RunState) Terminal() bool { return s == RunSucceeded || s == RunFailed |
 
 // Input is what an agent gets for one task.
 type Input struct {
-	RunID   string
-	Task    plan.Task
-	Attempt int
+	RunID string
+	// ConversationID is the Boop conversation the run was submitted from, if any.
+	ConversationID string
+	Task           plan.Task
+	Attempt        int
 	// Deps holds the output of each task this one depends on, in depends_on order.
 	Deps []DepOutput
 }
@@ -173,17 +177,19 @@ type TaskStatus struct {
 
 // RunStatus is a snapshot of a run.
 type RunStatus struct {
-	ID            string       `json:"id"`
-	State         RunState     `json:"state"`
-	Task          string       `json:"task,omitempty"` // the user task, when the run was planned from one
-	Plan          *plan.Plan   `json:"plan,omitempty"`
-	Tasks         []TaskStatus `json:"tasks"`
-	TokenBudget   int          `json:"token_budget"`
-	TokensUsed    int          `json:"tokens_used"`
-	PlannerTokens int          `json:"planner_tokens,omitempty"`
-	MaxParallel   int          `json:"max_parallel"`
-	Output        string       `json:"output,omitempty"` // outputs of the final (sink) tasks that succeeded
-	Error         string       `json:"error,omitempty"`
-	CreatedAt     time.Time    `json:"created_at"`
-	FinishedAt    *time.Time   `json:"finished_at,omitempty"`
+	ID             string       `json:"id"`
+	State          RunState     `json:"state"`
+	ConversationID string       `json:"conversation_id,omitempty"`
+	Task           string       `json:"task,omitempty"` // the user task, when the run was planned from one
+	Plan           *plan.Plan   `json:"plan,omitempty"`
+	Tasks          []TaskStatus `json:"tasks"`
+	TokenBudget    int          `json:"token_budget"`
+	TokensUsed     int          `json:"tokens_used"`
+	PlannerTokens  int          `json:"planner_tokens,omitempty"`
+	MaxParallel    int          `json:"max_parallel"`
+	Output         string       `json:"output,omitempty"` // the final answer (same as Result.Answer)
+	Result         *RunResult   `json:"result,omitempty"` // set once the run has finished
+	Error          string       `json:"error,omitempty"`
+	CreatedAt      time.Time    `json:"created_at"`
+	FinishedAt     *time.Time   `json:"finished_at,omitempty"`
 }
