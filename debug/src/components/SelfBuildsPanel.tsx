@@ -17,11 +17,15 @@ import {
   dashboardBuilds,
   elapsedMs,
   failureDetails,
+  filterBuilds,
+  filterCounts,
   formatAgo,
   formatDuration,
   isActive,
   isOngoing,
   prNumber,
+  SELF_BUILD_FILTERS,
+  type SelfBuildFilter,
   type SelfBuildRow,
   type StatusTone,
 } from "../lib/selfBuilds.js";
@@ -49,7 +53,15 @@ function useNow(ticking: boolean): number {
   return now;
 }
 
-export function SelfBuildsPanel({ isDark }: { isDark: boolean }) {
+export function SelfBuildsPanel({
+  isDark,
+  initialFilter = "all",
+}: {
+  isDark: boolean;
+  initialFilter?: SelfBuildFilter;
+}) {
+  // Lives outside the query, so live updates re-filter without resetting it.
+  const [filter, setFilter] = useState<SelfBuildFilter>(initialFilter);
   // Convex queries are live: rows update here as soon as the build writes them.
   const data = useQuery(api.selfBuilds.forDashboard, { limit: 25 }) as
     | { recent: SelfBuildRow[]; queued: SelfBuildRow[] }
@@ -59,6 +71,9 @@ export function SelfBuildsPanel({ isDark }: { isDark: boolean }) {
   const current = currentBuildId(builds);
   const activeCount = builds.filter((b) => isActive(b.status)).length;
   const queuedCount = builds.filter((b) => b.status === "queued").length;
+  const counts = filterCounts(builds);
+  const visible = filterBuilds(builds, filter);
+  const emptyMessage = SELF_BUILD_FILTERS.find((f) => f.id === filter)?.empty ?? "No builds match this filter.";
 
   return (
     <PanelPage
@@ -85,18 +100,67 @@ export function SelfBuildsPanel({ isDark }: { isDark: boolean }) {
         </EmptyState>
       ) : (
         <div className="space-y-3">
-          {builds.map((build) => (
-            <BuildCard
-              key={build.buildId}
-              build={build}
-              isDark={isDark}
-              now={now}
-              highlighted={build.buildId === current}
-            />
-          ))}
+          <FilterTabs isDark={isDark} filter={filter} counts={counts} onChange={setFilter} />
+          {visible.length === 0 ? (
+            <EmptyState isDark={isDark}>
+              {emptyMessage}{" "}
+              <button
+                type="button"
+                onClick={() => setFilter("all")}
+                className={`underline max-md:min-h-10 ${isDark ? "text-zinc-300" : "text-zinc-700"}`}
+              >
+                Show all builds
+              </button>
+            </EmptyState>
+          ) : (
+            visible.map((build) => (
+              <BuildCard
+                key={build.buildId}
+                build={build}
+                isDark={isDark}
+                now={now}
+                highlighted={build.buildId === current}
+              />
+            ))
+          )}
         </div>
       )}
     </PanelPage>
+  );
+}
+
+function FilterTabs({
+  isDark,
+  filter,
+  counts,
+  onChange,
+}: {
+  isDark: boolean;
+  filter: SelfBuildFilter;
+  counts: Record<SelfBuildFilter, number>;
+  onChange: (filter: SelfBuildFilter) => void;
+}) {
+  const active = isDark ? "bg-white/10 text-zinc-100" : "bg-zinc-900 text-white";
+  const idle = isDark
+    ? "text-zinc-400 hover:bg-white/5 hover:text-zinc-200"
+    : "text-zinc-500 hover:bg-zinc-100 hover:text-zinc-800";
+  return (
+    <div className="flex flex-wrap items-center gap-1" role="tablist" aria-label="Filter self-builds by status">
+      {SELF_BUILD_FILTERS.map((f) => (
+        <button
+          key={f.id}
+          type="button"
+          role="tab"
+          aria-selected={filter === f.id}
+          data-filter={f.id}
+          onClick={() => onChange(f.id)}
+          className={`rounded-xl px-2.5 py-1.5 text-xs font-medium max-md:min-h-10 ${filter === f.id ? active : idle}`}
+        >
+          {f.label}
+          <span className="ml-1 opacity-60">{counts[f.id]}</span>
+        </button>
+      ))}
+    </div>
   );
 }
 
