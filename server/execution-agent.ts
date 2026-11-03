@@ -27,6 +27,7 @@ import {
 import { OutboundImageCollector, type OutboundImage } from "./images/outbound.js";
 import { isUsageLimitError } from "./usage-limit.js";
 import { redactSecrets, redactSecretsDeep } from "./secrets/redact.js";
+import { WEBTEST_EXECUTION_PROMPT, WEBTEST_INTEGRATION } from "./webtest/tools.js";
 import {
   SECRETS_EXECUTION_PROMPT,
   SECRETS_NAMESPACE,
@@ -274,6 +275,7 @@ export async function spawnExecutionAgent(opts: SpawnExecutionAgentOpts): Promis
         EXECUTION_SYSTEM +
         (attachmentTools.length ? IMAGE_ATTACHMENTS_PROMPT : "") +
         SECRETS_EXECUTION_PROMPT +
+        (opts.integrations.includes(WEBTEST_INTEGRATION) ? WEBTEST_EXECUTION_PROMPT : "") +
         buildSkillsSection(skillIndex),
       claudeMcpServers: mcpServers,
       tools: runtimeTools,

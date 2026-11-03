@@ -17,6 +17,7 @@ import { COMPOSIO_ACCOUNT_INTEGRATION } from "./integrations/composio-account-lo
 import { createAutomationTools } from "./automation-tools.js";
 import { createDraftDecisionTools } from "./draft-tools.js";
 import { createSelfTools } from "./self-tools.js";
+import { WEBTEST_DISPATCHER_PROMPT, WEBTEST_INTEGRATION } from "./webtest/tools.js";
 import {
   SECRETS_DISPATCHER_ALLOWED_TOOLS,
   SECRETS_DISPATCHER_PROMPT,
@@ -214,6 +215,7 @@ sub-agent can open a visible local browser handoff window with browser_request_l
 For screenshots of a site in "mobile/iPhone/tablet/desktop view" or a custom
 size, spawn with ["browser"], name the device or size in the task, and ask the
 sub-agent to attach the screenshot as an image.
+${WEBTEST_DISPATCHER_PROMPT}
 
 Travel, reservations, and receipts:
 Flight, airport, boarding pass, itinerary, hotel, restaurant, ticket, order,
@@ -377,11 +379,26 @@ function explicitlyRequestsBrowser(content: string): boolean {
   return directBrowserIntent || (antiNative && browserMention);
 }
 
+/** "Test the staging site", "QA this flow", "e2e check": the headless webtest runner, not the local browser. */
+export function requestsWebTesting(content: string): boolean {
+  const normalized = content.toLowerCase().replace(/\s+/g, " ");
+  return (
+    /\b(?:e2e|end[- ]to[- ]end|smoke[- ]?tests?|qa|headless|test plans?|webtest|run_browser_test|browser_check)\b/.test(normalized) ||
+    /\btest(?:s|ing)? (?:the |my |our |this |a )?(?:staging|site|website|web ?app|flow|page|login|checkout|signup)\b/.test(normalized)
+  );
+}
+
 export function resolveSpawnIntegrations(
   requested: string[],
   available: string[],
   content: string,
 ): string[] {
+  if (
+    available.includes(WEBTEST_INTEGRATION) &&
+    (requested.includes(WEBTEST_INTEGRATION) || requestsWebTesting(content))
+  ) {
+    return requested.includes(WEBTEST_INTEGRATION) ? requested : [...requested, WEBTEST_INTEGRATION];
+  }
   if (available.includes("browser") && explicitlyRequestsBrowser(content)) {
     return ["browser"];
   }
@@ -592,7 +609,8 @@ export async function handleUserMessageWithAttachments(
   if (
     opts.kind !== "proactive" &&
     explicitlyRequestsBrowser(opts.content) &&
-    !integrations.includes("browser")
+    !integrations.includes("browser") &&
+    !(integrations.includes(WEBTEST_INTEGRATION) && requestsWebTesting(opts.content))
   ) {
     const reply =
       "Local browser use is off right now. Turn it on in Settings → Local browser use, then resend this and I can use Chrome on your machine.";
