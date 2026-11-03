@@ -9,6 +9,7 @@ import { convex } from "../convex-client.js";
 import { notifyConversation } from "../notify.js";
 import { getRuntimeConfig, type RuntimeConfig } from "../runtime-config.js";
 import { runAgentRuntime } from "../runtimes/index.js";
+import { redactBuildText, runCodingWithRetries, SECRET_ENV_NAME } from "./coding-run.js";
 import {
   appendActivity,
   branchName,
@@ -31,7 +32,7 @@ import {
   startupLogName,
   tail,
 } from "./plan.js";
-import { CANCELLABLE, formatBuildList, queuedMessage, shipBlocker } from "./queue.js";
+import { CANCELLABLE, formatBuildList, queuedMessage, RETRYABLE, shipBlocker } from "./queue.js";
 import { restartCommand } from "../keep-awake.js";
 import { syncBuildWakeLock } from "../keep-awake-routes.js";
 
@@ -209,7 +210,7 @@ export function codingEnv(env: NodeJS.ProcessEnv = realNodeEnv()): Record<string
   const clean: Record<string, string> = {};
   for (const [key, value] of Object.entries(env)) {
     if (value === undefined) continue;
-    if (/KEY|SECRET|TOKEN|PASSWORD|CREDENTIAL|SENDBLUE|CONVEX|COMPOSIO|DATABASE_URL|PUBLIC_URL/i.test(key)) continue;
+    if (SECRET_ENV_NAME.test(key) || /PUBLIC_URL/i.test(key)) continue;
     clean[key] = value;
   }
   return clean;
@@ -226,15 +227,20 @@ async function codingRuntime(): Promise<RuntimeConfig> {
 }
 
 function notify(conversationId: string, text: string): Promise<void> {
-  return notifyConversation(conversationId, text, "self_build");
+  return notifyConversation(conversationId, redactBuildText(text), "self_build");
 }
 
 async function setStatus(
   buildId: string,
   patch: Omit<Parameters<typeof convex.mutation<typeof api.selfBuilds.update>>[1], "buildId">,
 ) {
+  const redacted = { ...patch };
+  for (const key of ["summary", "error", "testOutput", "startupLogTail"] as const) {
+    const value = redacted[key];
+    if (typeof value === "string") redacted[key] = redactBuildText(value);
+  }
   try {
-    await convex.mutation(api.selfBuilds.update, { buildId, ...patch });
+    await convex.mutation(api.selfBuilds.update, { buildId, ...redacted });
   } finally {
     // Take or release the build's wake lock right away, not at the next poll.
     syncBuildWakeLock();
@@ -253,7 +259,7 @@ const activityLogs = new Map<string, { text?: string; timer?: ReturnType<typeof 
 function noteActivity(buildId: string, entry: string, opts: { flush?: boolean } = {}): Promise<void> {
   const log = activityLogs.get(buildId) ?? {};
   activityLogs.set(buildId, log);
-  log.text = appendActivity(log.text, entry);
+  log.text = appendActivity(log.text, redactBuildText(entry));
   const write = async () => {
     log.timer = undefined;
     await convex.mutation(api.selfBuilds.update, { buildId, activity: log.text }).catch(() => undefined);
@@ -271,7 +277,11 @@ function refuseUnlessOwner(conversationId: string): string | null {
   return "Only Boop's owner can change Boop's code. Add your number to BOOP_OWNER_NUMBERS in .env.local to allow it.";
 }
 
-export async function startSelfBuild(input: { conversationId: string; request: string }): Promise<string> {
+export async function startSelfBuild(input: {
+  conversationId: string;
+  request: string;
+  retryOf?: string;
+}): Promise<string> {
   const refused = refuseUnlessOwner(input.conversationId);
   if (refused) return refused;
   const src = sourceDir();
@@ -283,6 +293,7 @@ export async function startSelfBuild(input: { conversationId: string; request: s
       buildId,
       conversationId: input.conversationId,
       request: input.request,
+      ...(input.retryOf ? { retryOf: input.retryOf } : {}),
       forceQueue: true,
     });
     return `I'm running on the server right now, and builds happen on your Mac. I queued this as build ${buildId} (#${slot.position} in line); your Mac starts it as soon as it's back online, and I'll text you then.`;
@@ -293,12 +304,13 @@ export async function startSelfBuild(input: { conversationId: string; request: s
     buildId,
     conversationId: input.conversationId,
     request: input.request,
+    ...(input.retryOf ? { retryOf: input.retryOf } : {}),
   });
   syncBuildWakeLock();
   if (slot.status === "queued") {
     return queuedMessage({ buildId, position: slot.position, blockedBy: slot.blockedBy });
   }
-  launchBuild({ ...input, buildId, src });
+  launchBuild({ conversationId: input.conversationId, request: input.request, buildId, src });
   return `Started build ${buildId}. I'm coding it on its own branch and will text you the PR when it's ready (usually 5–30 minutes).`;
 }
 
@@ -365,34 +377,39 @@ async function runBuild(input: {
   const started = Date.now();
   let summary = "";
   try {
-    const result = await runAgentRuntime(runtimeConfig, {
-      prompt: codingPrompt(input.request),
-      systemPrompt:
-        "You are a careful senior engineer extending Boop, a personal agent, in its own repository. Work only inside the current directory.",
-      tools: [],
-      mode: "execution",
-      cwd: worktree,
-      env: codingEnv(),
-      abortController: abort,
-      onToolUse: (toolName, toolInput) => noteActivity(buildId, describeToolUse(toolName, toolInput, worktree)),
-    });
-    summary = result.text.trim();
-    const usage = result.usage;
-    await convex
-      .mutation(api.usageRecords.record, {
-        source: "self-build",
-        conversationId: input.conversationId,
-        runtime: runtimeConfig.runtime,
-        billingMode: runtimeConfig.billingMode,
-        model: usage.model,
-        inputTokens: usage.inputTokens,
-        outputTokens: usage.outputTokens,
-        cacheReadTokens: usage.cacheReadTokens,
-        cacheCreationTokens: usage.cacheCreationTokens,
-        costUsd: usage.costUsd,
-        durationMs: Date.now() - started,
-      })
-      .catch(() => undefined);
+    ({ summary } = await runCodingWithRetries(
+      {
+        prompt: codingPrompt(input.request),
+        systemPrompt:
+          "You are a careful senior engineer extending Boop, a personal agent, in its own repository. Work only inside the current directory.",
+        tools: [],
+        mode: "execution",
+        cwd: worktree,
+        env: codingEnv(),
+        abortController: abort,
+        onToolUse: (toolName, toolInput) => noteActivity(buildId, describeToolUse(toolName, toolInput, worktree)),
+      },
+      {
+        run: (request) => runAgentRuntime(runtimeConfig, request),
+        onRetry: (notice) => noteActivity(buildId, notice, { flush: true }),
+        recordUsage: async (usage) => {
+          await convex.mutation(api.usageRecords.record, {
+            source: "self-build",
+            conversationId: input.conversationId,
+            buildId,
+            runtime: runtimeConfig.runtime,
+            billingMode: runtimeConfig.billingMode,
+            model: usage.model,
+            inputTokens: usage.inputTokens,
+            outputTokens: usage.outputTokens,
+            cacheReadTokens: usage.cacheReadTokens,
+            cacheCreationTokens: usage.cacheCreationTokens,
+            costUsd: usage.costUsd,
+            durationMs: Date.now() - started,
+          });
+        },
+      },
+    ));
   } finally {
     clearTimeout(timer);
     running.delete(buildId);
@@ -408,7 +425,7 @@ async function runBuild(input: {
   const dirty = await must("git", ["status", "--porcelain"], { cwd: worktree });
   if (dirty.trim()) {
     await must("git", ["add", "-A", "--", ".", ":!node_modules", ":!.env*"], { cwd: worktree });
-    await must("git", ["commit", "-m", `feat: ${input.request.slice(0, 72)}`], { cwd: worktree });
+    await must("git", ["commit", "-m", redactBuildText(`feat: ${input.request.slice(0, 72)}`)], { cwd: worktree });
   }
   const ahead = Number((await must("git", ["rev-list", "--count", "origin/main..HEAD"], { cwd: worktree })).trim());
   if (!ahead) throw new Error("The coding run finished without changing anything.");
@@ -441,9 +458,9 @@ async function runBuild(input: {
         "--head",
         branch,
         "--title",
-        `Boop self-build: ${input.request.slice(0, 60)}`,
+        redactBuildText(`Boop self-build: ${input.request.slice(0, 60)}`),
         "--body",
-        prBody({ request: input.request, summary, testsPassed, testOutput, checks }),
+        redactBuildText(prBody({ request: input.request, summary, testsPassed, testOutput, checks })),
       ],
       { cwd: worktree },
     )
@@ -455,6 +472,29 @@ async function runBuild(input: {
   await noteActivity(buildId, `PR open: ${prUrl}`, { flush: true });
   await setStatus(buildId, { status: "pr_open", prUrl, testsPassed, testOutput: testOutput.slice(0, 8000) });
   await notify(input.conversationId, readyMessage({ buildId, summary, prUrl, testsPassed, checks }));
+}
+
+/**
+ * Starts a failed, cancelled or rolled-back build again: same request, a new
+ * build id and a fresh worktree off the latest main (queued if another build
+ * is running). The new build records which one it re-runs.
+ */
+export async function retrySelfBuild(input: { conversationId: string; buildId?: string }): Promise<string> {
+  const refused = refuseUnlessOwner(input.conversationId);
+  if (refused) return refused;
+  const build = input.buildId
+    ? await convex.query(api.selfBuilds.get, { buildId: input.buildId })
+    : (await convex.query(api.selfBuilds.recent, { limit: 10 })).find((b) => RETRYABLE.includes(b.status));
+  if (!build) return input.buildId ? `There's no build ${input.buildId}.` : "There's no failed or cancelled build to retry.";
+  if (!RETRYABLE.includes(build.status)) {
+    return `Build ${build.buildId} is ${build.status}; only failed, cancelled or rolled-back builds can be retried.`;
+  }
+  const started = await startSelfBuild({
+    conversationId: input.conversationId,
+    request: build.request,
+    retryOf: build.buildId,
+  });
+  return `Retrying build ${build.buildId}. ${started}`;
 }
 
 export async function cancelSelfBuild(input: { conversationId: string; buildId?: string }): Promise<string> {

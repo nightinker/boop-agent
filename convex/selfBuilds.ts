@@ -45,6 +45,8 @@ export const enqueue = mutation({
     buildId: v.string(),
     conversationId: v.string(),
     request: v.string(),
+    // The build this one re-runs (Retry).
+    retryOf: v.optional(v.string()),
     // Always queue, even if nothing is building: used when the copy taking
     // the request can't build (a server), so the Mac starts it later.
     forceQueue: v.optional(v.boolean()),

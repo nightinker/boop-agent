@@ -151,6 +151,7 @@ describe("spawnExecutionAgent auto-retry", () => {
     expect(res.status).toBe("failed");
     expect(mocks.runAgentRuntime).toHaveBeenCalledTimes(4);
     expect(lastUpdate().error).toBe("TypeError: fetch failed (after 3 automatic retries)");
+    expect(res.autoRetries).toBe(3);
   });
 
   it("never re-runs from scratch after a tool ran without a session to resume", async () => {

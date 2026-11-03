@@ -160,6 +160,8 @@ export function createOrchestratorBridgeRouter(deps: OrchestratorBridgeDeps): ex
         status: result.status,
         result: result.result,
         ...(result.usageLimited ? { usageLimited: true } : {}),
+        // A failure after the sub-agent's own retries: the sidecar shouldn't retry again.
+        ...(result.autoRetries ? { autoRetries: result.autoRetries } : {}),
         // The sidecar charges these to the run's token budget.
         ...(result.usage ? { usage: result.usage } : {}),
       });

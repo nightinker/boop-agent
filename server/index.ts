@@ -47,7 +47,13 @@ import { startImageCleanup } from "./images/clean.js";
 import { isPublicServerRequest, isTrustedLocalRequest } from "./local-access.js";
 import { accessConfigFromEnv, isAccessAuthenticatedRequest } from "./cloudflare-access.js";
 import { mountDashboard } from "./dashboard.js";
-import { installMissedUpdates, resumeSelfBuilds, startNextQueuedBuild } from "./self-build/run.js";
+import {
+  cancelSelfBuild,
+  installMissedUpdates,
+  resumeSelfBuilds,
+  retrySelfBuild,
+  startNextQueuedBuild,
+} from "./self-build/run.js";
 import { instanceIdentity, isActiveInstance, resolvePublicUrl, startInstanceCoordinator } from "./instance.js";
 import type { Id } from "../convex/_generated/dataModel.js";
 import { networkHealth, probeNetwork } from "./network-health.js";
@@ -359,6 +365,25 @@ async function main() {
     }
     res.json(result);
   });
+
+  // Dashboard Retry / Cancel on a self-build. They act as the conversation the
+  // build came from, so the owner check and the progress texts are the same as
+  // asking Boop in chat.
+  for (const action of ["retry", "cancel"] as const) {
+    app.post(`/self-builds/:id/${action}`, async (req, res) => {
+      const build = await convex.query(api.selfBuilds.get, { buildId: req.params.id });
+      if (!build) {
+        res.status(404).json({ error: "build not found" });
+        return;
+      }
+      const run = action === "retry" ? retrySelfBuild : cancelSelfBuild;
+      try {
+        res.json({ message: await run({ conversationId: build.conversationId, buildId: build.buildId }) });
+      } catch (err) {
+        res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+      }
+    });
+  }
 
   // Chat endpoint for local testing and the debug dashboard
   app.post("/chat", async (req, res) => {

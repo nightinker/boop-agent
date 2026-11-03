@@ -25,6 +25,9 @@ interface BuildSummary {
 
 export const CANCELLABLE: BuildStatus[] = ["queued", "coding", "testing", "pr_open"];
 
+/** Builds that ended without shipping; Retry starts them again from a fresh worktree. */
+export const RETRYABLE: BuildStatus[] = ["failed", "cancelled", "rolled_back"];
+
 export function queuedMessage(input: {
   buildId: string;
   position: number;
