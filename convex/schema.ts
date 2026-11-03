@@ -161,6 +161,8 @@ export default defineSchema({
     turnId: v.optional(v.string()),
     agentId: v.optional(v.string()),
     runId: v.optional(v.string()),
+    // The self-build this usage belongs to.
+    buildId: v.optional(v.string()),
     runtime: v.optional(v.union(v.literal("claude"), v.literal("codex"))),
     billingMode: v.optional(v.union(v.literal("api"), v.literal("codex-subscription"))),
     model: v.string(),
@@ -491,6 +493,8 @@ export default defineSchema({
     startupLogTail: v.optional(v.string()),
     // Newest lines of what the build is doing, for the dashboard.
     activity: v.optional(v.string()),
+    // The build this one re-runs, when it was started with Retry.
+    retryOf: v.optional(v.string()),
     createdAt: v.number(),
     updatedAt: v.number(),
   })

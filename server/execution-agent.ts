@@ -189,6 +189,8 @@ export interface SpawnResult {
    * real answer. Background callers must not forward it to the user.
    */
   usageLimited?: boolean;
+  /** Automatic retries this run already made after dropped connections. */
+  autoRetries?: number;
   /** Tokens the agent's model calls used (the orchestrator charges these to its run budget). */
   usage?: {
     inputTokens: number;
@@ -460,6 +462,7 @@ export async function spawnExecutionAgent(opts: SpawnExecutionAgentOpts): Promis
     status,
     attachments,
     ...(usageLimited ? { usageLimited } : {}),
+    ...(attempt > 0 ? { autoRetries: attempt } : {}),
     usage: {
       inputTokens: usage.inputTokens,
       outputTokens: usage.outputTokens,

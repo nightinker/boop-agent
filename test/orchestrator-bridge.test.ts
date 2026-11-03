@@ -80,6 +80,22 @@ describe("orchestrator bridge route", () => {
     }
   });
 
+  it("tells the sidecar when the sub-agent already retried, so it doesn't retry again", async () => {
+    const { base, close } = await serve(async () => ({
+      agentId: "agent_3",
+      status: "failed",
+      result: "TypeError: fetch failed (after 3 automatic retries)",
+      attachments: [],
+      autoRetries: 3,
+    }));
+    try {
+      const res = await post(base, { task: "x", integrations: [] });
+      expect(await res.json()).toMatchObject({ status: "failed", autoRetries: 3 });
+    } finally {
+      await close();
+    }
+  });
+
   it("passes failures through, including usage limits", async () => {
     const { base, close } = await serve(async () => ({
       agentId: "agent_2",

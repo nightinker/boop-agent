@@ -188,15 +188,16 @@ describe("coding agent environment", () => {
 });
 
 describe("main agent tools", () => {
-  it("exposes start, list, ship and cancel, all allowed", () => {
+  it("exposes start, list, ship, retry and cancel, all allowed", () => {
     const tools = createSelfBuildTools("debug-test");
     expect(tools.map((t) => t.name)).toEqual([
       "start_self_build",
       "list_self_builds",
       "ship_self_build",
+      "retry_self_build",
       "cancel_self_build",
     ]);
-    expect(SELF_BUILD_ALLOWED_TOOLS).toHaveLength(4);
+    expect(SELF_BUILD_ALLOWED_TOOLS).toHaveLength(5);
   });
 });
 

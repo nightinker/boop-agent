@@ -2,6 +2,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { useQuery } from "convex/react";
 import { api } from "../../../convex/_generated/api.js";
 import { BrailleIndicator } from "../lib/branding.js";
+import { canCancelBuild, canRetryBuild, requestBuildAction } from "../lib/selfBuildActions.js";
 import {
   EmptyState,
   HeaderPill,
@@ -222,6 +223,13 @@ function BuildCard({
           <span className="text-[11px] text-amber-500">checks failing</span>
         )}
         <span className={`mono text-[11px] ${muted} sm:ml-auto max-md:break-all`}>{build.buildId}</span>
+        {(canRetryBuild(build.status) || canCancelBuild(build.status)) && (
+          <BuildActionButton
+            buildId={build.buildId}
+            action={canRetryBuild(build.status) ? "retry" : "cancel"}
+            isDark={isDark}
+          />
+        )}
       </div>
 
       <p
@@ -307,6 +315,56 @@ function BuildCard({
         </div>
       )}
     </article>
+  );
+}
+
+function BuildActionButton({
+  buildId,
+  action,
+  isDark,
+}: {
+  buildId: string;
+  action: "retry" | "cancel";
+  isDark: boolean;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<{ text: string; error: boolean } | null>(null);
+  const run = async () => {
+    if (busy) return;
+    if (action === "cancel" && !window.confirm(`Cancel build ${buildId}? An open PR is closed.`)) return;
+    setBusy(true);
+    setNote(null);
+    try {
+      setNote({ text: await requestBuildAction(buildId, action), error: false });
+    } catch (err) {
+      setNote({ text: err instanceof Error ? err.message : String(err), error: true });
+    } finally {
+      setBusy(false);
+    }
+  };
+  const label = action === "retry" ? (busy ? "Retrying…" : "Retry") : busy ? "Cancelling…" : "Cancel";
+  return (
+    <span className="inline-flex items-center gap-2">
+      {note && (
+        <span
+          className={`max-w-[260px] truncate text-[11px] ${note.error ? "text-rose-400" : mutedTextClass(isDark)}`}
+          title={note.text}
+        >
+          {note.text}
+        </span>
+      )}
+      <button
+        type="button"
+        onClick={run}
+        disabled={busy}
+        title={action === "retry" ? "Build this request again from a fresh worktree" : "Stop this build"}
+        className={`inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-[11px] font-medium transition-colors disabled:opacity-60 max-md:min-h-10 ${
+          isDark ? "bg-white/5 text-zinc-200 hover:bg-white/10" : "bg-zinc-100 text-zinc-700 hover:bg-zinc-200"
+        }`}
+      >
+        {label}
+      </button>
+    </span>
   );
 }
 

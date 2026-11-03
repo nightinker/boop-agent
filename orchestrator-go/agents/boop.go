@@ -62,8 +62,10 @@ type spawnResponse struct {
 	Status       string `json:"status"`
 	Result       string `json:"result"`
 	UsageLimited bool   `json:"usageLimited"`
-	Error        string `json:"error"`
-	Usage        *struct {
+	// Automatic retries the sub-agent already made after dropped connections.
+	AutoRetries int    `json:"autoRetries"`
+	Error       string `json:"error"`
+	Usage       *struct {
 		InputTokens  int `json:"inputTokens"`
 		OutputTokens int `json:"outputTokens"`
 	} `json:"usage"`
@@ -156,6 +158,11 @@ func (b *Boop) Run(ctx context.Context, in engine.Input) (engine.Output, error) 
 		err := &BridgeError{AgentID: out.AgentID, Status: "failed", Message: firstNonEmpty(out.Result, out.Error, "no details")}
 		if out.UsageLimited {
 			// The model's spend limit: retrying now just fails again.
+			return engine.Output{Tokens: out.tokens()}, engine.Permanent(err)
+		}
+		if out.AutoRetries > 0 {
+			// The sub-agent already retried its dropped connection; retrying
+			// the whole task here too would multiply the attempts (and cost).
 			return engine.Output{Tokens: out.tokens()}, engine.Permanent(err)
 		}
 		return engine.Output{Tokens: out.tokens()}, err

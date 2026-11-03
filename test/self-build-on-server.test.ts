@@ -45,3 +45,31 @@ describe("self-builds requested on the server", () => {
     expect(convexMock.mutation).not.toHaveBeenCalled();
   });
 });
+
+describe("retrySelfBuild", () => {
+  it("re-queues a failed build's request and records which build it re-runs", async () => {
+    const { retrySelfBuild } = await import("../server/self-build/run.js");
+    convexMock.query.mockResolvedValue({ buildId: "b-old", status: "failed", request: "Add X", conversationId: "sms:+15551234567" });
+    convexMock.mutation.mockResolvedValue({ status: "queued", position: 1, blockedBy: null });
+    const reply = await retrySelfBuild({ conversationId: "sms:+15551234567", buildId: "b-old" });
+    expect(convexMock.mutation).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ request: "Add X", retryOf: "b-old" }),
+    );
+    expect(reply).toMatch(/^Retrying build b-old\./);
+  });
+
+  it("refuses a build that isn't finished or failed", async () => {
+    const { retrySelfBuild } = await import("../server/self-build/run.js");
+    convexMock.query.mockResolvedValue({ buildId: "b1", status: "coding", request: "x" });
+    expect(await retrySelfBuild({ conversationId: "sms:+15551234567", buildId: "b1" })).toContain(
+      "only failed, cancelled or rolled-back builds can be retried",
+    );
+    expect(convexMock.mutation).not.toHaveBeenCalled();
+  });
+
+  it("is owner-only", async () => {
+    const { retrySelfBuild } = await import("../server/self-build/run.js");
+    expect(await retrySelfBuild({ conversationId: "sms:+19999999999", buildId: "b1" })).toContain("Only Boop's owner");
+  });
+});

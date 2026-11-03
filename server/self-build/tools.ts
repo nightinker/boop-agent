@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { defineRuntimeTool } from "../runtimes/tool.js";
 import { runtimeText, type RuntimeTool } from "../runtimes/types.js";
-import { cancelSelfBuild, listSelfBuilds, shipSelfBuild, startSelfBuild } from "./run.js";
+import { cancelSelfBuild, listSelfBuilds, retrySelfBuild, shipSelfBuild, startSelfBuild } from "./run.js";
 
 export const SELF_BUILD_NAMESPACE = "boop-self-build";
 
@@ -10,6 +10,7 @@ export const SELF_BUILD_ALLOWED_TOOLS = [
   `mcp__${SELF_BUILD_NAMESPACE}__list_self_builds`,
   `mcp__${SELF_BUILD_NAMESPACE}__ship_self_build`,
   `mcp__${SELF_BUILD_NAMESPACE}__cancel_self_build`,
+  `mcp__${SELF_BUILD_NAMESPACE}__retry_self_build`,
 ];
 
 export const SELF_BUILD_PROMPT = `
@@ -18,6 +19,7 @@ When the user asks you to add a feature to Boop, change how Boop itself works, o
 When the user approves a finished build (any phrasing, like "ship it", "install it", "go ahead"), call ship_self_build. If it reports failing checks, ask before calling it again with allowFailingChecks.
 To retry a ship that failed, call ship_self_build with that same build's buildId (from list_self_builds); a merged build is rebuilt without merging again. Never switch to a different build without saying which feature it is.
 If a ship rolled back, list_self_builds shows the failed start's log path and last lines; to retry with more startup time (e.g. "ship it again with 5 minutes"), pass healthTimeoutSeconds.
+A coding run already retries a dropped connection 3 times on its own. "Retry the build" (or one that failed, was cancelled or rolled back) → retry_self_build with its buildId; it starts again from a fresh worktree, so don't call start_self_build with the same request.
 "cancel build" or similar → cancel_self_build (it can also drop a queued build; pass its buildId). "How's the build going?" or "what's queued?" → list_self_builds.
 Never claim a build shipped until you're back up and have said so.`;
 
@@ -62,6 +64,13 @@ export function createSelfBuildTools(conversationId: string): RuntimeTool[] {
           ),
       },
       async (args) => runtimeText(await shipSelfBuild({ conversationId, ...args })),
+    ),
+    defineRuntimeTool(
+      SELF_BUILD_NAMESPACE,
+      "retry_self_build",
+      "Start a failed, cancelled or rolled-back self-build again with the same request, from a fresh worktree off the latest main.",
+      { buildId: z.string().optional().describe("Defaults to the latest failed or cancelled build.") },
+      async (args) => runtimeText(await retrySelfBuild({ conversationId, ...args })),
     ),
     defineRuntimeTool(
       SELF_BUILD_NAMESPACE,

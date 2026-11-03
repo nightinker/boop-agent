@@ -78,6 +78,7 @@ func TestBoopBridgeFailures(t *testing.T) {
 		contains  string
 	}{
 		{"agent failed", 200, `{"agentId":"agent_2","status":"failed","result":"tool crashed"}`, false, "tool crashed"},
+		{"failed after the agent's own retries", 200, `{"agentId":"agent_5","status":"failed","result":"TypeError: fetch failed (after 3 automatic retries)","autoRetries":3}`, true, "fetch failed"},
 		{"usage limit", 200, `{"agentId":"agent_3","status":"failed","result":"limit","usageLimited":true}`, true, "limit"},
 		{"cancelled in boop", 200, `{"agentId":"agent_4","status":"cancelled","result":""}`, true, "cancelled in Boop"},
 		{"bad request", 400, `{"error":"unknown integrations: slack"}`, true, "slack"},
