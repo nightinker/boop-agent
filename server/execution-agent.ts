@@ -26,6 +26,14 @@ import {
 } from "./images/attach-tool.js";
 import { OutboundImageCollector, type OutboundImage } from "./images/outbound.js";
 import { isUsageLimitError } from "./usage-limit.js";
+import {
+  addUsage,
+  AUTO_RETRY_DELAYS_MS,
+  isTransientAgentError,
+  RESUME_PROMPT,
+  retryNotice,
+  waitUnlessAborted,
+} from "./agent-auto-retry.js";
 import { redactSecrets, redactSecretsDeep } from "./secrets/redact.js";
 import { WEBTEST_EXECUTION_PROMPT, WEBTEST_INTEGRATION } from "./webtest/tools.js";
 import {
@@ -269,77 +277,118 @@ export async function spawnExecutionAgent(opts: SpawnExecutionAgentOpts): Promis
   let errorMsg: string | undefined;
   let usageLimited = false;
 
+  // Claude session to resume after a dropped connection (see agent-auto-retry).
+  let sessionId: string | undefined;
+  let attempt = 0;
   try {
     const executionPrompt = await buildPromptWithImages({
       text: opts.task,
       imageStorageIds: opts.imageStorageIds,
       fetchBytes: fetchStoredBytes,
     });
-    const result = await runAgentRuntime(runtimeConfig, {
-      prompt: executionPrompt,
-      systemPrompt:
-        EXECUTION_SYSTEM +
-        (attachmentTools.length ? IMAGE_ATTACHMENTS_PROMPT : "") +
-        SECRETS_EXECUTION_PROMPT +
-        (opts.integrations.includes(WEBTEST_INTEGRATION) ? WEBTEST_EXECUTION_PROMPT : "") +
-        buildSkillsSection(skillIndex),
-      claudeMcpServers: mcpServers,
-      tools: runtimeTools,
-      allowedTools,
-      abortController: abort,
-      mode: "execution",
-      onText: async (text) => {
-        buffer += text;
-        await convex.mutation(api.agents.addLog, {
-          agentId,
-          logType: "text",
-          content: redactSecrets(text),
+    for (;;) {
+      const resumeSessionId = attempt > 0 ? sessionId : undefined;
+      try {
+        const result = await runAgentRuntime(runtimeConfig, {
+          prompt: resumeSessionId ? RESUME_PROMPT : executionPrompt,
+          ...(resumeSessionId ? { resumeSessionId } : {}),
+          onSessionId: (id) => {
+            sessionId = id;
+          },
+          systemPrompt:
+            EXECUTION_SYSTEM +
+            (attachmentTools.length ? IMAGE_ATTACHMENTS_PROMPT : "") +
+            SECRETS_EXECUTION_PROMPT +
+            (opts.integrations.includes(WEBTEST_INTEGRATION) ? WEBTEST_EXECUTION_PROMPT : "") +
+            buildSkillsSection(skillIndex),
+          claudeMcpServers: mcpServers,
+          tools: runtimeTools,
+          allowedTools,
+          abortController: abort,
+          mode: "execution",
+          onText: async (text) => {
+            buffer += text;
+            await convex.mutation(api.agents.addLog, {
+              agentId,
+              logType: "text",
+              content: redactSecrets(text),
+            });
+          },
+          onToolUse: async (toolName, input) => {
+            const toolShort = toolName.replace(/^mcp__[a-z-]+__/, "");
+            const accounts = extractAccounts(input);
+            const acctSuffix = accounts.length ? ` [${accounts.join(", ")}]` : "";
+            logAgent(`tool: ${toolShort}${acctSuffix}`);
+            const logInput = redactToolInputForLog(toolName, input);
+            toolCalls.push({ tool: toolShort, input: JSON.stringify(logInput).slice(0, 300) });
+            await convex.mutation(api.agents.addLog, {
+              agentId,
+              logType: "tool_use",
+              toolName,
+              ...(accounts.length ? { accounts } : {}),
+              content: JSON.stringify(logInput).slice(0, 2000),
+            });
+            broadcast("agent_tool", { agentId, toolName, accounts });
+          },
+          onToolResult: async (_toolName, rawText) => {
+            const text = redactSecrets(rawText);
+            const last = toolCalls[toolCalls.length - 1];
+            if (last && last.result === undefined) last.result = text.slice(0, 300);
+            await convex.mutation(api.agents.addLog, {
+              agentId,
+              logType: "tool_result",
+              content: text.slice(0, 2000),
+            });
+          },
         });
-      },
-      onToolUse: async (toolName, input) => {
-        const toolShort = toolName.replace(/^mcp__[a-z-]+__/, "");
-        const accounts = extractAccounts(input);
-        const acctSuffix = accounts.length ? ` [${accounts.join(", ")}]` : "";
-        logAgent(`tool: ${toolShort}${acctSuffix}`);
-        const logInput = redactToolInputForLog(toolName, input);
-        toolCalls.push({ tool: toolShort, input: JSON.stringify(logInput).slice(0, 300) });
-        await convex.mutation(api.agents.addLog, {
-          agentId,
-          logType: "tool_use",
-          toolName,
-          ...(accounts.length ? { accounts } : {}),
-          content: JSON.stringify(logInput).slice(0, 2000),
-        });
-        broadcast("agent_tool", { agentId, toolName, accounts });
-      },
-      onToolResult: async (_toolName, rawText) => {
-        const text = redactSecrets(rawText);
-        const last = toolCalls[toolCalls.length - 1];
-        if (last && last.result === undefined) last.result = text.slice(0, 300);
-        await convex.mutation(api.agents.addLog, {
-          agentId,
-          logType: "tool_result",
-          content: text.slice(0, 2000),
-        });
-      },
-    });
-    if (!buffer) buffer = result.text;
-    buffer = redactSecrets(buffer);
-    usage = result.usage;
-    if (isUsageLimitError(buffer, result.errorCode) || isUsageLimitError(result.text)) {
-      usageLimited = true;
-      status = "failed";
-      errorMsg = `usage limit: ${(buffer || result.text).trim().slice(0, 500)}`;
-      buffer = "";
-      await convex.mutation(api.agents.addLog, {
-        agentId,
-        logType: "error",
-        content: errorMsg,
-      });
+        usage = addUsage(usage, result.usage);
+        if (
+          result.errorCode &&
+          !isUsageLimitError(result.text, result.errorCode) &&
+          isTransientAgentError(result.text, result.errorCode)
+        ) {
+          throw new Error(`${result.errorCode}: ${result.text.trim().slice(0, 500)}`);
+        }
+        if (!buffer) buffer = result.text;
+        buffer = redactSecrets(buffer);
+        if (isUsageLimitError(buffer, result.errorCode) || isUsageLimitError(result.text)) {
+          usageLimited = true;
+          status = "failed";
+          errorMsg = `usage limit: ${(buffer || result.text).trim().slice(0, 500)}`;
+          buffer = "";
+          await convex.mutation(api.agents.addLog, {
+            agentId,
+            logType: "error",
+            content: errorMsg,
+          });
+        }
+        break;
+      } catch (err) {
+        const delay = AUTO_RETRY_DELAYS_MS[attempt];
+        // Without a session to resume, starting over is only safe when no
+        // tool ran yet: a tool may already have sent or changed something.
+        const canResume = Boolean(sessionId) || toolCalls.length === 0;
+        if (
+          delay === undefined ||
+          abort.signal.aborted ||
+          !canResume ||
+          !isTransientAgentError(err)
+        ) {
+          throw err;
+        }
+        attempt++;
+        const notice = retryNotice(attempt, delay, redactSecrets(String(err)));
+        logAgent(notice);
+        await convex.mutation(api.agents.addLog, { agentId, logType: "error", content: notice });
+        broadcast("agent_retrying", { agentId, attempt, delayMs: delay });
+        if (!(await waitUnlessAborted(delay, abort.signal))) throw err;
+        if (!sessionId) buffer = "";
+      }
     }
   } catch (err) {
     status = abort.signal.aborted ? "cancelled" : "failed";
     errorMsg = redactSecrets(String(err));
+    if (attempt > 0) errorMsg += ` (after ${attempt} automatic ${attempt === 1 ? "retry" : "retries"})`;
     if (isUsageLimitError(err)) usageLimited = true;
     await convex.mutation(api.agents.addLog, {
       agentId,

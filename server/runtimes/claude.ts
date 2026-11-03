@@ -84,6 +84,7 @@ export async function runClaudeAgent(request: RuntimeRunRequest): Promise<Runtim
   let text = "";
   let lastAssistantText = "";
   let errorCode: string | undefined;
+  let sessionId: string | undefined = request.resumeSessionId;
   let usage = { ...EMPTY_USAGE, model: request.model };
   const stderrTail: string[] = [];
   // The Claude account the owner picked (set_claude_account) is read per
@@ -101,6 +102,7 @@ export async function runClaudeAgent(request: RuntimeRunRequest): Promise<Runtim
       disallowedTools: request.disallowedTools,
       ...(request.mode === "execution" ? { settingSources: ["project"] as const } : {}),
       permissionMode: "bypassPermissions",
+      ...(request.resumeSessionId ? { resume: request.resumeSessionId } : {}),
       abortController: request.abortController,
       ...(request.cwd ? { cwd: request.cwd } : {}),
       ...(env ? { env } : {}),
@@ -112,6 +114,10 @@ export async function runClaudeAgent(request: RuntimeRunRequest): Promise<Runtim
       },
     },
   })) {
+    if (msg.session_id && msg.session_id !== sessionId) {
+      sessionId = msg.session_id;
+      request.onSessionId?.(sessionId);
+    }
     if (msg.type === "assistant") {
       if (msg.error) errorCode = msg.error;
       let assistantText = "";
@@ -147,5 +153,10 @@ export async function runClaudeAgent(request: RuntimeRunRequest): Promise<Runtim
     throw withClaudeStderr(err, stderrTail);
   }
 
-  return { text: lastAssistantText || text, usage, ...(errorCode ? { errorCode } : {}) };
+  return {
+    text: lastAssistantText || text,
+    usage,
+    ...(errorCode ? { errorCode } : {}),
+    ...(sessionId ? { sessionId } : {}),
+  };
 }
