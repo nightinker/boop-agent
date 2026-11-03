@@ -56,7 +56,7 @@ import {
   buildPromptWithImagesOrTextFallback,
   fetchStoredBytes,
 } from "./images/content-blocks.js";
-import { historyBeforeTurn, parallelTurnsNote } from "./parallel-turns.js";
+import { burstNote, historyBeforeTurn, parallelTurnsNote, turnPrompt } from "./parallel-turns.js";
 import { redactPhoneNumbers } from "./privacy.js";
 import { OutboundImageCollector, type OutboundImage } from "./images/outbound.js";
 import {
@@ -341,6 +341,11 @@ interface HandleOpts {
    * own turn (maxConcurrentRuns > 1). Read when the prompt is built.
    */
   parallelMessages?: () => string[];
+  /**
+   * How many texts sent in a row (the quiet period) were joined into
+   * `content`. 2+ tells the model to answer them as one thread.
+   */
+  burstSize?: number;
 }
 
 function randomId(prefix: string): string {
@@ -565,11 +570,12 @@ export async function handleUserMessageWithAttachments(
   const promptText =
     opts.kind === "proactive"
       ? `Standalone proactive notice. Write a concise user-facing iMessage from this notice only. Do not research, spawn agents, or continue any prior conversation.\n\n${userText}`
-      : historyBlock || parallelNote
-        ? [historyBlock ? `Prior turns:\n${historyBlock}` : "", parallelNote, `Current message:\n${userText}`]
-            .filter(Boolean)
-            .join("\n\n")
-        : userText;
+      : turnPrompt({
+          history: historyBlock,
+          parallelNote,
+          batchNote: burstNote(opts.burstSize ?? 1),
+          message: userText,
+        });
 
   const tag = opts.turnTag ?? turnId.slice(-6);
   const log = (msg: string) => console.log(`[turn ${tag}] ${msg}`);
