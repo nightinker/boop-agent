@@ -424,6 +424,42 @@ export default defineSchema({
     resolvedAt: v.optional(v.number()),
   }).index("by_status", ["status", "createdAt"]),
 
+  // Read-only history imported from other memory stores (claude-mem today):
+  // observations, session summaries and prompts from past coding sessions.
+  // Kept apart from memoryRecords so tens of thousands of rows never reach
+  // recall's decay, consolidation or the dashboard, and searched by keyword.
+  archiveRecords: defineTable({
+    // Stable id from the source, e.g. "claude-mem:observation:123". Upserts
+    // key on it, so a re-run never duplicates a record.
+    sourceId: v.string(),
+    source: v.string(),
+    kind: v.string(),
+    project: v.string(),
+    title: v.string(),
+    content: v.string(),
+    // Source-side subtype, such as an observation's "bugfix" or "decision".
+    type: v.optional(v.string()),
+    sessionId: v.optional(v.string()),
+    // When it happened in the source, not when it was imported.
+    occurredAt: v.number(),
+    // Hash of everything above; an unchanged record is skipped on re-import.
+    contentHash: v.string(),
+    importedAt: v.number(),
+  })
+    .index("by_source_id", ["sourceId"])
+    .index("by_occurred_at", ["occurredAt"])
+    .searchIndex("search_content", {
+      searchField: "content",
+      filterFields: ["kind", "project", "source"],
+    }),
+
+  // Running row counts for archiveRecords, one per "source:kind", so the
+  // totals can be read without scanning the whole table.
+  archiveCounts: defineTable({
+    key: v.string(),
+    count: v.number(),
+  }).index("by_key", ["key"]),
+
   // Features Boop builds into its own code when the owner asks over iMessage.
   selfBuilds: defineTable({
     buildId: v.string(),

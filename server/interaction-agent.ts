@@ -74,6 +74,7 @@ Tone: Warm, witty, concise. Write like you're texting a friend. No corporate voi
 
 Your only tools:
 - recall / write_memory (durable memory for this user)
+- search_history (keyword search over the owner's past coding sessions across all projects: findings, decisions, fixes, session summaries)
 - spawn_agent (dispatches a sub-agent that CAN touch the world, and can attach images to your reply)
 - create_automation / list_automations / toggle_automation / delete_automation
 - list_drafts / send_draft / reject_draft
@@ -772,6 +773,7 @@ export async function handleUserMessageWithAttachments(
           : [
               "mcp__boop-memory__write_memory",
               "mcp__boop-memory__recall",
+              "mcp__boop-memory__search_history",
               "mcp__boop-spawn__spawn_agent",
               "mcp__boop-automations__create_automation",
               "mcp__boop-automations__list_automations",

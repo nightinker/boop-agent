@@ -117,7 +117,62 @@ export function createMemoryTools(conversationId: string): RuntimeTool[] {
         return runtimeText(body);
       },
     ),
+
+    defineRuntimeTool(
+      NAMESPACE,
+      "search_history",
+      "Keyword search over the owner's imported work history: observations, session summaries and prompts from past coding sessions across all their projects (from claude-mem). Use it for 'did we already fix X', 'what did we decide about Y', 'when did I work on Z'. Separate from recall, which holds facts about the owner.",
+      {
+        query: z.string().describe("Words to look for, e.g. 'stripe webhook retry'."),
+        project: z.string().optional().describe("Only this project, e.g. 'boop-agent'."),
+        kind: z
+          .enum(["observation", "summary", "prompt"])
+          .optional()
+          .describe("observation: one finding or change. summary: a whole session. prompt: what the owner asked."),
+        limit: z.number().optional().default(8),
+      },
+      async (args) => {
+        const hits = await convex.query(api.archiveRecords.search, {
+          query: args.query,
+          project: args.project,
+          kind: args.kind,
+          limit: args.limit,
+        });
+        await convex.mutation(api.memoryEvents.emit, {
+          eventType: "history.searched",
+          conversationId,
+          data: JSON.stringify({ query: args.query, project: args.project, kind: args.kind, hits: hits.length }),
+        });
+        return runtimeText(formatHistoryHits(hits));
+      },
+    ),
   ];
+}
+
+interface HistoryHit {
+  kind: string;
+  project: string;
+  title: string;
+  content: string;
+  type?: string;
+  occurredAt: number;
+  sourceId: string;
+}
+
+const SNIPPET = 600;
+
+/** One block per hit: when, where, what, then the start of the text. */
+export function formatHistoryHits(hits: HistoryHit[]): string {
+  if (hits.length === 0) return "No history matched.";
+  return hits
+    .map((h) => {
+      const date = new Date(h.occurredAt).toISOString().slice(0, 10);
+      let body = h.content.replace(/^\[[^\]]*\]\s*/, "").replace(/\s+/g, " ").trim();
+      if (h.kind !== "prompt" && body.startsWith(h.title)) body = body.slice(h.title.length).trim();
+      const snippet = body.length > SNIPPET ? `${body.slice(0, SNIPPET - 1)}…` : body;
+      return `• ${date} [${h.project} · ${h.type ?? h.kind}] ${h.title} (${h.sourceId})\n  ${snippet}`;
+    })
+    .join("\n");
 }
 
 export function createMemoryMcp(conversationId: string) {
