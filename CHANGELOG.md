@@ -8,6 +8,12 @@ Format:
 
 ---
 
+## Unreleased — One combined reply for batched messages
+
+- Changed: texts that waited behind a busy slot are answered under a clearer header: they're from the same person in the same conversation, numbered oldest first, and the model writes ONE combined reply that covers them in order, merges overlapping or duplicate asks, doesn't answer each as its own message, doesn't repeat itself, and goes with a later correction.
+- Added: texts sent in a row and joined by the quiet period now come with a prompt note: treat them as one thread of intent, a later correction wins, send one coherent reply. The saved message text is unchanged.
+- Fixed: with 2 answers running at once, each turn's "being answered in parallel" note now lists the other answer's texts as they were sent (not its numbered header) and says they're already claimed, even if they look unanswered in the history.
+
 ## Unreleased — Up to 2 answers per conversation at once
 
 - Changed: each conversation now answers up to `maxConcurrentRuns` messages in parallel (default 2). A text that arrives while one answer is running and a slot is free starts its own answer straight away; only when every slot is busy does it wait in the queue with the "queued (position N)" ack, and positions count waiting texts only. When a slot frees, the waiting texts are answered as before.

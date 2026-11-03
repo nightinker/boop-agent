@@ -85,8 +85,19 @@ export interface InboundStore {
 export interface RunContext {
   /** The saved texts this answer covers, oldest first (before they were combined). */
   batch: InboundItem[];
+  /**
+   * True when these texts waited behind a busy slot (numbered in the combined
+   * text); false for a single text or a quiet-period burst.
+   */
+  waitedBehindRun: boolean;
   /** The other answers running in this conversation right now, oldest first. */
   parallel(): InboundItem[];
+  /**
+   * Every saved text another answer in this conversation has already claimed
+   * and is answering right now, oldest first, as sent (not combined). This
+   * answer must not reply to them too.
+   */
+  claimedElsewhere(): InboundItem[];
   /** True once another answer in this conversation has run at the same time as this one. */
   overlapped(): boolean;
 }
@@ -253,6 +264,19 @@ export function supportsTyping(service: string | undefined): boolean {
 }
 
 /**
+ * The line above a numbered batch of texts that waited behind a running
+ * answer: says they're one person's messages and asks for one combined reply.
+ */
+export function queuedBatchHeader(count: number): string {
+  return (
+    `[${count} messages sent while you were busy with the previous task, all from the same person in this same conversation, numbered oldest first. ` +
+    `Write ONE combined reply that addresses all ${count} in order: merge overlapping or duplicate asks, ` +
+    `don't answer each one as a separate standalone message, and don't repeat yourself. ` +
+    `If a later message corrects, changes or cancels an earlier one, go with the later one.]`
+  );
+}
+
+/**
  * Folds a burst of texts into one: contents joined by newlines, in order, with
  * every image. Texts that waited behind a running answer are numbered instead,
  * each line noting its own images, so their order and what goes with what
@@ -263,7 +287,7 @@ export function combineInbound(items: InboundItem[], opts: { waitedBehindRun?: b
   const last = items[items.length - 1];
   const content = opts.waitedBehindRun
     ? [
-        `[${items.length} messages sent while you were busy with the previous task, oldest first. Answer all of them; if a later one changes or cancels an earlier one, go with the later one.]`,
+        queuedBatchHeader(items.length),
         ...items.map((item, i) => {
           const images = item.mediaUrls.length;
           const note = images > 0 ? ` [${images === 1 ? "1 image" : `${images} images`} attached]` : "";
@@ -361,7 +385,7 @@ export function createInboundQueue(deps: {
   const ackDelayMs = Math.max(0, deps.ackDelayMs ?? DEFAULT_ACK_DELAY_MS);
   const queueBatchGapMs = Math.max(0, deps.queueBatchGapMs ?? DEFAULT_QUEUE_BATCH_GAP_MS);
   // Answers running on this copy right now, per conversation, oldest first.
-  const answering = new Map<string, Array<{ item: InboundItem; overlapped: boolean }>>();
+  const answering = new Map<string, Array<{ item: InboundItem; batch: InboundItem[]; overlapped: boolean }>>();
   const answeringCount = (conversationId: string) => answering.get(conversationId)?.length ?? 0;
   // Texts (by handle) that arrived while their conversation was being answered.
   const behindRun = new Set<string>();
@@ -494,14 +518,17 @@ export function createInboundQueue(deps: {
     const item = combineInbound(batch, { waitedBehindRun });
     if (waitedBehindRun) info(`[inbound] answering ${batch.length} queued text(s) for ${who(conversationId)}`);
     const runs = answering.get(conversationId) ?? [];
-    const mine = { item, overlapped: runs.length > 0 };
+    const mine = { item, batch, overlapped: runs.length > 0 };
     for (const other of runs) other.overlapped = true;
     runs.push(mine);
     answering.set(conversationId, runs);
     if (mine.overlapped) info(`[inbound] answering ${who(conversationId)} in parallel (${runs.length} running)`);
+    const others = () => (answering.get(conversationId) ?? []).filter((r) => r !== mine);
     const run: RunContext = {
       batch,
-      parallel: () => (answering.get(conversationId) ?? []).filter((r) => r !== mine).map((r) => r.item),
+      waitedBehindRun,
+      parallel: () => others().map((r) => r.item),
+      claimedElsewhere: () => others().flatMap((r) => r.batch),
       overlapped: () => mine.overlapped,
     };
     try {

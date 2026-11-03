@@ -20,7 +20,7 @@ import {
   type RunContext,
 } from "./inbound-queue.js";
 import { convexInboundStore } from "./inbound-store.js";
-import { createKeyedLock, replyHeading, withReplyHeading } from "./parallel-turns.js";
+import { createKeyedLock, messageLabel, replyHeading, withReplyHeading } from "./parallel-turns.js";
 import { getMaxConcurrentRuns } from "./runtime-config.js";
 import { isActiveInstance } from "./instance.js";
 import { isNetworkError, noteNetworkFailure } from "./network-health.js";
@@ -445,7 +445,9 @@ export async function processInboundText(item: InboundItem, run?: RunContext): P
       turnTag,
       images: ingested,
       mediaError: ingestErrors.length > 0 ? ingestErrors.join("; ") : undefined,
-      parallelMessages: run ? () => run.parallel().map((other) => other.content) : undefined,
+      // The texts other answers already claimed, as sent, so this one leaves them alone.
+      parallelMessages: run ? () => run.claimedElsewhere().map(messageLabel) : undefined,
+      burstSize: run && !run.waitedBehindRun ? run.batch.length : undefined,
       onThinking: (t) => broadcast("thinking", { conversationId, t }),
     });
     // Another answer ran alongside this one: say which message this replies to.

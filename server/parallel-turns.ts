@@ -28,17 +28,52 @@ function snippet(content: string, max: number): string {
 }
 
 /**
- * Prompt note naming the messages another turn is answering right now, so
- * this turn neither answers them twice nor treats them as unanswered.
+ * Prompt note naming the messages another turn has already claimed and is
+ * answering right now, so this turn neither answers them twice nor treats
+ * them as unanswered (they can show up in the prior turns with no reply yet).
  * Empty when nothing else is running.
  */
 export function parallelTurnsNote(contents: string[]): string {
   if (contents.length === 0) return "";
   const lines = contents.map((c) => `- ${JSON.stringify(snippet(c, 300) || "(no text)")}`);
   return [
-    "Being answered in parallel right now by a separate reply (don't answer or repeat these here; answer only the current message, and don't assume their outcome):",
+    "Being answered in parallel right now by a separate reply, which already claimed these messages (don't answer or repeat these here, even if they look unanswered in the prior turns; answer only the current message, and don't assume their outcome):",
     ...lines,
   ].join("\n");
+}
+
+/** What a saved text says, for a prompt note: its words, or what it attached. */
+export function messageLabel(item: { content: string; mediaUrls: string[] }): string {
+  if (item.content.trim()) return item.content;
+  if (item.mediaUrls.length === 0) return "";
+  return item.mediaUrls.length === 1 ? "(an image)" : `(${item.mediaUrls.length} images)`;
+}
+
+/**
+ * Prompt note for a current message that is several texts the sender fired
+ * off in a row (joined oldest first by the quiet period): one thread of
+ * intent, one coherent reply. Empty for a single text.
+ */
+export function burstNote(count: number): string {
+  if (count < 2) return "";
+  return (
+    `The current message is ${count} texts the same person sent in a row in this conversation, joined oldest first, one per line. ` +
+    "Treat them as one thread of intent, not separate requests: a later text that corrects, narrows or overrides an earlier one wins, " +
+    "and overlapping or repeated asks are one ask. Send one coherent reply that covers the whole thread, without repeating yourself."
+  );
+}
+
+/**
+ * The user prompt for one turn: prior turns, the messages another turn is
+ * answering, how the current message was put together, then the message.
+ * Just the message when there's nothing else to say.
+ */
+export function turnPrompt(parts: { history: string; parallelNote: string; batchNote: string; message: string }): string {
+  const { history, parallelNote, batchNote, message } = parts;
+  if (!history && !parallelNote && !batchNote) return message;
+  return [history ? `Prior turns:\n${history}` : "", parallelNote, batchNote, `Current message:\n${message}`]
+    .filter(Boolean)
+    .join("\n\n");
 }
 
 /**
