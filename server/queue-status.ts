@@ -6,6 +6,8 @@ export interface QueueOverview {
   conversations: Array<{
     conversationId: string;
     answeringSince: number | null;
+    /** Answers running at once (maxConcurrentRuns > 1 allows more than one). */
+    answering?: number;
     queued: Array<{ content: string; mediaCount: number; receivedAt: number }>;
   }>;
 }
@@ -35,7 +37,7 @@ export function formatQueueOverview(
       const label = mine ? "This conversation" : redactContactHandle(c.conversationId.replace(/^sms:/, ""));
       const head =
         c.answeringSince !== null
-          ? `${label}: answering a message (started ${ago(now - c.answeringSince)} ago), ${c.queued.length} queued behind it`
+          ? `${label}: ${(c.answering ?? 1) > 1 ? `answering ${c.answering} messages in parallel (oldest started` : "answering a message (started"} ${ago(now - c.answeringSince)} ago), ${c.queued.length} queued behind it`
           : `${label}: ${c.queued.length} queued, about to be answered`;
       const lines = c.queued.map((q, i) => {
         const images = q.mediaCount > 0 ? ` [${q.mediaCount === 1 ? "1 image" : `${q.mediaCount} images`}]` : "";

@@ -4,6 +4,7 @@ import type { RuntimeName, RuntimeReasoningEffort } from "./runtimes/types.js";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { isAppleDataSupported, isLocalBrowserSupported } from "./platform-support.js";
+import { DEFAULT_MAX_CONCURRENT_RUNS, parseMaxConcurrentRuns } from "./inbound-queue.js";
 
 const RUNTIME_KEY = "runtime";
 const CLAUDE_MODEL_KEY = "model";
@@ -22,6 +23,8 @@ export const APPLE_MESSAGES_ENABLED_KEY = "apple_messages_enabled";
 export const APPLE_NOTES_ENABLED_KEY = "apple_notes_enabled";
 export const APPLE_REMINDERS_ENABLED_KEY = "apple_reminders_enabled";
 export const KEEP_AWAKE_ENABLED_KEY = "keep_awake_enabled";
+export const MAX_CONCURRENT_RUNS_KEY = "max_concurrent_runs";
+const MAX_CONCURRENT_RUNS_TTL_MS = 5 * 1000;
 const CONFIG_TTL_MS = 30 * 1000;
 const BROWSER_CONFIG_TTL_MS = 5 * 1000;
 const APPLE_CONFIG_TTL_MS = 5 * 1000;
@@ -397,4 +400,27 @@ export async function setKeepAwakeEnabled(enabled: boolean): Promise<void> {
     key: KEEP_AWAKE_ENABLED_KEY,
     value: enabled ? "true" : "false",
   });
+}
+
+let cachedMaxConcurrentRuns: { at: number; value: number } | null = null;
+
+/**
+ * How many answers one conversation may run at once (maxConcurrentRuns).
+ * The Convex setting wins over BOOP_MAX_CONCURRENT_RUNS; default 2, at least
+ * 1 (strictly one at a time), at most 5. Kept in Convex, so the Mac and the
+ * server agree and it survives restarts.
+ */
+export async function getMaxConcurrentRuns(): Promise<number> {
+  if (cachedMaxConcurrentRuns && Date.now() - cachedMaxConcurrentRuns.at < MAX_CONCURRENT_RUNS_TTL_MS) {
+    return cachedMaxConcurrentRuns.value;
+  }
+  const envValue = parseMaxConcurrentRuns(process.env.BOOP_MAX_CONCURRENT_RUNS, DEFAULT_MAX_CONCURRENT_RUNS);
+  const value = parseMaxConcurrentRuns(await getSetting(MAX_CONCURRENT_RUNS_KEY), envValue);
+  cachedMaxConcurrentRuns = { at: Date.now(), value };
+  return value;
+}
+
+export async function setMaxConcurrentRuns(value: number): Promise<void> {
+  await convex.mutation(api.settings.set, { key: MAX_CONCURRENT_RUNS_KEY, value: String(value) });
+  cachedMaxConcurrentRuns = null;
 }

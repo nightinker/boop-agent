@@ -56,6 +56,7 @@ import {
   buildPromptWithImagesOrTextFallback,
   fetchStoredBytes,
 } from "./images/content-blocks.js";
+import { historyBeforeTurn, parallelTurnsNote } from "./parallel-turns.js";
 import { redactPhoneNumbers } from "./privacy.js";
 import { OutboundImageCollector, type OutboundImage } from "./images/outbound.js";
 import {
@@ -79,7 +80,7 @@ Your only tools:
 - spawn_agent (dispatches a sub-agent that CAN touch the world, and can attach images to your reply)
 - create_automation / list_automations / toggle_automation / delete_automation
 - list_drafts / send_draft / reject_draft
-- get_config / uptime / list_skills / set_runtime / set_model / set_codex_reasoning_effort / set_timezone / list_claude_accounts / set_claude_account / list_integrations / search_composio_catalog / inspect_toolkit (self-inspection)
+- get_config / uptime / list_skills / set_max_concurrent_runs / set_runtime / set_model / set_codex_reasoning_effort / set_timezone / list_claude_accounts / set_claude_account / list_integrations / search_composio_catalog / inspect_toolkit (self-inspection)
 - start_self_build / list_self_builds / ship_self_build / cancel_self_build (changing Boop's own code)
 - learn_skill (teach Boop a skill from a link, file, notes or what you just did)
 - request_secret / list_secrets / delete_secret / import_secrets_from_file (credentials, kept out of chat)
@@ -335,6 +336,11 @@ interface HandleOpts {
   persistAssistantReply?: boolean;
   images?: Array<{ storageId: string; mediaType: string }>;
   mediaError?: string;
+  /**
+   * Other messages in this conversation being answered right now by their
+   * own turn (maxConcurrentRuns > 1). Read when the prompt is built.
+   */
+  parallelMessages?: () => string[];
 }
 
 function randomId(prefix: string): string {
@@ -532,8 +538,9 @@ export async function handleUserMessageWithAttachments(
           conversationId: opts.conversationId,
           limit: 10,
         });
-  const historyBlock = history
-    .slice(0, -1)
+  // Stop at this turn's own message: a text saved after it is being answered
+  // by another turn running in parallel, not part of this one's history.
+  const historyBlock = historyBeforeTurn(history, turnId)
     .map((m) => `${m.role.toUpperCase()}: ${m.content}`)
     .join("\n");
 
@@ -554,11 +561,14 @@ export async function handleUserMessageWithAttachments(
   const userText = opts.mediaError
     ? `[user sent images but they couldn't be downloaded: ${opts.mediaError}]\n${opts.content}`
     : opts.content;
+  const parallelNote = opts.kind === "proactive" ? "" : parallelTurnsNote(opts.parallelMessages?.() ?? []);
   const promptText =
     opts.kind === "proactive"
       ? `Standalone proactive notice. Write a concise user-facing iMessage from this notice only. Do not research, spawn agents, or continue any prior conversation.\n\n${userText}`
-      : historyBlock
-        ? `Prior turns:\n${historyBlock}\n\nCurrent message:\n${userText}`
+      : historyBlock || parallelNote
+        ? [historyBlock ? `Prior turns:\n${historyBlock}` : "", parallelNote, `Current message:\n${userText}`]
+            .filter(Boolean)
+            .join("\n\n")
         : userText;
 
   const tag = opts.turnTag ?? turnId.slice(-6);
@@ -803,6 +813,7 @@ export async function handleUserMessageWithAttachments(
               "mcp__boop-self__get_config",
               "mcp__boop-self__uptime",
               "mcp__boop-self__list_queued_messages",
+              "mcp__boop-self__set_max_concurrent_runs",
               "mcp__boop-self__set_runtime",
               "mcp__boop-self__set_model",
               "mcp__boop-self__set_codex_reasoning_effort",

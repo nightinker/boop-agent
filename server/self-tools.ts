@@ -22,9 +22,11 @@ import {
   RUNTIME_ALIASES,
   getRuntimeConfig,
   getBrowserSettings,
+  getMaxConcurrentRuns,
   resolveModelInput,
   resolveRuntimeInput,
   setCodexReasoningEffort,
+  setMaxConcurrentRuns,
   setRuntimeModel,
   setRuntimeProvider,
 } from "./runtime-config.js";
@@ -65,10 +67,32 @@ import { convexSkillStore, createListSkillsTool } from "./skills/tools.js";
 import { api } from "../convex/_generated/api.js";
 import { convex } from "./convex-client.js";
 import { formatQueueOverview } from "./queue-status.js";
+import { MAX_CONCURRENT_RUNS_CEILING } from "./inbound-queue.js";
 
 const NAMESPACE = "boop-self";
 
 const reasoningEffortSchema = z.enum(["minimal", "low", "medium", "high", "xhigh"]);
+
+const NOT_OWNER_CONCURRENCY_MESSAGE = "Only Boop's owner can change how many messages Boop answers at once.";
+
+/** Sets maxConcurrentRuns (owner only): 1 = one message at a time per conversation. */
+export async function changeMaxConcurrentRuns(
+  value: number,
+  conversationId: string | undefined,
+): Promise<{ ok: boolean; text: string }> {
+  if (!isOwner(conversationId)) return { ok: false, text: NOT_OWNER_CONCURRENCY_MESSAGE };
+  if (!Number.isInteger(value) || value < 1 || value > MAX_CONCURRENT_RUNS_CEILING) {
+    return { ok: false, text: `maxConcurrentRuns must be a whole number from 1 to ${MAX_CONCURRENT_RUNS_CEILING}.` };
+  }
+  await setMaxConcurrentRuns(value);
+  return {
+    ok: true,
+    text:
+      value === 1
+        ? "maxConcurrentRuns set to 1: each conversation answers one message at a time again; later ones queue."
+        : `maxConcurrentRuns set to ${value}: each conversation answers up to ${value} messages in parallel; more than that queue. Applies to the next message.`,
+  };
+}
 
 const NOT_OWNER_ACCOUNT_MESSAGE = "Only Boop's owner can see or switch the Claude account Boop uses.";
 
@@ -204,7 +228,7 @@ export function createSelfTools(conversationId?: string): RuntimeTool[] {
     defineRuntimeTool(
       NAMESPACE,
       "get_config",
-      "Return Boop's runtime configuration: active provider, model, billing mode, user's timezone, current local time, loaded integrations, whether Boop is keeping the Mac awake (keepAwake: caffeinate -dimsu, since when, and who holds it: heldBy is user when the owner turned it on, build when the self-build agent holds it while a build is in progress (buildIds), or both), and basic env info. Use when the user asks what model/provider/runtime Boop is using, what time it is, what timezone is active, or anything about the agent itself.",
+      "Return Boop's runtime configuration: active provider, model, billing mode, user's timezone, current local time, loaded integrations, whether Boop is keeping the Mac awake (keepAwake: caffeinate -dimsu, since when, and who holds it: heldBy is user when the owner turned it on, build when the self-build agent holds it while a build is in progress (buildIds), or both), maxConcurrentRuns (how many messages one conversation answers in parallel; more wait in the queue), and basic env info. Use when the user asks what model/provider/runtime Boop is using, what time it is, what timezone is active, or anything about the agent itself.",
       {},
       async () => {
         const integrations = (await listEnabledIntegrations()).map((i) => i.name);
@@ -212,6 +236,7 @@ export function createSelfTools(conversationId?: string): RuntimeTool[] {
         const runtime = await getRuntimeConfig();
         const browser = await getBrowserSettings();
         const awake = keepAwake().status();
+        const maxConcurrentRuns = await getMaxConcurrentRuns();
         const config = {
           runtime: runtime.runtime,
           model: runtime.model,
@@ -252,6 +277,7 @@ export function createSelfTools(conversationId?: string): RuntimeTool[] {
             lastError: awake.lastError,
             caveat: awake.caveat,
           },
+          maxConcurrentRuns,
           composioEnabled: Boolean(process.env.COMPOSIO_API_KEY),
           embeddingsEnabled: true,
           embeddingsProvider: activeEmbeddingProvider(),
@@ -275,6 +301,16 @@ export function createSelfTools(conversationId?: string): RuntimeTool[] {
       async () => {
         const overview = await convex.query(api.inboundMessages.queueOverview, {});
         return runtimeText(formatQueueOverview(overview, { conversationId, owner: isOwner(conversationId) }));
+      },
+    ),
+    defineRuntimeTool(
+      NAMESPACE,
+      "set_max_concurrent_runs",
+      `Set maxConcurrentRuns: how many messages in one conversation Boop answers in parallel (default 2, min 1, max ${MAX_CONCURRENT_RUNS_CEILING}). With a free slot a new message starts its own answer at once; when every slot is busy it waits in the queue with a "queued" ack. 1 = strictly one at a time. Owner only. Use when the owner asks Boop to answer messages one at a time, in parallel, or to change that limit.`,
+      { value: z.number().int().describe(`Answers per conversation at once, 1 to ${MAX_CONCURRENT_RUNS_CEILING}.`) },
+      async ({ value }) => {
+        const result = await changeMaxConcurrentRuns(value, conversationId);
+        return runtimeText(result.text, result.ok);
       },
     ),
     createListSkillsTool(convexSkillStore("user"), NAMESPACE),

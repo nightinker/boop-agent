@@ -17,8 +17,11 @@ import {
   serviceFromSendblue,
   typingFromSendblue,
   type InboundItem,
+  type RunContext,
 } from "./inbound-queue.js";
 import { convexInboundStore } from "./inbound-store.js";
+import { createKeyedLock, replyHeading, withReplyHeading } from "./parallel-turns.js";
+import { getMaxConcurrentRuns } from "./runtime-config.js";
 import { isActiveInstance } from "./instance.js";
 import { isNetworkError, noteNetworkFailure } from "./network-health.js";
 
@@ -233,10 +236,23 @@ async function sendImageAttachment(
  * attachment message. If any image fails, the user gets a short text notice
  * instead, so a failed attachment never silently disappears.
  */
-export async function sendImessage(
+// One send at a time per recipient: with answers running in parallel, a
+// reply split into several texts (plus its images) never interleaves with
+// another reply or a "queued" ack.
+const sendLock = createKeyedLock();
+
+export function sendImessage(
   toNumber: string,
   text: string,
   images: OutboundImage[] = [],
+): Promise<SendImessageResult> {
+  return sendLock(normalizeE164(toNumber) || toNumber, () => sendImessageNow(toNumber, text, images));
+}
+
+async function sendImessageNow(
+  toNumber: string,
+  text: string,
+  images: OutboundImage[],
 ): Promise<SendImessageResult> {
   const result: SendImessageResult = { sentImages: [], failedImages: [] };
   const h = headers();
@@ -382,7 +398,7 @@ export async function ingestSendblueImage(
 }
 
 /** Answers one queued text: the same work the webhook used to do inline. */
-export async function processInboundText(item: InboundItem): Promise<void> {
+export async function processInboundText(item: InboundItem, run?: RunContext): Promise<void> {
   const { conversationId, fromNumber: from_number, handle } = item;
   const ingestResults = await Promise.all(item.mediaUrls.map(ingestSendblueImage));
   const ingested: IngestedImage[] = [];
@@ -423,14 +439,17 @@ export async function processInboundText(item: InboundItem): Promise<void> {
 
   const stopTyping = startTypingLoop(from_number);
   try {
-    const { reply, attachments } = await handleUserMessageWithAttachments({
+    const { reply: answer, attachments } = await handleUserMessageWithAttachments({
       conversationId,
       content: textForLog,
       turnTag,
       images: ingested,
       mediaError: ingestErrors.length > 0 ? ingestErrors.join("; ") : undefined,
+      parallelMessages: run ? () => run.parallel().map((other) => other.content) : undefined,
       onThinking: (t) => broadcast("thinking", { conversationId, t }),
     });
+    // Another answer ran alongside this one: say which message this replies to.
+    const reply = answer && run?.overlapped() ? withReplyHeading(answer, replyHeading(run.batch)) : answer;
     if (reply) {
       const elapsed = ((Date.now() - start) / 1000).toFixed(1);
       const safeReplyPreview = redactPhoneNumbers(reply);
@@ -486,7 +505,9 @@ export const inboundQueue = createInboundQueue({
   // Hard cap on a wait while the sender is typing (texts alone stop at 15s),
   // counted from the first waiting text.
   maxTypingWaitMs: maxTypingHoldMsFromEnv(process.env.BOOP_MAX_TYPING_HOLD_MS),
-  // A text sent while Boop is still answering (e.g. a sub-agent is running)
+  // Up to maxConcurrentRuns answers per conversation at once (default 2).
+  maxConcurrentRuns: getMaxConcurrentRuns,
+  // A text sent while every slot is busy (e.g. sub-agents are running)
   // gets a short "queued (position N)" so it doesn't look ignored.
   acknowledge: async ({ conversationId, fromNumber }, text) => {
     await sendImessage(fromNumber, text);
