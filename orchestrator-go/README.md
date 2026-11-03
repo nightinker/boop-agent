@@ -203,6 +203,73 @@ reached, the run uses a one-step `boop` plan instead (see [Model calls](#model-c
 | `llm` | The model, no tools: summarise, compare, draft over earlier outputs. |
 | `join` | Joins the outputs of its dependencies verbatim. No model call. |
 | `echo` | Returns its input; for testing only (not offered to the planner). |
+| `hermes` | [Hermes Agent](https://github.com/NousResearch/hermes-agent) on this machine, for hands-on testing: a real headless browser (navigate, click, fill forms, screenshot and look at the page), a shell for test suites, and the web. Offered only when `hermes` is installed (see [Hermes agent](#hermes-agent)). |
+
+## Hermes agent
+
+`agents/hermes.go` runs a task with Hermes Agent's one-shot CLI,
+`hermes chat --query-file -` (the task goes in on stdin, never as an
+argument), and returns what it answers. It is offered to the planner only on
+a machine where `hermes` is found, so **the Mac and the Linux server each offer
+it when Hermes is installed there**: whichever copy of Boop is active runs
+browser and screenshot tasks on its own machine. Without Hermes the agent is
+simply not offered (`hermes agent off` in the log).
+
+- **Model:** your Claude Pro/Max subscription, through Hermes' official
+  [`claude-subscription-directsdk`](https://github.com/NousResearch/hermes-official-plugins/tree/main/claude-subscription-directsdk)
+  plugin, which drives the `claude` CLI (the same Agent SDK login Boop uses).
+  No API key: the agent strips `ANTHROPIC_API_KEY` and endpoint overrides
+  from Hermes' environment, since that provider refuses them, and adds
+  `USER`/`LOGNAME`, which the `claude` CLI needs to see its login under
+  launchd or systemd. Turns count against the subscription's allowance.
+- **Tools:** `browser,vision,web,terminal,file`, **auto-approved** (`--yolo`):
+  a one-shot run has nobody to approve a command. Anything it decides to run,
+  runs, as the user the sidecar runs as. Narrow it with
+  `ORCHESTRATOR_HERMES_TOOLSETS` (e.g. `browser,vision,web`) or set
+  `ORCHESTRATOR_HERMES_YOLO=off` (shell commands then wait for an approval and
+  time out).
+- **Screenshots:** Hermes' local Chromium is headless and works on a server
+  with no desktop. The task text asks it to end its answer with a
+  `Screenshots:` list of absolute file paths on that machine.
+- **Limits:** 60 turns and 15 minutes per task by default. A timeout or cancel
+  kills Hermes' whole process group (its browser and any shell it started).
+  Exit 2 (Hermes refused the command or its config) and a timeout are not
+  retried; other failures are. The answer passed on is capped at 20,000
+  characters. Cost hint: `high`.
+- `hermes chat` runs the turn in Hermes' own gateway (it starts one if none is
+  running). The CLI is what the orchestrator waits for; if the sidecar is
+  killed mid-task, the turn may finish in the gateway on its own.
+
+| Setting | Default | |
+|---|---|---|
+| `HERMES_BIN` | `hermes` on PATH, then `~/.local/bin`, `~/.hermes/bin`, `/usr/local/bin`, `/opt/homebrew/bin` | Where Hermes is. |
+| `ORCHESTRATOR_HERMES` | on | `off` never offers the agent. |
+| `ORCHESTRATOR_HERMES_PROVIDER` | `claude-subscription-directsdk-experimental` | Set it empty to use the provider from `hermes model`. |
+| `ORCHESTRATOR_HERMES_MODEL` | `sonnet` | `opus` for harder runs; empty uses the provider's default. |
+| `ORCHESTRATOR_HERMES_TOOLSETS` | `browser,vision,web,terminal,file` | Empty uses Hermes' own toolsets. |
+| `ORCHESTRATOR_HERMES_YOLO` | on | `off` keeps Hermes' approvals. |
+| `ORCHESTRATOR_HERMES_MAX_TURNS` | `60` | |
+| `ORCHESTRATOR_HERMES_TIMEOUT` | `15m` | Go duration. |
+
+Boop passes these (and `CLAUDE_CONFIG_DIR`,
+`CLAUDE_SUBSCRIPTION_DIRECTSDK_COMMAND`/`_CONFIG_DIR`) through to the
+sidecar's otherwise minimal environment (`HERMES_ENV_KEYS` in
+`server/orchestrator-sidecar.ts`).
+
+### Setting it up (once per machine: the Mac and/or the Linux server)
+
+Run these as the user Boop runs as:
+
+```sh
+curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash   # Hermes (bundles its Chromium)
+npm install -g @anthropic-ai/claude-code && claude auth login         # if `claude` isn't logged in yet
+hermes plugins install claude-subscription-directsdk                  # Claude subscription provider
+hermes chat --provider claude-subscription-directsdk-experimental --model sonnet -q "Say hi"   # smoke test
+```
+
+The server also needs Go (1.22+) so Boop can build the sidecar; without it the
+orchestrator is off there, Hermes included. Restart Boop afterwards: the
+sidecar logs `hermes agent on (...)`, and `GET /v1/agents` lists `hermes`.
 
 ## How a run is scheduled
 

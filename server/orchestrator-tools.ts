@@ -34,6 +34,7 @@ export const ORCHESTRATOR_DISPATCHER_PROMPT = `
 
 Orchestrator (multi-step work):
 - For a big request that splits into several separate lookups or actions (e.g. compare three sources, check email AND calendar AND the web, then write one answer), call run_orchestration with the whole task instead of several spawn_agent calls. It plans the steps, runs them as sub-agents within a token budget, and returns one merged answer with its sources. Send send_ack first.
+- For hands-on testing (open a site or app in a real browser, click through a flow, take screenshots, run a test suite), call run_orchestration too and say it is a test: on a machine with Hermes installed the orchestrator gives it to its hermes agent (a headless browser, screenshots and a shell); elsewhere a sub-agent does it.
 - Use spawn_agent for single, focused tasks. If run_orchestration says the orchestrator isn't running, fall back to spawn_agent.
 - If it's still running when the tool returns, tell the user and check later with orchestration_status. cancel_orchestration stops a run when the user asks.`;
 
