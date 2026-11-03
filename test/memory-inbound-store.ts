@@ -2,6 +2,8 @@ import type { InboundInput, InboundItem, InboundStore } from "../server/inbound-
 
 type Row = InboundItem & { status: "queued" | "processing" | "done" | "failed" | "cancelled"; error?: string };
 
+const processingCount = (mine: Row[]) => mine.filter((r) => r.status === "processing").length;
+
 /** In-memory stand-in for convex/inboundMessages.ts with the same rules. */
 export function memoryInboundStore() {
   const rows: Row[] = [];
@@ -12,9 +14,9 @@ export function memoryInboundStore() {
       rows.push({ ...input, _id: `row${next++}`, attempts: 0, status: "queued" });
       return true;
     },
-    async claimNext(conversationId) {
+    async claimNext(conversationId, opts) {
       const mine = rows.filter((r) => r.conversationId === conversationId);
-      if (mine.some((r) => r.status === "processing")) return null;
+      if (processingCount(mine) >= (opts?.maxConcurrent ?? 1)) return null;
       const row = mine.find((r) => r.status === "queued");
       if (!row) return null;
       row.status = "processing";
@@ -23,7 +25,7 @@ export function memoryInboundStore() {
     },
     async claimQueued(conversationId, opts) {
       const mine = rows.filter((r) => r.conversationId === conversationId);
-      if (mine.some((r) => r.status === "processing")) return [];
+      if (processingCount(mine) >= (opts?.maxConcurrent ?? 1)) return [];
       const queued = mine.filter((r) => r.status === "queued");
       const claimed = [];
       for (const [i, row] of queued.entries()) {
@@ -57,7 +59,8 @@ export function memoryInboundStore() {
     async waiting(conversationId) {
       const mine = rows.filter((r) => r.conversationId === conversationId);
       return {
-        busy: mine.some((r) => r.status === "processing"),
+        busy: processingCount(mine) > 0,
+        processing: processingCount(mine),
         queued: mine.filter((r) => r.status === "queued").map((r) => ({ _id: r._id, handle: r.handle })),
       };
     },

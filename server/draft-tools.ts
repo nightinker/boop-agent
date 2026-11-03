@@ -80,14 +80,11 @@ export function createDraftDecisionTools(
       "Approve and execute a draft. Spawns an execution agent to actually perform the action based on the stored payload.",
       { draftId: z.string(), integrations: z.array(z.string()) },
       async (args) => {
-        const draft = await convex.query(api.drafts.get, { draftId: args.draftId });
-        if (!draft || draft.status !== "pending") {
+        // Claims the draft atomically, so a parallel turn can't send it twice.
+        const draft = await convex.mutation(api.drafts.decide, { draftId: args.draftId, status: "sent" });
+        if (!draft) {
           return runtimeText(`Draft ${args.draftId} not found or already decided.`, false);
         }
-        await convex.mutation(api.drafts.setStatus, {
-          draftId: args.draftId,
-          status: "sent",
-        });
         const task = `Execute this approved draft. Use the matching integration tool to actually send/create it.
 kind: ${draft.kind}
 summary: ${draft.summary}
@@ -109,10 +106,10 @@ payload JSON: ${draft.payload}`;
       "Cancel a pending draft when the user says 'no', 'cancel', or revises the request.",
       { draftId: z.string() },
       async (args) => {
-        await convex.mutation(api.drafts.setStatus, {
-          draftId: args.draftId,
-          status: "rejected",
-        });
+        const draft = await convex.mutation(api.drafts.decide, { draftId: args.draftId, status: "rejected" });
+        if (!draft) {
+          return runtimeText(`Draft ${args.draftId} not found or already decided.`, false);
+        }
         return runtimeText(`Draft ${args.draftId} rejected.`);
       },
     ),

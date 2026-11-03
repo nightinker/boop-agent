@@ -8,6 +8,13 @@ Format:
 
 ---
 
+## Unreleased — Up to 2 answers per conversation at once
+
+- Changed: each conversation now answers up to `maxConcurrentRuns` messages in parallel (default 2). A text that arrives while one answer is running and a slot is free starts its own answer straight away; only when every slot is busy does it wait in the queue with the "queued (position N)" ack, and positions count waiting texts only. When a slot frees, the waiting texts are answered as before.
+- Added: `maxConcurrentRuns` setting (1–5, default 2; 1 = strictly one at a time, the old behaviour). Shown in `get_config`; the owner changes it with `set_max_concurrent_runs` (or `BOOP_MAX_CONCURRENT_RUNS` as the default). Kept in Convex, so the Mac and the server agree and it survives restarts.
+- Safety: slots are counted inside the Convex claim, so two copies can't exceed the limit; replies to the same number are sent one at a time so their parts never interleave; a reply that overlapped another starts with `↪ Re "…":` naming the message it answers; each turn's history stops at its own message and lists what's being answered in parallel; `send_draft` / `reject_draft` decide a draft atomically (new `drafts.decide`), so two parallel "send it"s can't send it twice.
+- Changed: `inboundMessages.claimNext` / `claimQueued` take an optional `maxConcurrent` (default 1) and `waiting` / `queueOverview` report how many answers are running. Push with `npx convex dev` or `npx convex deploy`.
+
 ## Unreleased — Queued texts get an ack and are answered after the current task
 
 - Added: a text that arrives while Boop is still answering an earlier one (a long turn or a running sub-agent) gets a short "Got it, queued behind the current task (position N)" a couple of seconds later. Texts sent together share one ack. No ack when nothing is running or when the reply lands first. Tunable with `BOOP_QUEUE_ACK_DELAY_MS` (default 2000, 0 = at once).

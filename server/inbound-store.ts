@@ -23,14 +23,18 @@ export const convexInboundStore: InboundStore = {
     const { enqueued } = await convex.mutation(api.inboundMessages.enqueue, input);
     return enqueued;
   },
-  async claimNext(conversationId) {
-    const row = await convex.mutation(api.inboundMessages.claimNext, { conversationId });
+  async claimNext(conversationId, opts) {
+    const row = await convex.mutation(api.inboundMessages.claimNext, {
+      conversationId,
+      ...(opts?.maxConcurrent !== undefined ? { maxConcurrent: opts.maxConcurrent } : {}),
+    });
     return row ? toItem(row) : null;
   },
   async claimQueued(conversationId, opts) {
     const rows = await convex.mutation(api.inboundMessages.claimQueued, {
       conversationId,
       ...(opts?.maxGapMs !== undefined ? { maxGapMs: opts.maxGapMs } : {}),
+      ...(opts?.maxConcurrent !== undefined ? { maxConcurrent: opts.maxConcurrent } : {}),
     });
     return rows.map(toItem);
   },
@@ -48,8 +52,8 @@ export const convexInboundStore: InboundStore = {
     return convex.query(api.inboundMessages.pendingConversations, {});
   },
   async waiting(conversationId) {
-    const { busy, queued } = await convex.query(api.inboundMessages.waiting, { conversationId });
-    return { busy, queued: queued.map((row) => ({ _id: row._id, handle: row.handle })) };
+    const { busy, processing, queued } = await convex.query(api.inboundMessages.waiting, { conversationId });
+    return { busy, processing, queued: queued.map((row) => ({ _id: row._id, handle: row.handle })) };
   },
   cancel(ids, reason) {
     return convex.mutation(api.inboundMessages.cancelQueued, {

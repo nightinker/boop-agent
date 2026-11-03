@@ -1,4 +1,4 @@
-import { mutation, query } from "./_generated/server";
+import { mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
 import { v } from "convex/values";
 
 // A text left "processing" this many times (Boop crashed or restarted while
@@ -11,6 +11,49 @@ const STALE_PROCESSING_MS = 30 * 60_000;
 
 // Most texts one batched turn takes; anything past this waits for the next.
 const MAX_BATCH = 50;
+
+// Most answers one conversation may run at once (the maxConcurrentRuns
+// setting is clamped to this on the server too).
+const MAX_CONCURRENT_CEILING = 5;
+
+function clampConcurrent(value: number | undefined): number {
+  if (value === undefined || !Number.isFinite(value)) return 1;
+  return Math.min(MAX_CONCURRENT_CEILING, Math.max(1, Math.floor(value)));
+}
+
+function isStale(row: { startedAt?: number; enqueuedAt: number }, now: number): boolean {
+  return now - (row.startedAt ?? row.enqueuedAt) >= STALE_PROCESSING_MS;
+}
+
+/** Live (non-stale) texts being answered in a conversation right now. */
+async function liveProcessing(ctx: QueryCtx, conversationId: string) {
+  const rows = await ctx.db
+    .query("inboundMessages")
+    .withIndex("by_conversationId_and_status_and_enqueuedAt", (q) =>
+      q.eq("conversationId", conversationId).eq("status", "processing"),
+    )
+    .take(MAX_BATCH * 2);
+  const now = Date.now();
+  return { live: rows.filter((row) => !isStale(row, now)), stale: rows.filter((row) => isStale(row, now)) };
+}
+
+/**
+ * How many more answers this conversation may start (0 = every slot is in
+ * use). A text "processing" too long lost its worker: it's marked failed so
+ * it stops holding a slot. Counted inside the claiming transaction, so two
+ * copies (or two workers) can never start more than maxConcurrent between them.
+ */
+async function freeSlots(ctx: MutationCtx, conversationId: string, maxConcurrent: number | undefined): Promise<number> {
+  const { live, stale } = await liveProcessing(ctx, conversationId);
+  for (const row of stale) {
+    await ctx.db.patch("inboundMessages", row._id, {
+      status: "failed",
+      finishedAt: Date.now(),
+      error: "Answering it never finished.",
+    });
+  }
+  return Math.max(0, clampConcurrent(maxConcurrent) - live.length);
+}
 
 /**
  * Saves an inbound text unless one with the same Sendblue handle was already
@@ -51,27 +94,14 @@ export const enqueue = mutation({
 });
 
 /**
- * Hands out the oldest queued text in a conversation, but only when nothing
- * else in that conversation is being answered, so texts are handled one at
- * a time and in order.
+ * Hands out the oldest queued text in a conversation, but only while fewer
+ * than maxConcurrent texts there are being answered (default 1: one at a
+ * time, in order).
  */
 export const claimNext = mutation({
-  args: { conversationId: v.string() },
+  args: { conversationId: v.string(), maxConcurrent: v.optional(v.number()) },
   handler: async (ctx, args) => {
-    const busy = await ctx.db
-      .query("inboundMessages")
-      .withIndex("by_conversationId_and_status_and_enqueuedAt", (q) =>
-        q.eq("conversationId", args.conversationId).eq("status", "processing"),
-      )
-      .first();
-    if (busy) {
-      if (Date.now() - (busy.startedAt ?? busy.enqueuedAt) < STALE_PROCESSING_MS) return null;
-      await ctx.db.patch("inboundMessages", busy._id, {
-        status: "failed",
-        finishedAt: Date.now(),
-        error: "Answering it never finished.",
-      });
-    }
+    if ((await freeSlots(ctx, args.conversationId, args.maxConcurrent)) === 0) return null;
 
     const next = await ctx.db
       .query("inboundMessages")
@@ -93,8 +123,8 @@ export const claimNext = mutation({
 
 /**
  * Hands out every queued text in a conversation (oldest first, up to a cap)
- * as one batch, under the same one-at-a-time rule as claimNext. Used when
- * Boop waits for a quiet period and answers a burst of texts in one turn.
+ * as one batch, under the same slot rule as claimNext. Used when Boop waits
+ * for a quiet period and answers a burst of texts in one turn.
  */
 export const claimQueued = mutation({
   args: {
@@ -102,22 +132,10 @@ export const claimQueued = mutation({
     // Stop at the first text sent more than this long after the one before
     // it, so texts that piled up far apart are answered as separate turns.
     maxGapMs: v.optional(v.number()),
+    maxConcurrent: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
-    const busy = await ctx.db
-      .query("inboundMessages")
-      .withIndex("by_conversationId_and_status_and_enqueuedAt", (q) =>
-        q.eq("conversationId", args.conversationId).eq("status", "processing"),
-      )
-      .first();
-    if (busy) {
-      if (Date.now() - (busy.startedAt ?? busy.enqueuedAt) < STALE_PROCESSING_MS) return [];
-      await ctx.db.patch("inboundMessages", busy._id, {
-        status: "failed",
-        finishedAt: Date.now(),
-        error: "Answering it never finished.",
-      });
-    }
+    if ((await freeSlots(ctx, args.conversationId, args.maxConcurrent)) === 0) return [];
 
     const queued = await ctx.db
       .query("inboundMessages")
@@ -218,19 +236,14 @@ function preview(content: string): string {
 }
 
 /**
- * Whether a conversation is being answered right now, and the texts waiting
- * behind that answer, oldest first. Used for the "queued (position N)" ack
+ * Whether a conversation is being answered right now (and how many answers
+ * are running), and the texts waiting for a free slot, oldest first. Used for the "queued (position N)" ack
  * and for "never mind" while texts are waiting.
  */
 export const waiting = query({
   args: { conversationId: v.string() },
   handler: async (ctx, args) => {
-    const busy = await ctx.db
-      .query("inboundMessages")
-      .withIndex("by_conversationId_and_status_and_enqueuedAt", (q) =>
-        q.eq("conversationId", args.conversationId).eq("status", "processing"),
-      )
-      .first();
+    const { live } = await liveProcessing(ctx, args.conversationId);
     const queued = await ctx.db
       .query("inboundMessages")
       .withIndex("by_conversationId_and_status_and_enqueuedAt", (q) =>
@@ -238,7 +251,8 @@ export const waiting = query({
       )
       .take(MAX_BATCH * 2);
     return {
-      busy: busy !== null && Date.now() - (busy.startedAt ?? busy.enqueuedAt) < STALE_PROCESSING_MS,
+      busy: live.length > 0,
+      processing: live.length,
       queued: queued.map((row) => ({ _id: row._id, handle: row.handle })),
     };
   },
@@ -289,13 +303,14 @@ export const queueOverview = query({
       {
         conversationId: string;
         answeringSince: number | null;
+        answering: number;
         queued: Array<{ _id: string; content: string; mediaCount: number; receivedAt: number; enqueuedAt: number }>;
       }
     >();
     const entry = (conversationId: string) => {
       let found = byConversation.get(conversationId);
       if (!found) {
-        found = { conversationId, answeringSince: null, queued: [] };
+        found = { conversationId, answeringSince: null, answering: 0, queued: [] };
         byConversation.set(conversationId, found);
       }
       return found;
@@ -305,6 +320,7 @@ export const queueOverview = query({
       if (now - since >= STALE_PROCESSING_MS) continue;
       const found = entry(row.conversationId);
       found.answeringSince = found.answeringSince === null ? since : Math.min(found.answeringSince, since);
+      found.answering++;
     }
     for (const row of queued) {
       entry(row.conversationId).queued.push({

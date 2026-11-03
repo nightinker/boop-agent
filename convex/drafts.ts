@@ -67,3 +67,21 @@ export const setStatus = mutation({
     return draft;
   },
 });
+
+/**
+ * Sends or rejects a draft only if it's still pending, in one transaction.
+ * Two turns answering in parallel (both told "send it") can't both send the
+ * same draft: the second gets null.
+ */
+export const decide = mutation({
+  args: { draftId: v.string(), status: v.union(v.literal("sent"), v.literal("rejected")) },
+  handler: async (ctx, args) => {
+    const draft = await ctx.db
+      .query("drafts")
+      .withIndex("by_draft_id", (q) => q.eq("draftId", args.draftId))
+      .unique();
+    if (!draft || draft.status !== "pending") return null;
+    await ctx.db.patch(draft._id, { status: args.status, decidedAt: Date.now() });
+    return { kind: draft.kind, summary: draft.summary, payload: draft.payload };
+  },
+});

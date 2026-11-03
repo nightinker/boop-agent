@@ -4,10 +4,13 @@ import { scanForSecrets } from "./secrets/redact.js";
 
 /**
  * Inbound iMessage queue. Every text is saved (by the store) before Boop
- * answers it; each conversation is then drained one text at a time, oldest
- * first, so a second text sent while Boop is still answering the first waits
- * for that reply and sees it in the history. Different conversations still
- * run side by side.
+ * answers it; each conversation is then drained oldest first, with up to
+ * maxConcurrentRuns answers running at once (1 = strictly one at a time, so
+ * a second text waits for the first reply and sees it in the history). With
+ * a free slot a new text starts its own answer straight away; only when every
+ * slot is busy does it wait in the queue. Slots are counted by the store when
+ * a text is claimed, so they hold across restarts and Mac/server copies.
+ * Different conversations always run side by side.
  *
  * With a quiet period (debounceMs > 0) Boop doesn't answer straight away:
  * each new text restarts a per-conversation timer, and once the sender has
@@ -26,11 +29,12 @@ import { scanForSecrets } from "./secrets/redact.js";
  * The texts themselves are saved before the timer starts, so a restart
  * mid-wait loses nothing: they're answered when the queue recovers.
  *
- * A text that arrives while Boop is still answering (a long turn, a spawned
- * sub-agent) waits behind that answer, and the sender gets a short "Got it,
- * queued behind the current task (position N)" so it doesn't look ignored.
- * Once the answer is out, everything that waited is answered in one turn,
- * oldest first and numbered. A bare "never mind" while texts are waiting
+ * A text that arrives while every slot is busy (long turns, spawned
+ * sub-agents) waits behind those answers, and the sender gets a short "Got
+ * it, queued behind the current task (position N)" so it doesn't look
+ * ignored; positions count waiting texts only. Once a slot frees,
+ * everything that waited is answered in one turn, oldest first and
+ * numbered. A bare "never mind" while texts are waiting
  * drops those texts instead.
  */
 
@@ -52,24 +56,39 @@ export interface InboundItem extends InboundInput {
 export interface InboundStore {
   /** False when a text with this handle was already saved or answered. */
   enqueue(input: InboundInput): Promise<boolean>;
-  /** The oldest queued text, or null if none or one is already being answered. */
-  claimNext(conversationId: string): Promise<InboundItem | null>;
   /**
-   * Every queued text, oldest first; empty if none or one is already being
-   * answered. With maxGapMs it stops at the first text sent more than that
-   * long after the one before it.
+   * The oldest queued text, or null if none or maxConcurrent (default 1)
+   * texts are already being answered.
    */
-  claimQueued(conversationId: string, opts?: { maxGapMs?: number }): Promise<InboundItem[]>;
+  claimNext(conversationId: string, opts?: { maxConcurrent?: number }): Promise<InboundItem | null>;
+  /**
+   * Every queued text, oldest first; empty if none or maxConcurrent (default
+   * 1) texts are already being answered. With maxGapMs it stops at the first
+   * text sent more than that long after the one before it.
+   */
+  claimQueued(conversationId: string, opts?: { maxGapMs?: number; maxConcurrent?: number }): Promise<InboundItem[]>;
   finish(id: string, status: "done" | "failed", error?: string): Promise<void>;
   recoverInterrupted(): Promise<{ requeued: number; failed: number }>;
   pendingConversations(): Promise<string[]>;
   /**
-   * Whether a text in this conversation is being answered right now, and the
-   * texts waiting behind it, oldest first.
+   * Whether a text in this conversation is being answered right now, how many
+   * answers are running, and the texts waiting for a slot, oldest first.
    */
-  waiting(conversationId: string): Promise<{ busy: boolean; queued: Array<{ _id: string; handle: string }> }>;
+  waiting(
+    conversationId: string,
+  ): Promise<{ busy: boolean; processing: number; queued: Array<{ _id: string; handle: string }> }>;
   /** Drops texts that are still waiting (not ones being answered); returns how many it dropped. */
   cancel(ids: string[], reason: string): Promise<number>;
+}
+
+/** What an answer knows about the other answers running in its conversation. */
+export interface RunContext {
+  /** The saved texts this answer covers, oldest first (before they were combined). */
+  batch: InboundItem[];
+  /** The other answers running in this conversation right now, oldest first. */
+  parallel(): InboundItem[];
+  /** True once another answer in this conversation has run at the same time as this one. */
+  overlapped(): boolean;
 }
 
 /** Who to send a "queued" acknowledgement to. */
@@ -119,6 +138,23 @@ export interface InboundQueue {
 }
 
 const FINISH_RETRIES = 3;
+
+/** Answers a conversation runs at once unless configured otherwise (the maxConcurrentRuns setting). */
+export const DEFAULT_MAX_CONCURRENT_RUNS = 2;
+/** The most maxConcurrentRuns may be set to, so a typo can't fan out a dozen agent runs. */
+export const MAX_CONCURRENT_RUNS_CEILING = 5;
+
+/** Reads a maxConcurrentRuns value: a whole number from 1 to the ceiling, else the fallback. */
+export function parseMaxConcurrentRuns(
+  value: string | number | null | undefined,
+  fallback = DEFAULT_MAX_CONCURRENT_RUNS,
+): number {
+  if (value === null || value === undefined) return fallback;
+  if (typeof value === "string" && value.trim() === "") return fallback;
+  const n = Number(value);
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n < 1) return fallback;
+  return Math.min(n, MAX_CONCURRENT_RUNS_CEILING);
+}
 
 export const DEFAULT_DEBOUNCE_MS = 5_000;
 /** Hard cap on how long texts alone are held, counted from the first waiting text. */
@@ -251,7 +287,7 @@ export function combineInbound(items: InboundItem[], opts: { waitedBehindRun?: b
 
 export function createInboundQueue(deps: {
   store: InboundStore;
-  process: (item: InboundItem) => Promise<void>;
+  process: (item: InboundItem, run: RunContext) => Promise<void>;
   log?: Pick<Console, "error" | "warn"> & Partial<Pick<Console, "log">>;
   retryDelayMs?: number;
   /**
@@ -280,15 +316,27 @@ export function createInboundQueue(deps: {
   ackDelayMs?: number;
   /** Largest gap between queued texts answered in one turn (default 2 minutes). */
   queueBatchGapMs?: number;
+  /**
+   * Answers one conversation may run at once (default 1 here; Boop's server
+   * passes the maxConcurrentRuns setting, default 2). Read before every
+   * claim, so a changed setting applies to the next text.
+   */
+  maxConcurrentRuns?: number | (() => number | Promise<number>);
 }): InboundQueue {
   const { store, process } = deps;
   const isActive = deps.isActive ?? (() => true);
   const log = deps.log ?? console;
   const retryDelayMs = deps.retryDelayMs ?? 1_000;
+  // One supervisor per conversation: it claims texts into free slots and
+  // waits for answers to finish.
   const draining = new Map<string, Promise<void>>();
   // Set when a text arrives while its conversation is draining, so the
-  // running loop checks once more before it stops.
+  // supervisor checks for a free slot once more before it waits or stops.
   const again = new Set<string>();
+  // Wakes a supervisor that is waiting for an answer to finish.
+  const wakers = new Map<string, () => void>();
+  // Callers waiting for the supervisor's next claim pass (see afterNextClaim).
+  const claimWaiters = new Map<string, Array<() => void>>();
   const debounceMs = Math.max(0, deps.debounceMs ?? 0);
   const maxTypingWaitMs = Math.max(0, deps.maxTypingWaitMs ?? DEFAULT_MAX_TYPING_HOLD_MS);
   const typingIdleMs = Math.max(debounceMs, deps.typingIdleMs ?? DEFAULT_TYPING_IDLE_MS);
@@ -312,8 +360,9 @@ export function createInboundQueue(deps: {
   const FLUSH_RETRY_LIMIT = 3;
   const ackDelayMs = Math.max(0, deps.ackDelayMs ?? DEFAULT_ACK_DELAY_MS);
   const queueBatchGapMs = Math.max(0, deps.queueBatchGapMs ?? DEFAULT_QUEUE_BATCH_GAP_MS);
-  // Conversations whose answer is running on this copy right now.
-  const answering = new Set<string>();
+  // Answers running on this copy right now, per conversation, oldest first.
+  const answering = new Map<string, Array<{ item: InboundItem; overlapped: boolean }>>();
+  const answeringCount = (conversationId: string) => answering.get(conversationId)?.length ?? 0;
   // Texts (by handle) that arrived while their conversation was being answered.
   const behindRun = new Set<string>();
   // Conversations with texts waiting behind an answer: drained as one batch next.
@@ -321,6 +370,18 @@ export function createInboundQueue(deps: {
   // Acks waiting out ackDelayMs, per conversation, so texts sent together share one.
   const pendingAcks = new Map<string, { target: AckTarget; handles: Set<string>; timer: ReturnType<typeof setTimeout> }>();
   const info = (message: string) => (log.log ? log.log(message) : undefined);
+
+  async function concurrencyLimit(): Promise<number> {
+    const configured = deps.maxConcurrentRuns;
+    if (configured === undefined) return 1;
+    try {
+      const value = typeof configured === "function" ? await configured() : configured;
+      return parseMaxConcurrentRuns(value, 1);
+    } catch (err) {
+      log.warn("[inbound] couldn't read maxConcurrentRuns; answering one text at a time", err);
+      return 1;
+    }
+  }
   const who = (conversationId: string) => redactContactHandle(conversationId.replace(/^sms:/, ""));
 
   /**
@@ -394,16 +455,20 @@ export function createInboundQueue(deps: {
     return null;
   }
 
-  async function claim(conversationId: string): Promise<InboundItem[]> {
+  async function claim(conversationId: string, maxConcurrent: number): Promise<InboundItem[]> {
     // Texts that piled up behind an answer go together, quiet period or not.
     // Only texts sent close together share a turn; the rest wait for the next.
     if (backlog.has(conversationId)) {
-      const batch = await store.claimQueued(conversationId, { maxGapMs: queueBatchGapMs });
-      if (batch.length === 0) backlog.delete(conversationId);
+      const batch = await store.claimQueued(conversationId, { maxGapMs: queueBatchGapMs, maxConcurrent });
+      if (batch.length === 0) {
+        // Nothing left, or no free slot: only forget the backlog once it's empty.
+        const state = await store.waiting(conversationId).catch(() => null);
+        if (!state || state.queued.length === 0) backlog.delete(conversationId);
+      }
       return batch;
     }
-    if (debounceMs > 0) return store.claimQueued(conversationId);
-    const item = await store.claimNext(conversationId);
+    if (debounceMs > 0) return store.claimQueued(conversationId, { maxConcurrent });
+    const item = await store.claimNext(conversationId, { maxConcurrent });
     return item ? [item] : [];
   }
 
@@ -422,34 +487,99 @@ export function createInboundQueue(deps: {
     }
   }
 
+  /** Answers one claimed batch in its own slot; never rejects. */
+  async function runBatch(conversationId: string, batch: InboundItem[]): Promise<void> {
+    const waitedBehindRun = batch.some((claimed) => behindRun.has(claimed.handle));
+    for (const claimed of batch) behindRun.delete(claimed.handle);
+    const item = combineInbound(batch, { waitedBehindRun });
+    if (waitedBehindRun) info(`[inbound] answering ${batch.length} queued text(s) for ${who(conversationId)}`);
+    const runs = answering.get(conversationId) ?? [];
+    const mine = { item, overlapped: runs.length > 0 };
+    for (const other of runs) other.overlapped = true;
+    runs.push(mine);
+    answering.set(conversationId, runs);
+    if (mine.overlapped) info(`[inbound] answering ${who(conversationId)} in parallel (${runs.length} running)`);
+    const run: RunContext = {
+      batch,
+      parallel: () => (answering.get(conversationId) ?? []).filter((r) => r !== mine).map((r) => r.item),
+      overlapped: () => mine.overlapped,
+    };
+    try {
+      await process(item, run);
+      for (const claimed of batch) await finish(claimed, "done");
+    } catch (err) {
+      log.error(`[inbound] answering ${item._id} failed`, err);
+      const message = err instanceof Error ? err.message : String(err);
+      for (const claimed of batch) await finish(claimed, "failed", message);
+    } finally {
+      const left = (answering.get(conversationId) ?? []).filter((r) => r !== mine);
+      if (left.length > 0) answering.set(conversationId, left);
+      else answering.delete(conversationId);
+    }
+  }
+
+  /** Resolves after the supervisor's next claim pass (or right away if none will run). */
+  function afterNextClaim(conversationId: string): Promise<void> {
+    return new Promise<void>((resolve) => {
+      const list = claimWaiters.get(conversationId) ?? [];
+      list.push(resolve);
+      claimWaiters.set(conversationId, list);
+    });
+  }
+
+  function releaseClaimWaiters(conversationId: string, waiters = claimWaiters.get(conversationId)): void {
+    if (!waiters) return;
+    if (waiters === claimWaiters.get(conversationId)) claimWaiters.delete(conversationId);
+    for (const resolve of waiters) resolve();
+  }
+
+  /**
+   * Fills a conversation's free slots, oldest text first, then waits for an
+   * answer to finish (or a new text) and fills again, until nothing is
+   * running and nothing more can be claimed.
+   */
   async function loop(conversationId: string): Promise<void> {
-    do {
-      again.delete(conversationId);
+    const running = new Set<Promise<void>>();
+    try {
       for (;;) {
-        // Stop claiming new texts once this copy stands down; the active
-        // copy picks up the rest.
-        if (!isActive()) break;
-        // The sender is still mid-burst; the quiet-period timer drains later.
-        if (timers.has(conversationId)) break;
-        const batch = await claim(conversationId);
-        if (batch.length === 0) break;
-        const waitedBehindRun = batch.some((claimed) => behindRun.has(claimed.handle));
-        for (const claimed of batch) behindRun.delete(claimed.handle);
-        const item = combineInbound(batch, { waitedBehindRun });
-        if (waitedBehindRun) info(`[inbound] answering ${batch.length} queued text(s) for ${who(conversationId)}`);
-        answering.add(conversationId);
+        again.delete(conversationId);
+        // Only callers that arrived before this pass are told it's done.
+        const waiters = claimWaiters.get(conversationId);
+        claimWaiters.delete(conversationId);
         try {
-          await process(item);
-          for (const claimed of batch) await finish(claimed, "done");
-        } catch (err) {
-          log.error(`[inbound] answering ${item._id} failed`, err);
-          const message = err instanceof Error ? err.message : String(err);
-          for (const claimed of batch) await finish(claimed, "failed", message);
+          for (;;) {
+            // Stop claiming new texts once this copy stands down; the active
+            // copy picks up the rest.
+            if (!isActive()) break;
+            // The sender is still mid-burst; the quiet-period timer drains later.
+            if (timers.has(conversationId)) break;
+            const maxConcurrent = await concurrencyLimit();
+            if (running.size >= maxConcurrent) break;
+            const batch = await claim(conversationId, maxConcurrent);
+            if (batch.length === 0) break;
+            const task: Promise<void> = runBatch(conversationId, batch).finally(() => running.delete(task));
+            running.add(task);
+          }
         } finally {
-          answering.delete(conversationId);
+          if (waiters) for (const resolve of waiters) resolve();
         }
+        if (again.has(conversationId)) continue;
+        if (running.size === 0) return;
+        // A slot frees when an answer finishes; a new text may find one free now.
+        await new Promise<void>((resolve) => {
+          wakers.set(conversationId, resolve);
+          void Promise.race(running).then(resolve);
+        });
+        wakers.delete(conversationId);
       }
-    } while (again.has(conversationId));
+    } catch (err) {
+      // Answers already running finish on their own; wait for them before
+      // this supervisor reports the failure, so a retry doesn't double up.
+      await Promise.allSettled([...running]);
+      throw err;
+    } finally {
+      wakers.delete(conversationId);
+    }
   }
 
   function drain(conversationId: string): Promise<void> {
@@ -457,6 +587,7 @@ export function createInboundQueue(deps: {
     const running = draining.get(conversationId);
     if (running) {
       again.add(conversationId);
+      wakers.get(conversationId)?.();
       return running;
     }
     const run = loop(conversationId)
@@ -476,6 +607,7 @@ export function createInboundQueue(deps: {
       })
       .finally(() => {
         draining.delete(conversationId);
+        releaseClaimWaiters(conversationId);
         // A text that arrived after the loop's last check but before this
         // point would otherwise wait for the next poll.
         if (again.delete(conversationId)) void drain(conversationId);
@@ -502,9 +634,9 @@ export function createInboundQueue(deps: {
     clearTimeout(pending.timer);
     try {
       if (!isActive()) return;
-      const state = await store.waiting(conversationId);
-      // The answer finished in the meantime: the real reply is on its way.
-      if (!answering.has(conversationId) && !state.busy) return;
+      const [state, maxConcurrent] = await Promise.all([store.waiting(conversationId), concurrencyLimit()]);
+      // A slot freed in the meantime: the text is (about to be) answered.
+      if (Math.max(answeringCount(conversationId), state.processing) < maxConcurrent) return;
       const positions = state.queued.flatMap((row, i) => (pending.handles.has(row.handle) ? [i + 1] : []));
       if (positions.length === 0) return;
       await sendAck(pending.target, queuedAckText(positions));
@@ -514,17 +646,17 @@ export function createInboundQueue(deps: {
   }
 
   /**
-   * After a text is saved: if its conversation is mid-answer, remember it
-   * waited (so it's batched and numbered next), then either schedule the
-   * "queued" ack or, for a bare "never mind", drop the texts waiting before
-   * it. Never throws.
+   * After a text is saved: if every answer slot in its conversation is busy,
+   * remember it waited (so it's batched and numbered next), then either
+   * schedule the "queued" ack or, for a bare "never mind", drop the texts
+   * waiting before it. A text with a free slot is simply answered. Never throws.
    */
-  async function noteIfBehindRun(input: InboundInput, wasAnswering: boolean): Promise<void> {
+  async function noteIfBehindRun(input: InboundInput): Promise<void> {
     const { conversationId } = input;
     try {
       if (!isActive()) return;
-      const state = await store.waiting(conversationId);
-      if (!wasAnswering && !answering.has(conversationId) && !state.busy) return;
+      const [state, maxConcurrent] = await Promise.all([store.waiting(conversationId), concurrencyLimit()]);
+      if (Math.max(answeringCount(conversationId), state.processing) < maxConcurrent) return;
       const index = state.queued.findIndex((row) => row.handle === input.handle);
       // Already claimed: it's being answered, not waiting.
       if (index < 0) return;
@@ -580,12 +712,15 @@ export function createInboundQueue(deps: {
       const { conversationId } = input;
       if (supportsTyping(meta?.service)) noTyping.delete(conversationId);
       else noTyping.add(conversationId);
-      const wasAnswering = answering.has(conversationId);
       if (debounceMs <= 0) {
         const enqueued = await store.enqueue(input);
         if (enqueued) {
+          // Let the queue try a free slot first, so a text that starts its
+          // own answer isn't mistaken for one waiting behind the others.
+          const claimed = isActive() ? afterNextClaim(conversationId) : Promise.resolve();
           void drain(conversationId);
-          await noteIfBehindRun(input, wasAnswering);
+          await claimed;
+          await noteIfBehindRun(input);
         }
         return enqueued;
       }
@@ -603,7 +738,7 @@ export function createInboundQueue(deps: {
         // A slow save can outlast the hold: its timer already fired and
         // drained before this text existed, so answer it now.
         if (enqueued && !timers.has(conversationId)) flush(conversationId);
-        if (enqueued) await noteIfBehindRun(input, wasAnswering);
+        if (enqueued) await noteIfBehindRun(input);
         return enqueued;
       } finally {
         // A duplicate (or a failed save) for an idle conversation shouldn't
