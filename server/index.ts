@@ -16,6 +16,8 @@ import { startHeartbeatLoop } from "./heartbeat.js";
 import { startConsolidationLoop } from "./consolidation.js";
 import { runCurator, startCuratorLoop } from "./skills/curator.js";
 import { availableIntegrations, cancelAgent, retryAgent, spawnExecutionAgent } from "./execution-agent.js";
+import { startAgentRetry } from "./agent-retry.js";
+import { notifyConversation } from "./notify.js";
 import { createOrchestratorBridgeRouter } from "./orchestrator-bridge.js";
 import { completeWithRuntime } from "./orchestrator-llm.js";
 import { runAgentRuntime } from "./runtimes/index.js";
@@ -343,10 +345,16 @@ async function main() {
     }
   });
 
+  // Starts the retry and answers with the new run's id right away; the answer
+  // is texted to the original conversation when the run completes.
   app.post("/agents/:id/retry", async (req, res) => {
-    const result = await retryAgent(req.params.id);
-    if (!result) {
-      res.status(404).json({ error: "agent not found" });
+    const result = await startAgentRetry(req.params.id, {
+      getAgent: (agentId) => convex.query(api.agents.get, { agentId }),
+      retry: retryAgent,
+      notify: (conversationId, text) => notifyConversation(conversationId, text, "agent_retried"),
+    });
+    if (!result.ok) {
+      res.status(result.status).json({ error: result.error });
       return;
     }
     res.json(result);

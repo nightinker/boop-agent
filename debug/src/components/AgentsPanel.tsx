@@ -1,6 +1,7 @@
-import { useState, type ReactNode } from "react";
+import { useState, type MouseEvent, type ReactNode } from "react";
 import { useQuery } from "convex/react";
 import { api } from "../../../convex/_generated/api.js";
+import { canRetry, requestAgentRetry } from "../lib/agentRetry.js";
 import {
   IntegrationLogo,
   BrailleIndicator,
@@ -530,6 +531,61 @@ function summarizeResultItem(item: unknown): string {
   return `${toolSlug}: result returned`;
 }
 
+function RetryButton({
+  agentId,
+  isDark,
+  onRetried,
+  size = "sm",
+}: {
+  agentId: string;
+  isDark: boolean;
+  onRetried: (newAgentId: string) => void;
+  size?: "sm" | "md";
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const retry = async (event: MouseEvent) => {
+    event.stopPropagation();
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      onRetried(await requestAgentRetry(agentId));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const pad = size === "md" ? "px-3 py-1.5 text-xs" : "px-2.5 py-1 text-[11px]";
+  return (
+    <span className="inline-flex items-center gap-2">
+      {error && (
+        <span className="text-[11px] text-rose-400 max-w-[240px] truncate" title={error}>
+          {error}
+        </span>
+      )}
+      <button
+        type="button"
+        onClick={retry}
+        disabled={busy}
+        title="Run this agent again with the same request"
+        className={`inline-flex items-center gap-1.5 rounded-lg font-medium transition-colors disabled:opacity-60 ${pad} ${
+          isDark
+            ? "bg-white/5 text-zinc-200 hover:bg-white/10"
+            : "bg-zinc-100 text-zinc-700 hover:bg-zinc-200"
+        }`}
+      >
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" className={busy ? "animate-spin" : undefined}>
+          <path d="M3 12a9 9 0 1 0 3-6.7" />
+          <path d="M3 4v5h5" />
+        </svg>
+        {busy ? "Retrying…" : "Retry"}
+      </button>
+    </span>
+  );
+}
+
 export function AgentsPanel({ isDark }: { isDark: boolean }) {
   const agents = useQuery(api.agents.listForDashboard, { limit: 60 });
   const [selected, setSelected] = useState<string | null>(null);
@@ -549,6 +605,7 @@ export function AgentsPanel({ isDark }: { isDark: boolean }) {
       <AgentDetail
         agentId={selected}
         onBack={() => setSelected(null)}
+        onOpen={setSelected}
         isDark={isDark}
       />
     );
@@ -639,6 +696,9 @@ export function AgentsPanel({ isDark }: { isDark: boolean }) {
                     {isActive && <BrailleIndicator />}
                     {cfg.label}
                   </span>
+                  {canRetry(agent.status) && (
+                    <RetryButton agentId={agent.agentId} isDark={isDark} onRetried={setSelected} />
+                  )}
                 </div>
 
                 <p
@@ -697,10 +757,12 @@ export function AgentsPanel({ isDark }: { isDark: boolean }) {
 function AgentDetail({
   agentId,
   onBack,
+  onOpen,
   isDark,
 }: {
   agentId: string;
   onBack: () => void;
+  onOpen: (agentId: string) => void;
   isDark: boolean;
 }) {
   const agent = useQuery(api.agents.getForDashboard, { agentId });
@@ -754,7 +816,19 @@ function AgentDetail({
           {agent.name}
         </span>
         <span className={`text-xs ${cfg.color}`}>{cfg.label}</span>
+        {agent.retryOf && (
+          <button
+            type="button"
+            onClick={() => onOpen(agent.retryOf!)}
+            className={`text-xs underline-offset-2 hover:underline ${isDark ? "text-zinc-500" : "text-zinc-400"}`}
+          >
+            Retry of an earlier run
+          </button>
+        )}
         <div className="ml-auto flex items-center gap-3 text-xs mono max-md:flex-wrap">
+          {canRetry(agent.status) && (
+            <RetryButton agentId={agent.agentId} isDark={isDark} onRetried={onOpen} size="md" />
+          )}
           {agent.costUsd > 0 && (
             <span
               className="text-emerald-500 font-semibold"

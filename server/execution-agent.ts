@@ -162,6 +162,10 @@ export interface SpawnOptions {
    * Used by callers that don't learn the agentId up front (the orchestrator bridge).
    */
   signal?: AbortSignal;
+  /** The run this one re-runs (Retry in the dashboard). */
+  retryOf?: string;
+  /** Called with the new agentId as soon as its row exists, before the run. */
+  onStarted?: (agentId: string) => void;
 }
 
 export type SpawnExecutionAgentOpts = SpawnOptions;
@@ -216,8 +220,10 @@ export async function spawnExecutionAgent(opts: SpawnExecutionAgentOpts): Promis
     reasoningEffort: runtimeConfig.reasoningEffort,
     billingMode: runtimeConfig.billingMode,
     mcpServers: opts.integrations,
+    ...(opts.retryOf ? { retryOf: opts.retryOf } : {}),
   });
   broadcast("agent_spawned", { agentId, name, task: redactSecrets(opts.task) });
+  opts.onStarted?.(agentId);
 
   await convex.mutation(api.agents.update, { agentId, status: "running" });
 
@@ -425,7 +431,10 @@ export function runningAgentIds(): string[] {
   return [...running.keys()];
 }
 
-export async function retryAgent(agentId: string): Promise<SpawnResult | null> {
+export async function retryAgent(
+  agentId: string,
+  extra: Pick<SpawnOptions, "onStarted"> = {},
+): Promise<SpawnResult | null> {
   const existing = await convex.query(api.agents.get, { agentId });
   if (!existing) return null;
   const originalRuntime = existing as typeof existing & Partial<RuntimeConfig>;
@@ -447,6 +456,8 @@ export async function retryAgent(agentId: string): Promise<SpawnResult | null> {
     conversationId: existing.conversationId,
     name: existing.name,
     runtimeConfig,
+    retryOf: agentId,
+    onStarted: extra.onStarted,
   });
 }
 

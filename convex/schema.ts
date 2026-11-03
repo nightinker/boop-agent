@@ -131,6 +131,8 @@ export default defineSchema({
     costUsd: v.number(),
     startedAt: v.number(),
     completedAt: v.optional(v.number()),
+    // The run this one re-ran, when it was started with Retry.
+    retryOf: v.optional(v.string()),
   })
     .index("by_agent_id", ["agentId"])
     .index("by_status", ["status"])
