@@ -17,6 +17,7 @@ reverse proxy with TLS, and Sendblue sends your iMessages to the server.
 | Automations and heartbeats | The desktop app and its "ship it" self-build restart (Mac only) |
 | Composio integrations (Gmail, Google Calendar, Slack, …) and proactive email/Slack | Dashboard over the internet without a login (use Cloudflare Access or an SSH tunnel, below) |
 | Claude or Codex runtime, sub-agents, skills | |
+| Headless web app testing (`webtest`), once Chromium is installed ([setup](WEB-TESTING.md#setup)) | |
 
 On Linux, Boop turns the Mac-only features off by itself: the `apple` and
 `browser` integrations are not registered, their settings read as off even if
@@ -426,6 +427,10 @@ docker compose run --rm boop claude    # optional: /login once; stored in the bo
 docker compose up -d
 docker compose logs -f
 ```
+
+For headless web app testing inside the container, build with
+`docker compose build --build-arg BOOP_WEBTEST_BROWSER=1` (see
+[WEB-TESTING.md](WEB-TESTING.md)).
 
 The compose file publishes the port on `127.0.0.1:3456` only, so put Caddy or
 nginx on the host in front of it as in step 6. Use either Docker or the

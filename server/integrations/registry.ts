@@ -45,6 +45,8 @@ export async function loadIntegrations(): Promise<void> {
   await registerComposioToolkits();
   const { registerBrowserIntegration } = await import("./browser-loader.js");
   registerBrowserIntegration();
+  const { registerWebTestIntegration } = await import("./webtest-loader.js");
+  registerWebTestIntegration();
   const { registerAppleIntegration } = await import("./apple-loader.js");
   registerAppleIntegration();
   const { registerComposioAccountIntegration } = await import("./composio-account-loader.js");
