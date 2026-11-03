@@ -8,6 +8,14 @@ Format:
 
 ---
 
+## Unreleased — Headless web app testing
+
+- Added: a `webtest` integration that tests web apps in a throwaway headless Chromium (Patchright) on whatever machine Boop runs on, including the Linux server. Sub-agents get `run_browser_test` (YAML/JSON plans with scenarios and steps: goto, click, fill, select, expectText, expectUrl, request with expected status, screenshot, …), `browser_check`, `save_test_session`, `save_test_plan`, `ci_status` (GitHub checks via `gh`), `run_repo_tests` and `webtest_setup`. Reports give pass/fail per scenario and step, failure details, console and network errors, and a screenshot per step; the failure screenshots are attached to the reply.
+- Added: test logins by name only: `fill: { secret: NAME }` reads the Mac's secret store, or `WEBTEST_*` environment variables on the server; or a saved session (`~/.config/boop/webtest/sessions`). Used values are redacted from every report.
+- Added: safety rules. Unknown hosts count as production; plans that touch production with destructive steps (pay, buy, upgrade, delete, cancel, non-GET requests) are refused unless the owner explicitly confirmed. Tunable with `BOOP_WEBTEST_NONPROD_HOSTS` / `BOOP_WEBTEST_PRODUCTION_HOSTS`.
+- Added: `npm run webtest:install`, and a `BOOP_WEBTEST_BROWSER=1` Docker build arg. Without a browser, runs report how to install it instead of failing. Docs: `docs/WEB-TESTING.md`.
+- Changed: `js-yaml` is now a direct dependency (it was only pulled in by electron-builder).
+
 ## Unreleased — Orchestrator planner and merger use Boop's Claude runtime
 
 - Changed: the Go orchestrator sidecar's planner, `llm` agent and result merger no longer need `ANTHROPIC_API_KEY`. Their model calls go back to Boop over a new local endpoint, `POST /orchestrator/complete`, which runs the prompt through Boop's own runtime (the Claude Agent SDK, signed in with the Claude account already logged in on the Mac) with no tools, and returns the text and token usage. They're on by default whenever the sidecar runs. The calls show up in the usage log as `orchestrator`.

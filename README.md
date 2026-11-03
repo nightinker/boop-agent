@@ -468,6 +468,10 @@ For Codex runtime, local browser tools are exposed internally under the `local_b
 
 ---
 
+## Web app testing
+
+Boop can test web apps end to end in a headless Chromium: click through flows, fill forms (test logins come from the secret store or a saved session, never chat), check text and API status codes, and reply with a pass/fail report and screenshots. It works on the Linux server too, defaults to staging URLs, and refuses payments/deletes on production unless you confirm. It can add GitHub CI status and a repo's own test results to the report. Setup is `npm run webtest:install`. See [docs/WEB-TESTING.md](docs/WEB-TESTING.md).
+
 ## Reading self-builds from Claude Code (MCP)
 
 `npm run mcp:self-builds` starts a small read-only MCP server over stdio. It lets Claude Code, or any MCP client, see what Boop is building into itself. The repo's `.mcp.json` registers it, so Claude Code opened in this checkout offers it as `boop-self-builds`.
