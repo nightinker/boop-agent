@@ -71,6 +71,15 @@ func run() error {
 	}
 	merger := merge.LLM{Provider: providerFor("merger")}
 	registered = append(registered, agents.LLM{Provider: providerFor("llm-agent")})
+	// Hermes Agent, when it is installed on this machine (Mac or Linux server):
+	// a real browser, screenshots and a shell, on the Claude subscription.
+	if hermes := agents.HermesFromEnv(os.LookupEnv); hermes != nil {
+		registered = append(registered, hermes)
+		log.Printf("hermes agent on (%s, provider %q, model %q, toolsets %q, auto-approve %v)",
+			hermes.Bin, hermes.Provider, hermes.Model, hermes.Toolsets, hermes.Yolo)
+	} else {
+		log.Printf("hermes agent off (not installed, or ORCHESTRATOR_HERMES=off)")
+	}
 	specs := make([]plan.AgentSpec, 0, len(registered))
 	for _, a := range registered {
 		if a.Spec().Name != "echo" { // keep the test agent out of real plans

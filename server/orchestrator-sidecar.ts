@@ -160,6 +160,32 @@ export function findGo(env: NodeJS.ProcessEnv = process.env, exists: (f: string)
 }
 
 /**
+ * What the orchestrator's `hermes` agent needs, on top of the basics: where
+ * Hermes is and how to run it, which Claude login the subscription provider
+ * uses, and USER/LOGNAME (the claude CLI reports logged-out without them when
+ * Boop runs under launchd or systemd).
+ */
+export const HERMES_ENV_KEYS = [
+  "USER",
+  "LOGNAME",
+  "HERMES_BIN",
+  "HERMES_HOME",
+  "ORCHESTRATOR_HERMES",
+  "ORCHESTRATOR_HERMES_PROVIDER",
+  "ORCHESTRATOR_HERMES_MODEL",
+  "ORCHESTRATOR_HERMES_TOOLSETS",
+  "ORCHESTRATOR_HERMES_YOLO",
+  "ORCHESTRATOR_HERMES_MAX_TURNS",
+  "ORCHESTRATOR_HERMES_TIMEOUT",
+  "CLAUDE_CONFIG_DIR",
+  "CLAUDE_SUBSCRIPTION_DIRECTSDK_COMMAND",
+  "CLAUDE_SUBSCRIPTION_DIRECTSDK_CONFIG_DIR",
+  "DISPLAY",
+  "WAYLAND_DISPLAY",
+  "XDG_RUNTIME_DIR",
+] as const;
+
+/**
  * The child's whole environment. Deliberately small: Boop's own environment
  * holds other services' keys, which the sidecar has no business seeing. The
  * API key is added only when the secret store has it.
@@ -175,9 +201,14 @@ export function sidecarEnv(opts: {
     ORCHESTRATOR_ADDR: opts.addr,
     BOOP_URL: opts.boopUrl,
   };
-  for (const key of ["PATH", "HOME", "TMPDIR", "LANG", "TZ", "ORCHESTRATOR_TOKEN", "ORCHESTRATOR_MODEL", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY"]) {
+  for (const key of ["PATH", "HOME", "TMPDIR", "LANG", "TZ", "ORCHESTRATOR_TOKEN", "ORCHESTRATOR_MODEL", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", ...HERMES_ENV_KEYS]) {
     const v = base[key];
     if (v) env[key] = v;
+  }
+  // An ORCHESTRATOR_HERMES_* setting that is present but empty means "leave it
+  // to Hermes' own config" (orchestrator-go/agents/hermes.go), so keep it.
+  for (const key of HERMES_ENV_KEYS) {
+    if (key.startsWith("ORCHESTRATOR_HERMES_") && base[key] === "") env[key] = "";
   }
   if (opts.apiKey) env[SIDECAR_KEY_NAME] = opts.apiKey;
   return env;

@@ -64,6 +64,31 @@ describe("sidecar helpers", () => {
     expect(withKey.CONVEX_DEPLOY_KEY).toBeUndefined();
   });
 
+  it("passes the hermes agent's settings and login identity, keeping an empty setting", () => {
+    const base = {
+      PATH: "/usr/bin",
+      HOME: "/home/boop",
+      USER: "boop",
+      LOGNAME: "boop",
+      HERMES_BIN: "/home/boop/.local/bin/hermes",
+      ORCHESTRATOR_HERMES_MODEL: "opus",
+      ORCHESTRATOR_HERMES_PROVIDER: "",
+      CLAUDE_CONFIG_DIR: "/home/boop/.claude",
+      SENDBLUE_API_SECRET: "s",
+    };
+    const env = sidecarEnv({ addr: "127.0.0.1:3460", boopUrl: "http://127.0.0.1:3456", base });
+    expect(env).toMatchObject({
+      USER: "boop",
+      LOGNAME: "boop",
+      HERMES_BIN: "/home/boop/.local/bin/hermes",
+      ORCHESTRATOR_HERMES_MODEL: "opus",
+      ORCHESTRATOR_HERMES_PROVIDER: "",
+      CLAUDE_CONFIG_DIR: "/home/boop/.claude",
+    });
+    expect(env.SENDBLUE_API_SECRET).toBeUndefined();
+    expect("ORCHESTRATOR_HERMES_TOOLSETS" in env).toBe(false);
+  });
+
   it("finds go on PATH, then the usual install places, or honours GO_BIN", () => {
     const has = (set: string[]) => (f: string) => set.includes(f);
     expect(findGo({ PATH: "/a:/b", HOME: "/h" }, has(["/b/go"]))).toBe("/b/go");
