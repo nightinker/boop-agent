@@ -3,6 +3,7 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import {
   Activity01Icon,
   AiBrain02Icon,
+  Message01Icon,
   ArrowShrink02Icon,
   CheckmarkCircle02Icon,
   DashboardSquare01Icon,
@@ -10,6 +11,8 @@ import {
   MachineRobotIcon,
   WorkflowCircle03Icon,
 } from "@hugeicons/core-free-icons";
+import { useQuery } from "convex/react";
+import { api } from "../../../convex/_generated/api.js";
 import { useDashboardStats } from "../lib/dashboardStats.js";
 import { keepAwakePillLabel, keepAwakeTone, useKeepAwake } from "./KeepAwake.js";
 
@@ -105,6 +108,7 @@ export function DashboardPanel({ isDark }: { isDark: boolean }) {
   // The app shell keeps them fresh; refresh here too when shown on its own.
   const data = useDashboardStats() as DashboardMetrics | undefined;
   const [range, setRange] = useState<TimeRange>("all");
+  const queue = useQuery(api.inboundMessages.queueOverview, {}) as QueueOverview | undefined;
 
   const filtered = useMemo(() => {
     if (!data) return null;
@@ -422,6 +426,8 @@ export function DashboardPanel({ isDark }: { isDark: boolean }) {
           />
         </div>
 
+        <MessageQueueSection queue={queue} c={c} />
+
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1.2fr)_minmax(320px,0.8fr)]">
           <section className={`overflow-hidden rounded-2xl border ${c.panel}`}>
             <PanelHeader
@@ -481,6 +487,78 @@ export function DashboardPanel({ isDark }: { isDark: boolean }) {
         </div>
       </div>
     </div>
+  );
+}
+
+type QueueOverview = {
+  totalQueued: number;
+  conversations: Array<{
+    conversationId: string;
+    answeringSince: number | null;
+    queued: Array<{ _id: string; content: string; mediaCount: number; receivedAt: number }>;
+  }>;
+};
+
+function minutesAgo(ts: number): string {
+  const s = Math.max(0, Math.round((Date.now() - ts) / 1000));
+  if (s < 60) return `${s}s ago`;
+  const m = Math.round(s / 60);
+  return m < 60 ? `${m}m ago` : `${Math.floor(m / 60)}h ${m % 60}m ago`;
+}
+
+/** Texts waiting behind a running answer, per conversation (inboundMessages). */
+function MessageQueueSection({ queue, c }: { queue: QueueOverview | undefined; c: DashboardSurface }) {
+  const conversations = queue?.conversations ?? [];
+  const answering = conversations.filter((conv) => conv.answeringSince !== null).length;
+  return (
+    <section className={`overflow-hidden rounded-2xl border ${c.panel}`}>
+      <PanelHeader
+        icon={Message01Icon}
+        title="Message queue"
+        meta={
+          queue === undefined
+            ? "Loading…"
+            : `${plural(queue.totalQueued, "message")} queued · ${plural(answering, "conversation")} being answered`
+        }
+        c={c}
+      />
+      {conversations.length === 0 ? (
+        <div className={`px-4 py-3 text-xs ${c.sub}`}>
+          Nothing waiting. Texts sent while Boop is busy show up here until they're answered.
+        </div>
+      ) : (
+        <div className={`divide-y ${c.divider}`}>
+          {conversations.map((conv) => (
+            <div key={conv.conversationId} className="px-4 py-3">
+              <div className={`flex flex-wrap items-center justify-between gap-2 text-xs ${c.sub}`}>
+                <span className={`mono break-all ${c.value}`}>{conv.conversationId.replace(/^sms:/, "")}</span>
+                <span>
+                  {conv.answeringSince !== null
+                    ? `answering since ${minutesAgo(conv.answeringSince)}`
+                    : "about to be answered"}
+                </span>
+              </div>
+              {conv.queued.length > 0 && (
+                <ol className="mt-2 space-y-1">
+                  {conv.queued.map((q, i) => (
+                    <li key={q._id} className={`flex gap-2 text-xs ${c.sub}`}>
+                      <span className={`mono shrink-0 ${c.label}`}>{i + 1}.</span>
+                      <span className={`min-w-0 flex-1 break-words ${c.value}`}>
+                        {q.content || "(no text)"}
+                        {q.mediaCount > 0 && (
+                          <span className={c.label}>{` · ${plural(q.mediaCount, "image")}`}</span>
+                        )}
+                      </span>
+                      <span className={`shrink-0 ${c.label}`}>{minutesAgo(q.receivedAt)}</span>
+                    </li>
+                  ))}
+                </ol>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
   );
 }
 

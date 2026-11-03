@@ -25,6 +25,13 @@ import { scanForSecrets } from "./secrets/redact.js";
  * Texts that arrive while Boop is still answering wait for the next batch.
  * The texts themselves are saved before the timer starts, so a restart
  * mid-wait loses nothing: they're answered when the queue recovers.
+ *
+ * A text that arrives while Boop is still answering (a long turn, a spawned
+ * sub-agent) waits behind that answer, and the sender gets a short "Got it,
+ * queued behind the current task (position N)" so it doesn't look ignored.
+ * Once the answer is out, everything that waited is answered in one turn,
+ * oldest first and numbered. A bare "never mind" while texts are waiting
+ * drops those texts instead.
  */
 
 export interface InboundInput {
@@ -47,11 +54,28 @@ export interface InboundStore {
   enqueue(input: InboundInput): Promise<boolean>;
   /** The oldest queued text, or null if none or one is already being answered. */
   claimNext(conversationId: string): Promise<InboundItem | null>;
-  /** Every queued text, oldest first; empty if none or one is already being answered. */
-  claimQueued(conversationId: string): Promise<InboundItem[]>;
+  /**
+   * Every queued text, oldest first; empty if none or one is already being
+   * answered. With maxGapMs it stops at the first text sent more than that
+   * long after the one before it.
+   */
+  claimQueued(conversationId: string, opts?: { maxGapMs?: number }): Promise<InboundItem[]>;
   finish(id: string, status: "done" | "failed", error?: string): Promise<void>;
   recoverInterrupted(): Promise<{ requeued: number; failed: number }>;
   pendingConversations(): Promise<string[]>;
+  /**
+   * Whether a text in this conversation is being answered right now, and the
+   * texts waiting behind it, oldest first.
+   */
+  waiting(conversationId: string): Promise<{ busy: boolean; queued: Array<{ _id: string; handle: string }> }>;
+  /** Drops texts that are still waiting (not ones being answered); returns how many it dropped. */
+  cancel(ids: string[], reason: string): Promise<number>;
+}
+
+/** Who to send a "queued" acknowledgement to. */
+export interface AckTarget {
+  conversationId: string;
+  fromNumber: string;
 }
 
 /** Extra facts about a text that aren't saved with it. */
@@ -105,6 +129,56 @@ export const DEFAULT_MAX_TYPING_HOLD_MS = 60_000;
 export const MAX_TYPING_HOLD_CEILING_MS = 120_000;
 /** How long one "started typing" is trusted when no further typing signal arrives. */
 export const DEFAULT_TYPING_IDLE_MS = 30_000;
+/**
+ * How long a text waits behind a running answer before the sender is told
+ * it's queued. Short, so the ack feels instant, but long enough that a reply
+ * finishing a moment later doesn't come with a pointless "queued" text.
+ */
+export const DEFAULT_ACK_DELAY_MS = 2_000;
+/**
+ * Texts that waited behind an answer are answered together only when each
+ * came within this long of the one before; a bigger gap starts a new turn.
+ */
+export const DEFAULT_QUEUE_BATCH_GAP_MS = 2 * 60_000;
+
+/** BOOP_QUEUE_ACK_DELAY_MS: wait before the "queued" ack; 0 = straight away. */
+export function ackDelayMsFromEnv(value: string | undefined): number {
+  if (value === undefined || value.trim() === "") return DEFAULT_ACK_DELAY_MS;
+  const ms = Number(value);
+  return Number.isFinite(ms) && ms >= 0 ? Math.min(ms, 60_000) : DEFAULT_ACK_DELAY_MS;
+}
+
+/** The "queued" ack: one text, or several that arrived together. Positions count from 1. */
+export function queuedAckText(positions: number[]): string {
+  const sorted = [...positions].sort((a, b) => a - b);
+  if (sorted.length === 1) return `Got it, queued behind the current task (position ${sorted[0]}).`;
+  const contiguous = sorted.every((p, i) => i === 0 || p === sorted[i - 1] + 1);
+  const where = contiguous ? `${sorted[0]}–${sorted[sorted.length - 1]}` : sorted.join(", ");
+  return `Got it, ${sorted.length} messages queued behind the current task (positions ${where}).`;
+}
+
+/** The ack for a "never mind" that dropped waiting texts. */
+export function cancelAckText(dropped: number): string {
+  const what = dropped === 1 ? "1 queued message" : `${dropped} queued messages`;
+  return `Okay, dropped ${what}. The current task is still running; I'll reply when it's done.`;
+}
+
+const CANCEL_PATTERN =
+  /^(?:(?:oh|ah|ok|okay|actually|wait|hmm|sorry|no)\s+)*(?:never ?mind|nvm|cancel|forget|ignore|scratch|disregard)(?:\s+(?:that|it|this|those|them|all|all that|all of that|everything|the rest|my last messages?|what i said))?(?:\s+(?:please|pls|thanks|thx))?$/;
+
+/**
+ * True for a text that only says "never mind" (or "cancel", "forget it",
+ * "scratch that", …). Anything with more to it is a real message.
+ */
+export function isCancelRequest(content: string): boolean {
+  const normalized = content
+    .toLowerCase()
+    .replace(/[^a-z\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!normalized || normalized.length > 60) return false;
+  return CANCEL_PATTERN.test(normalized);
+}
 
 /** BOOP_MESSAGE_DEBOUNCE_MS: quiet period before answering; 0 turns it off. */
 export function debounceMsFromEnv(value: string | undefined): number {
@@ -142,17 +216,32 @@ export function supportsTyping(service: string | undefined): boolean {
   return service.trim().toLowerCase() === "imessage";
 }
 
-/** Folds a burst of texts into one: contents joined by newlines, in order, with every image. */
-export function combineInbound(items: InboundItem[]): InboundItem {
+/**
+ * Folds a burst of texts into one: contents joined by newlines, in order, with
+ * every image. Texts that waited behind a running answer are numbered instead,
+ * each line noting its own images, so their order and what goes with what
+ * survive the merge.
+ */
+export function combineInbound(items: InboundItem[], opts: { waitedBehindRun?: boolean } = {}): InboundItem {
   if (items.length === 1) return items[0];
   const last = items[items.length - 1];
+  const content = opts.waitedBehindRun
+    ? [
+        `[${items.length} messages sent while you were busy with the previous task, oldest first. Answer all of them; if a later one changes or cancels an earlier one, go with the later one.]`,
+        ...items.map((item, i) => {
+          const images = item.mediaUrls.length;
+          const note = images > 0 ? ` [${images === 1 ? "1 image" : `${images} images`} attached]` : "";
+          return `${i + 1}. ${item.content || "(no text)"}${note}`;
+        }),
+      ].join("\n")
+    : items
+        .map((item) => item.content)
+        .filter((content) => content.length > 0)
+        .join("\n");
   return {
     ...last,
     _id: items[0]._id,
-    content: items
-      .map((item) => item.content)
-      .filter((content) => content.length > 0)
-      .join("\n"),
+    content,
     mediaUrls: items.flatMap((item) => item.mediaUrls),
     source: items.some((item) => item.source === "webhook") ? "webhook" : "poll",
     receivedAt: items[0].receivedAt,
@@ -181,6 +270,16 @@ export function createInboundQueue(deps: {
   maxTypingWaitMs?: number;
   /** How long one "started typing" holds without another signal (default 30s). */
   typingIdleMs?: number;
+  /**
+   * Sends the short "queued behind the current task" text. Without it texts
+   * still queue and drain in order, just without the ack. Never awaited by
+   * the webhook path for longer than one store read.
+   */
+  acknowledge?: (target: AckTarget, text: string) => Promise<void>;
+  /** Wait before the ack (default 2s), so a reply that's about to land doesn't get one. */
+  ackDelayMs?: number;
+  /** Largest gap between queued texts answered in one turn (default 2 minutes). */
+  queueBatchGapMs?: number;
 }): InboundQueue {
   const { store, process } = deps;
   const isActive = deps.isActive ?? (() => true);
@@ -211,6 +310,16 @@ export function createInboundQueue(deps: {
   // Flushes whose drain failed (e.g. the store was unreachable), retried a few times.
   const flushRetries = new Map<string, number>();
   const FLUSH_RETRY_LIMIT = 3;
+  const ackDelayMs = Math.max(0, deps.ackDelayMs ?? DEFAULT_ACK_DELAY_MS);
+  const queueBatchGapMs = Math.max(0, deps.queueBatchGapMs ?? DEFAULT_QUEUE_BATCH_GAP_MS);
+  // Conversations whose answer is running on this copy right now.
+  const answering = new Set<string>();
+  // Texts (by handle) that arrived while their conversation was being answered.
+  const behindRun = new Set<string>();
+  // Conversations with texts waiting behind an answer: drained as one batch next.
+  const backlog = new Set<string>();
+  // Acks waiting out ackDelayMs, per conversation, so texts sent together share one.
+  const pendingAcks = new Map<string, { target: AckTarget; handles: Set<string>; timer: ReturnType<typeof setTimeout> }>();
   const info = (message: string) => (log.log ? log.log(message) : undefined);
   const who = (conversationId: string) => redactContactHandle(conversationId.replace(/^sms:/, ""));
 
@@ -286,6 +395,13 @@ export function createInboundQueue(deps: {
   }
 
   async function claim(conversationId: string): Promise<InboundItem[]> {
+    // Texts that piled up behind an answer go together, quiet period or not.
+    // Only texts sent close together share a turn; the rest wait for the next.
+    if (backlog.has(conversationId)) {
+      const batch = await store.claimQueued(conversationId, { maxGapMs: queueBatchGapMs });
+      if (batch.length === 0) backlog.delete(conversationId);
+      return batch;
+    }
     if (debounceMs > 0) return store.claimQueued(conversationId);
     const item = await store.claimNext(conversationId);
     return item ? [item] : [];
@@ -317,7 +433,11 @@ export function createInboundQueue(deps: {
         if (timers.has(conversationId)) break;
         const batch = await claim(conversationId);
         if (batch.length === 0) break;
-        const item = combineInbound(batch);
+        const waitedBehindRun = batch.some((claimed) => behindRun.has(claimed.handle));
+        for (const claimed of batch) behindRun.delete(claimed.handle);
+        const item = combineInbound(batch, { waitedBehindRun });
+        if (waitedBehindRun) info(`[inbound] answering ${batch.length} queued text(s) for ${who(conversationId)}`);
+        answering.add(conversationId);
         try {
           await process(item);
           for (const claimed of batch) await finish(claimed, "done");
@@ -325,6 +445,8 @@ export function createInboundQueue(deps: {
           log.error(`[inbound] answering ${item._id} failed`, err);
           const message = err instanceof Error ? err.message : String(err);
           for (const claimed of batch) await finish(claimed, "failed", message);
+        } finally {
+          answering.delete(conversationId);
         }
       }
     } while (again.has(conversationId));
@@ -362,6 +484,92 @@ export function createInboundQueue(deps: {
     return run;
   }
 
+  async function sendAck(target: AckTarget, text: string): Promise<void> {
+    if (!deps.acknowledge) return;
+    try {
+      await deps.acknowledge(target, text);
+      info(`[inbound] ack sent to ${who(target.conversationId)}: ${JSON.stringify(text)}`);
+    } catch (err) {
+      log.warn(`[inbound] couldn't send a queued ack`, err);
+    }
+  }
+
+  /** Sends the conversation's waiting ack, if its texts are still waiting behind an answer. */
+  async function flushAck(conversationId: string): Promise<void> {
+    const pending = pendingAcks.get(conversationId);
+    if (!pending) return;
+    pendingAcks.delete(conversationId);
+    clearTimeout(pending.timer);
+    try {
+      if (!isActive()) return;
+      const state = await store.waiting(conversationId);
+      // The answer finished in the meantime: the real reply is on its way.
+      if (!answering.has(conversationId) && !state.busy) return;
+      const positions = state.queued.flatMap((row, i) => (pending.handles.has(row.handle) ? [i + 1] : []));
+      if (positions.length === 0) return;
+      await sendAck(pending.target, queuedAckText(positions));
+    } catch (err) {
+      log.warn(`[inbound] couldn't check the queue for an ack`, err);
+    }
+  }
+
+  /**
+   * After a text is saved: if its conversation is mid-answer, remember it
+   * waited (so it's batched and numbered next), then either schedule the
+   * "queued" ack or, for a bare "never mind", drop the texts waiting before
+   * it. Never throws.
+   */
+  async function noteIfBehindRun(input: InboundInput, wasAnswering: boolean): Promise<void> {
+    const { conversationId } = input;
+    try {
+      if (!isActive()) return;
+      const state = await store.waiting(conversationId);
+      if (!wasAnswering && !answering.has(conversationId) && !state.busy) return;
+      const index = state.queued.findIndex((row) => row.handle === input.handle);
+      // Already claimed: it's being answered, not waiting.
+      if (index < 0) return;
+      behindRun.add(input.handle);
+      backlog.add(conversationId);
+      const target = { conversationId, fromNumber: input.fromNumber };
+
+      if (isCancelRequest(input.content) && input.mediaUrls.length === 0 && index > 0) {
+        const earlier = state.queued.slice(0, index);
+        const dropped = await store.cancel(
+          earlier.map((row) => row._id),
+          "Cancelled by a later \"never mind\" while Boop was busy.",
+        );
+        if (dropped > 0) {
+          // The "never mind" itself has nothing left to answer.
+          await store.cancel([state.queued[index]._id], "A \"never mind\" that dropped the queued texts before it.");
+          for (const row of [...earlier, state.queued[index]]) behindRun.delete(row.handle);
+          const pending = pendingAcks.get(conversationId);
+          if (pending) {
+            for (const row of earlier) pending.handles.delete(row.handle);
+            if (pending.handles.size === 0) {
+              clearTimeout(pending.timer);
+              pendingAcks.delete(conversationId);
+            }
+          }
+          info(`[inbound] "never mind" from ${who(conversationId)} dropped ${dropped} queued text(s)`);
+          await sendAck(target, cancelAckText(dropped));
+          return;
+        }
+      }
+
+      if (!deps.acknowledge) return;
+      const pending = pendingAcks.get(conversationId);
+      if (pending) {
+        pending.handles.add(input.handle);
+        return;
+      }
+      const timer = setTimeout(() => void flushAck(conversationId), ackDelayMs);
+      timer.unref?.();
+      pendingAcks.set(conversationId, { target, handles: new Set([input.handle]), timer });
+    } catch (err) {
+      log.warn(`[inbound] couldn't check whether a text is queued behind an answer`, err);
+    }
+  }
+
   async function drainAll(): Promise<void> {
     const conversations = await store.pendingConversations();
     await Promise.all(conversations.map((id) => drain(id)));
@@ -372,9 +580,13 @@ export function createInboundQueue(deps: {
       const { conversationId } = input;
       if (supportsTyping(meta?.service)) noTyping.delete(conversationId);
       else noTyping.add(conversationId);
+      const wasAnswering = answering.has(conversationId);
       if (debounceMs <= 0) {
         const enqueued = await store.enqueue(input);
-        if (enqueued) void drain(conversationId);
+        if (enqueued) {
+          void drain(conversationId);
+          await noteIfBehindRun(input, wasAnswering);
+        }
         return enqueued;
       }
       // Open (or restart) the quiet period before saving, so a drain already
@@ -391,6 +603,7 @@ export function createInboundQueue(deps: {
         // A slow save can outlast the hold: its timer already fired and
         // drained before this text existed, so answer it now.
         if (enqueued && !timers.has(conversationId)) flush(conversationId);
+        if (enqueued) await noteIfBehindRun(input, wasAnswering);
         return enqueued;
       } finally {
         // A duplicate (or a failed save) for an idle conversation shouldn't
@@ -437,6 +650,9 @@ export function createInboundQueue(deps: {
       sawTyping.clear();
       flushRetries.clear();
       noTyping.clear();
+      // Unsent acks are dropped; the texts themselves stay queued.
+      for (const pending of pendingAcks.values()) clearTimeout(pending.timer);
+      pendingAcks.clear();
       return waiting;
     },
     async recover() {

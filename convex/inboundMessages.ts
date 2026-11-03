@@ -97,7 +97,12 @@ export const claimNext = mutation({
  * Boop waits for a quiet period and answers a burst of texts in one turn.
  */
 export const claimQueued = mutation({
-  args: { conversationId: v.string() },
+  args: {
+    conversationId: v.string(),
+    // Stop at the first text sent more than this long after the one before
+    // it, so texts that piled up far apart are answered as separate turns.
+    maxGapMs: v.optional(v.number()),
+  },
   handler: async (ctx, args) => {
     const busy = await ctx.db
       .query("inboundMessages")
@@ -122,7 +127,10 @@ export const claimQueued = mutation({
       .take(MAX_BATCH);
     const now = Date.now();
     const claimed = [];
-    for (const row of queued) {
+    for (const [i, row] of queued.entries()) {
+      if (args.maxGapMs !== undefined && i > 0 && Math.abs(row.receivedAt - queued[i - 1].receivedAt) > args.maxGapMs) {
+        break;
+      }
       await ctx.db.patch("inboundMessages", row._id, {
         status: "processing",
         attempts: row.attempts + 1,
@@ -201,5 +209,117 @@ export const recent = query({
       .query("inboundMessages")
       .order("desc")
       .take(Math.min(args.limit ?? 20, 100));
+  },
+});
+
+/** Shortens a queued text for status views; the full text stays in the row. */
+function preview(content: string): string {
+  return content.length > 140 ? `${content.slice(0, 140)}…` : content;
+}
+
+/**
+ * Whether a conversation is being answered right now, and the texts waiting
+ * behind that answer, oldest first. Used for the "queued (position N)" ack
+ * and for "never mind" while texts are waiting.
+ */
+export const waiting = query({
+  args: { conversationId: v.string() },
+  handler: async (ctx, args) => {
+    const busy = await ctx.db
+      .query("inboundMessages")
+      .withIndex("by_conversationId_and_status_and_enqueuedAt", (q) =>
+        q.eq("conversationId", args.conversationId).eq("status", "processing"),
+      )
+      .first();
+    const queued = await ctx.db
+      .query("inboundMessages")
+      .withIndex("by_conversationId_and_status_and_enqueuedAt", (q) =>
+        q.eq("conversationId", args.conversationId).eq("status", "queued"),
+      )
+      .take(MAX_BATCH * 2);
+    return {
+      busy: busy !== null && Date.now() - (busy.startedAt ?? busy.enqueuedAt) < STALE_PROCESSING_MS,
+      queued: queued.map((row) => ({ _id: row._id, handle: row.handle })),
+    };
+  },
+});
+
+/**
+ * Drops texts that are still waiting (a "never mind" sent while Boop was
+ * busy). Rows already being answered are left alone. Returns how many it dropped.
+ */
+export const cancelQueued = mutation({
+  args: { ids: v.array(v.id("inboundMessages")), reason: v.string() },
+  handler: async (ctx, args) => {
+    let cancelled = 0;
+    for (const id of args.ids.slice(0, MAX_BATCH * 2)) {
+      const row = await ctx.db.get("inboundMessages", id);
+      if (!row || row.status !== "queued") continue;
+      await ctx.db.patch("inboundMessages", id, {
+        status: "cancelled",
+        finishedAt: Date.now(),
+        error: args.reason.slice(0, 2000),
+      });
+      cancelled++;
+    }
+    return cancelled;
+  },
+});
+
+/**
+ * What is being answered and what is waiting, per conversation: for the
+ * dashboard and Boop's own list_queued_messages tool.
+ */
+export const queueOverview = query({
+  args: {},
+  handler: async (ctx) => {
+    const [processing, queued] = await Promise.all([
+      ctx.db
+        .query("inboundMessages")
+        .withIndex("by_status_and_enqueuedAt", (q) => q.eq("status", "processing"))
+        .take(100),
+      ctx.db
+        .query("inboundMessages")
+        .withIndex("by_status_and_enqueuedAt", (q) => q.eq("status", "queued"))
+        .take(200),
+    ]);
+    const now = Date.now();
+    const byConversation = new Map<
+      string,
+      {
+        conversationId: string;
+        answeringSince: number | null;
+        queued: Array<{ _id: string; content: string; mediaCount: number; receivedAt: number; enqueuedAt: number }>;
+      }
+    >();
+    const entry = (conversationId: string) => {
+      let found = byConversation.get(conversationId);
+      if (!found) {
+        found = { conversationId, answeringSince: null, queued: [] };
+        byConversation.set(conversationId, found);
+      }
+      return found;
+    };
+    for (const row of processing) {
+      const since = row.startedAt ?? row.enqueuedAt;
+      if (now - since >= STALE_PROCESSING_MS) continue;
+      const found = entry(row.conversationId);
+      found.answeringSince = found.answeringSince === null ? since : Math.min(found.answeringSince, since);
+    }
+    for (const row of queued) {
+      entry(row.conversationId).queued.push({
+        _id: row._id,
+        content: preview(row.content),
+        mediaCount: row.mediaUrls.length,
+        receivedAt: row.receivedAt,
+        enqueuedAt: row.enqueuedAt,
+      });
+    }
+    return {
+      totalQueued: queued.length,
+      conversations: [...byConversation.values()].filter(
+        (c) => c.queued.length > 0 || c.answeringSince !== null,
+      ),
+    };
   },
 });

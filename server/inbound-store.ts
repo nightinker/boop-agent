@@ -27,8 +27,11 @@ export const convexInboundStore: InboundStore = {
     const row = await convex.mutation(api.inboundMessages.claimNext, { conversationId });
     return row ? toItem(row) : null;
   },
-  async claimQueued(conversationId) {
-    const rows = await convex.mutation(api.inboundMessages.claimQueued, { conversationId });
+  async claimQueued(conversationId, opts) {
+    const rows = await convex.mutation(api.inboundMessages.claimQueued, {
+      conversationId,
+      ...(opts?.maxGapMs !== undefined ? { maxGapMs: opts.maxGapMs } : {}),
+    });
     return rows.map(toItem);
   },
   async finish(id, status, error) {
@@ -43,5 +46,15 @@ export const convexInboundStore: InboundStore = {
   },
   pendingConversations() {
     return convex.query(api.inboundMessages.pendingConversations, {});
+  },
+  async waiting(conversationId) {
+    const { busy, queued } = await convex.query(api.inboundMessages.waiting, { conversationId });
+    return { busy, queued: queued.map((row) => ({ _id: row._id, handle: row.handle })) };
+  },
+  cancel(ids, reason) {
+    return convex.mutation(api.inboundMessages.cancelQueued, {
+      ids: ids as Id<"inboundMessages">[],
+      reason,
+    });
   },
 };

@@ -8,6 +8,14 @@ Format:
 
 ---
 
+## Unreleased — Queued texts get an ack and are answered after the current task
+
+- Added: a text that arrives while Boop is still answering an earlier one (a long turn or a running sub-agent) gets a short "Got it, queued behind the current task (position N)" a couple of seconds later. Texts sent together share one ack. No ack when nothing is running or when the reply lands first. Tunable with `BOOP_QUEUE_ACK_DELAY_MS` (default 2000, 0 = at once).
+- Changed: once the running answer is out, the texts that waited are answered right after, oldest first, in one turn, numbered, with each text's images noted on its line. Texts that waited more than 2 minutes apart get separate turns. They're saved in `inboundMessages` as before, so they survive a restart or a Mac/server takeover, and a text delivered twice is still queued once.
+- Added: a bare "never mind" / "cancel that" / "forget it" sent while texts are waiting drops those texts (new `cancelled` status) and says so; the running task carries on. With nothing waiting it's queued like any text.
+- Added: `list_queued_messages` (what's waiting and whether an answer is running) and a "Message queue" section on the dashboard.
+- Changed: the `inboundMessages.status` validator gains `"cancelled"` and `claimQueued` takes an optional `maxGapMs` (a Convex schema change; push it with `npx convex dev` or `npx convex deploy`).
+
 ## Unreleased — Headless web app testing
 
 - Added: a `webtest` integration that tests web apps in a throwaway headless Chromium (Patchright) on whatever machine Boop runs on, including the Linux server. Sub-agents get `run_browser_test` (YAML/JSON plans with scenarios and steps: goto, click, fill, select, expectText, expectUrl, request with expected status, screenshot, …), `browser_check`, `save_test_session`, `save_test_plan`, `ci_status` (GitHub checks via `gh`), `run_repo_tests` and `webtest_setup`. Reports give pass/fail per scenario and step, failure details, console and network errors, and a screenshot per step; the failure screenshots are attached to the reply.

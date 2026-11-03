@@ -136,7 +136,8 @@ describe("inbound queue with a quiet period", () => {
 
     await vi.advanceTimersByTimeAsync(1);
     await settle();
-    expect(started).toEqual(["first", "second\nthird"]);
+    expect(started).toHaveLength(2);
+    expect(started[1]).toMatch(/sent while you were busy[^\n]*\n1\. second\n2\. third$/);
     release();
   });
 
