@@ -326,6 +326,42 @@ export function startupLogName(buildId: string, existing: string[]): string {
   return `${prefix}${Math.max(0, ...attempts) + 1}.log`;
 }
 
+/** A failed build that never opened a PR keeps its worktree this long, so its diff can still be read. */
+export const KEEP_FAILED_WORKTREE_MS = 3 * 24 * 60 * 60_000;
+
+const BUILD_IN_PROGRESS = new Set(["queued", "coding", "testing", "shipping", "restarting"]);
+
+/**
+ * Self-build worktrees under .claude/worktrees that are safe to delete. Each
+ * one holds a full checkout plus node_modules (a release one also holds the
+ * packaged app, ~2 GB), and nothing reads it once its build is over:
+ * - `self-build-release-<id>`: the restart script has already copied the app
+ *   out, so it goes unless an install may still be using it.
+ * - `self-build-<id>`: goes once the build has a PR (its diff then comes from
+ *   GitHub) or was cancelled; a failed build without a PR keeps it for a few
+ *   days. A build that is still running always keeps it.
+ * Worktrees with any other name are not Boop's and are left alone.
+ */
+export function worktreesToPrune(input: {
+  worktrees: { name: string; mtimeMs: number }[];
+  builds: Record<string, { status: string; prUrl?: string } | null>;
+  installBusy: boolean;
+  now: number;
+}): string[] {
+  return input.worktrees
+    .filter(({ name, mtimeMs }) => {
+      if (name.startsWith("self-build-release-")) return !input.installBusy;
+      if (!name.startsWith("self-build-")) return false;
+      const build = input.builds[name.slice("self-build-".length)];
+      const old = input.now - mtimeMs > KEEP_FAILED_WORKTREE_MS;
+      if (!build) return old;
+      if (BUILD_IN_PROGRESS.has(build.status)) return false;
+      if (build.prUrl || build.status === "cancelled") return true;
+      return old;
+    })
+    .map(({ name }) => name);
+}
+
 export const KEEP_BUILD_LOGS = 10;
 
 /**
