@@ -17,6 +17,7 @@ import {
   healthTimeoutSeconds,
   isOwnerConversation,
   logsToPrune,
+  worktreesToPrune,
   newBuildId,
   parseGitHubRepo,
   prBody,
@@ -312,8 +313,9 @@ function launchBuild(input: { conversationId: string; request: string; buildId: 
       await setStatus(buildId, { status: "failed", error: message.slice(0, 4000) }).catch(() => undefined);
       await notify(input.conversationId, `Build ${buildId} failed: ${message.split("\n")[0]}`);
     })
-    .finally(() => {
+    .finally(async () => {
       activityLogs.delete(buildId);
+      await pruneWorktrees(input.src);
       void startNextQueuedBuild();
     });
 }
@@ -665,6 +667,7 @@ export async function resumeSelfBuilds(opts: { startQueued?: boolean } = {}): Pr
     // its health check, so wait for it rather than treating it as stuck.
     if (recent.some((b) => b.status === "restarting")) await waitForRestartResult();
     await reportPendingRestart();
+    await pruneWorktrees(sourceDir()!);
 
     const interrupted = await convex.mutation(api.selfBuilds.failInterrupted, {});
     if (interrupted.length > 0) syncBuildWakeLock();
@@ -724,6 +727,7 @@ export async function installMissedUpdates(): Promise<boolean> {
       beforeRestart: async () => undefined,
     }).catch(async (err) => {
       catchingUp = false;
+      await pruneWorktrees(src);
       const message = err instanceof Error ? err.message : String(err);
       console.error("[self-build] catch-up install failed", err);
       if (conversationId) await notify(conversationId, `Installing the latest main failed: ${message.split("\n")[0]}`);
@@ -740,6 +744,47 @@ async function waitForRestartResult(): Promise<void> {
   const deadline = Date.now() + RESTART_RESULT_WAIT_MS;
   while (!existsSync(resultPath) && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 5_000));
+  }
+}
+
+/**
+ * Deletes the self-build worktrees nothing needs any more (see
+ * worktreesToPrune). Runs after every build and on startup; when Convex can't
+ * say how the builds went, it deletes nothing.
+ */
+export async function pruneWorktrees(src: string): Promise<void> {
+  const dir = join(src, ".claude", "worktrees");
+  if (!existsSync(dir)) return;
+  try {
+    const names = (await readdir(dir)).filter((name) => name.startsWith("self-build-"));
+    if (names.length === 0) return;
+    const worktrees = await Promise.all(
+      names.map(async (name) => ({ name, mtimeMs: (await stat(join(dir, name)).catch(() => null))?.mtimeMs ?? Date.now() })),
+    );
+    const builds: Record<string, { status: string; prUrl?: string } | null> = {};
+    for (const { name } of worktrees) {
+      if (name.startsWith("self-build-release-")) continue;
+      const buildId = name.slice("self-build-".length);
+      builds[buildId] = await convex.query(api.selfBuilds.get, { buildId });
+    }
+    const recent = await convex.query(api.selfBuilds.recent, { limit: 10 });
+    const installBusy = catchingUp || recent.some((b) => b.status === "shipping" || b.status === "restarting");
+    const doomed = worktreesToPrune({ worktrees, builds, installBusy, now: Date.now() });
+    for (const name of doomed) {
+      const path = join(dir, name);
+      // A release worktree borrows the main checkout's node_modules through a
+      // symlink: drop the link first so nothing can follow it.
+      const modules = join(path, "node_modules");
+      if ((await lstat(modules).catch(() => null))?.isSymbolicLink()) await unlink(modules);
+      const removed = await sh("git", ["worktree", "remove", "--force", path], { cwd: src });
+      if (!removed.ok) await rm(path, { recursive: true, force: true });
+    }
+    if (doomed.length > 0) {
+      await sh("git", ["worktree", "prune"], { cwd: src });
+      console.log(`[self-build] removed ${doomed.length} finished worktree(s): ${doomed.join(", ")}`);
+    }
+  } catch (err) {
+    console.warn("[self-build] couldn't prune old worktrees", err instanceof Error ? err.message : err);
   }
 }
 
