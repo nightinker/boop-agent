@@ -17,6 +17,7 @@ import { COMPOSIO_ACCOUNT_INTEGRATION } from "./integrations/composio-account-lo
 import { createAutomationTools } from "./automation-tools.js";
 import { createDraftDecisionTools } from "./draft-tools.js";
 import { createSelfTools } from "./self-tools.js";
+import { AGENT_RETRY_ALLOWED_TOOLS, createAgentRetryTools } from "./agent-retry-tools.js";
 import { WEBTEST_DISPATCHER_PROMPT, WEBTEST_INTEGRATION } from "./webtest/tools.js";
 import {
   SECRETS_DISPATCHER_ALLOWED_TOOLS,
@@ -110,6 +111,13 @@ the sub-agent works. Examples of good acks:
 Order: send_ack → spawn_agent → (wait) → final reply with the result.
 Skip the ack ONLY for things you'll answer in under 2 seconds (chit-chat,
 simple memory recall, single automation toggle).
+
+Failed runs: sub-agents already retry a dropped connection 3 times on their
+own. When the user asks what failed, which requests didn't go through, or to
+retry, call list_failed_agents, then retry_agent with the agentId of each run
+they want again (by default the ones whose latest retry did not complete).
+retry_agent returns at once and the answer is texted when it finishes, so
+reply with what you started; never spawn_agent the same task yourself.
 
 Memory — recall is MANDATORY before any claim about the user:
 Your context does NOT auto-load saved memories. You must call recall()
@@ -672,6 +680,7 @@ export async function handleUserMessageWithAttachments(
     ...createAutomationTools(opts.conversationId),
     ...createDraftDecisionTools(opts.conversationId, runtimeConfig),
     ...createSelfTools(opts.conversationId),
+    ...createAgentRetryTools(),
     ...createSelfBuildTools(opts.conversationId),
     ...createLearnTools(opts.conversationId),
     ...createSecretDispatcherTools(opts.conversationId),
@@ -782,6 +791,7 @@ export async function handleUserMessageWithAttachments(
               "mcp__boop-draft-decisions__list_drafts",
               "mcp__boop-draft-decisions__send_draft",
               ...SELF_BUILD_ALLOWED_TOOLS,
+              ...AGENT_RETRY_ALLOWED_TOOLS,
               ...LEARN_ALLOWED_TOOLS,
               ...SECRETS_DISPATCHER_ALLOWED_TOOLS,
               ORCHESTRATOR_HEALTH_TOOL,

@@ -44,6 +44,13 @@ export interface RuntimeRunRequest {
   onToolUse?: (toolName: string, input: unknown) => void | Promise<void>;
   onToolResult?: (toolName: string, text: string) => void | Promise<void>;
   onUsage?: (usage: UsageTotals) => void | Promise<void>;
+  /**
+   * Continue this earlier session instead of starting a new one (Claude
+   * runtime). Used to carry on after a dropped connection.
+   */
+  resumeSessionId?: string;
+  /** Called with the session id as soon as the runtime reports it. */
+  onSessionId?: (sessionId: string) => void;
 }
 
 export interface RuntimeRunResult {
@@ -55,6 +62,8 @@ export interface RuntimeRunResult {
    * holds the error message.
    */
   errorCode?: string;
+  /** The runtime's session id, when it has one (Claude runtime). */
+  sessionId?: string;
 }
 
 export function runtimeText(text: string, success = true): RuntimeToolResult {
