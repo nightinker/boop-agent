@@ -261,6 +261,8 @@ export default defineSchema({
       v.literal("processing"),
       v.literal("done"),
       v.literal("failed"),
+      // Dropped by a "never mind" sent while it was still waiting.
+      v.literal("cancelled"),
     ),
     attempts: v.number(),
     error: v.optional(v.string()),

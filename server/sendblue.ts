@@ -9,6 +9,7 @@ import { redactContactHandle, redactPhoneNumbers } from "./privacy.js";
 import { maybeHandleScriptedDemoReply } from "./scripted-demo-replies.js";
 import { verifySendblueWebhookSecret } from "./sendblue-webhook-auth.js";
 import {
+  ackDelayMsFromEnv,
   createInboundQueue,
   debounceMsFromEnv,
   inboundFromSendblue,
@@ -485,6 +486,13 @@ export const inboundQueue = createInboundQueue({
   // Hard cap on a wait while the sender is typing (texts alone stop at 15s),
   // counted from the first waiting text.
   maxTypingWaitMs: maxTypingHoldMsFromEnv(process.env.BOOP_MAX_TYPING_HOLD_MS),
+  // A text sent while Boop is still answering (e.g. a sub-agent is running)
+  // gets a short "queued (position N)" so it doesn't look ignored.
+  acknowledge: async ({ conversationId, fromNumber }, text) => {
+    await sendImessage(fromNumber, text);
+    broadcast("message_queued", { conversationId, text });
+  },
+  ackDelayMs: ackDelayMsFromEnv(process.env.BOOP_QUEUE_ACK_DELAY_MS),
 });
 
 /**

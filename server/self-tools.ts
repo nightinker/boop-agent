@@ -62,6 +62,9 @@ import {
 } from "./claude-profiles.js";
 import { isOwnerConversation } from "./self-build/plan.js";
 import { convexSkillStore, createListSkillsTool } from "./skills/tools.js";
+import { api } from "../convex/_generated/api.js";
+import { convex } from "./convex-client.js";
+import { formatQueueOverview } from "./queue-status.js";
 
 const NAMESPACE = "boop-self";
 
@@ -263,6 +266,16 @@ export function createSelfTools(conversationId?: string): RuntimeTool[] {
       'Return how long the Boop server process has been running, as a compact line like "Up 3h 12m". Use when the user asks how long Boop has been up/running ("uptime?", "how long have you been up?"). Reply with just that line.',
       {},
       async () => runtimeText(formatUptime(serverUptimeSeconds())),
+    ),
+    defineRuntimeTool(
+      NAMESPACE,
+      "list_queued_messages",
+      "List the iMessages waiting to be answered: texts that arrived while Boop was still busy answering an earlier one (a long turn or a running sub-agent), oldest first, with whether an answer is in progress. The owner sees every conversation; anyone else only their own. Use when the user asks what's queued, whether Boop got their earlier messages, or what it still has to answer.",
+      {},
+      async () => {
+        const overview = await convex.query(api.inboundMessages.queueOverview, {});
+        return runtimeText(formatQueueOverview(overview, { conversationId, owner: isOwner(conversationId) }));
+      },
     ),
     createListSkillsTool(convexSkillStore("user"), NAMESPACE),
     defineRuntimeTool(

@@ -1,6 +1,6 @@
 import type { InboundInput, InboundItem, InboundStore } from "../server/inbound-queue.js";
 
-type Row = InboundItem & { status: "queued" | "processing" | "done" | "failed"; error?: string };
+type Row = InboundItem & { status: "queued" | "processing" | "done" | "failed" | "cancelled"; error?: string };
 
 /** In-memory stand-in for convex/inboundMessages.ts with the same rules. */
 export function memoryInboundStore() {
@@ -21,10 +21,15 @@ export function memoryInboundStore() {
       row.attempts++;
       return { ...row };
     },
-    async claimQueued(conversationId) {
+    async claimQueued(conversationId, opts) {
       const mine = rows.filter((r) => r.conversationId === conversationId);
       if (mine.some((r) => r.status === "processing")) return [];
-      const claimed = mine.filter((r) => r.status === "queued");
+      const queued = mine.filter((r) => r.status === "queued");
+      const claimed = [];
+      for (const [i, row] of queued.entries()) {
+        if (opts?.maxGapMs !== undefined && i > 0 && Math.abs(row.receivedAt - queued[i - 1].receivedAt) > opts.maxGapMs) break;
+        claimed.push(row);
+      }
       for (const row of claimed) {
         row.status = "processing";
         row.attempts++;
@@ -48,6 +53,24 @@ export function memoryInboundStore() {
     },
     async pendingConversations() {
       return [...new Set(rows.filter((r) => r.status === "queued").map((r) => r.conversationId))];
+    },
+    async waiting(conversationId) {
+      const mine = rows.filter((r) => r.conversationId === conversationId);
+      return {
+        busy: mine.some((r) => r.status === "processing"),
+        queued: mine.filter((r) => r.status === "queued").map((r) => ({ _id: r._id, handle: r.handle })),
+      };
+    },
+    async cancel(ids, reason) {
+      let cancelled = 0;
+      for (const row of rows) {
+        if (ids.includes(row._id) && row.status === "queued") {
+          row.status = "cancelled";
+          row.error = reason;
+          cancelled++;
+        }
+      }
+      return cancelled;
     },
   };
   return { store, rows };

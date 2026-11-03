@@ -46,14 +46,14 @@ describe("inbound queue", () => {
 
     worker.release("first");
     await tick();
-    expect(worker.started).toEqual(["first", "second"]);
+    // The two that waited behind the first answer go together, in order.
+    const queued = worker.started[1];
+    expect(queued).toContain("1. second\n2. third");
 
-    worker.release("second");
-    await tick();
-    worker.release("third");
+    worker.release(queued);
     await queue.drain("sms:a");
 
-    expect(worker.started).toEqual(["first", "second", "third"]);
+    expect(worker.started).toEqual(["first", queued]);
     expect(worker.maxActive).toBe(1);
     expect(rows.map((r) => r.status)).toEqual(["done", "done", "done"]);
   });

@@ -269,6 +269,8 @@ When the user asks about Boop itself, pick the tool by intent:
   for, accept or repeat a password, API key, token or login code in chat.
   If the owner sends one, don't use it; tell them to sign in with
   \`claude\` in Terminal instead.
+- Asks what's queued, whether Boop got their earlier texts, or what it still
+  has to answer → list_queued_messages
 - Wants to know which integrations or accounts are connected → list_integrations
 - Wondering whether some service is connectable at all → search_composio_catalog
 - Probing the actual capabilities of a specific connected integration
@@ -800,6 +802,7 @@ export async function handleUserMessageWithAttachments(
               "mcp__boop-ack__send_ack",
               "mcp__boop-self__get_config",
               "mcp__boop-self__uptime",
+              "mcp__boop-self__list_queued_messages",
               "mcp__boop-self__set_runtime",
               "mcp__boop-self__set_model",
               "mcp__boop-self__set_codex_reasoning_effort",
