@@ -33,6 +33,7 @@ import {
   RESUME_PROMPT,
   retryNotice,
   waitUnlessAborted,
+  STALLED_AFTER_MS,
 } from "./agent-auto-retry.js";
 import { redactSecrets, redactSecretsDeep } from "./secrets/redact.js";
 import { WEBTEST_EXECUTION_PROMPT, WEBTEST_INTEGRATION } from "./webtest/tools.js";
@@ -42,7 +43,22 @@ import {
   createSecretExecutionTools,
 } from "./secrets/tools.js";
 
-const running = new Map<string, AbortController>();
+/**
+ * Why a run was stopped:
+ * - "user": stopped from the dashboard or by the caller. Never retried.
+ * - "stale": no activity for a while (heartbeat). Resumed like a dropped connection.
+ * - "timeout": over the hard time limit (heartbeat). Never retried.
+ */
+export type CancelReason = "user" | "stale" | "timeout";
+
+interface RunningAgent {
+  abort: AbortController;
+  startedAt: number;
+  lastActivity: number;
+  cancelReason?: CancelReason;
+}
+
+const running = new Map<string, RunningAgent>();
 
 function randomId(prefix: string): string {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
@@ -203,11 +219,18 @@ export interface SpawnResult {
 export async function spawnExecutionAgent(opts: SpawnExecutionAgentOpts): Promise<SpawnResult> {
   const agentId = randomId("agent");
   const name = opts.name ?? (opts.integrations.join("+") || "general");
-  const abort = new AbortController();
-  running.set(agentId, abort);
+  const entry: RunningAgent = {
+    abort: new AbortController(),
+    startedAt: Date.now(),
+    lastActivity: Date.now(),
+  };
+  running.set(agentId, entry);
+  const touch = () => {
+    entry.lastActivity = Date.now();
+  };
   if (opts.signal) {
-    if (opts.signal.aborted) abort.abort();
-    else opts.signal.addEventListener("abort", () => abort.abort(), { once: true });
+    if (opts.signal.aborted) cancelAgent(agentId, "user");
+    else opts.signal.addEventListener("abort", () => cancelAgent(agentId, "user"), { once: true });
   }
 
   const shortId = agentId.slice(-6);
@@ -306,9 +329,10 @@ export async function spawnExecutionAgent(opts: SpawnExecutionAgentOpts): Promis
           claudeMcpServers: mcpServers,
           tools: runtimeTools,
           allowedTools,
-          abortController: abort,
+          abortController: entry.abort,
           mode: "execution",
           onText: async (text) => {
+            touch();
             buffer += text;
             await convex.mutation(api.agents.addLog, {
               agentId,
@@ -317,6 +341,7 @@ export async function spawnExecutionAgent(opts: SpawnExecutionAgentOpts): Promis
             });
           },
           onToolUse: async (toolName, input) => {
+            touch();
             const toolShort = toolName.replace(/^mcp__[a-z-]+__/, "");
             const accounts = extractAccounts(input);
             const acctSuffix = accounts.length ? ` [${accounts.join(", ")}]` : "";
@@ -333,6 +358,7 @@ export async function spawnExecutionAgent(opts: SpawnExecutionAgentOpts): Promis
             broadcast("agent_tool", { agentId, toolName, accounts });
           },
           onToolResult: async (_toolName, rawText) => {
+            touch();
             const text = redactSecrets(rawText);
             const last = toolCalls[toolCalls.length - 1];
             if (last && last.result === undefined) last.result = text.slice(0, 300);
@@ -370,26 +396,40 @@ export async function spawnExecutionAgent(opts: SpawnExecutionAgentOpts): Promis
         // Without a session to resume, starting over is only safe when no
         // tool ran yet: a tool may already have sent or changed something.
         const canResume = Boolean(sessionId) || toolCalls.length === 0;
-        if (
-          delay === undefined ||
-          abort.signal.aborted ||
-          !canResume ||
-          !isTransientAgentError(err)
-        ) {
+        // The heartbeat stops runs that went quiet; those get resumed too.
+        const stalled = entry.abort.signal.aborted && entry.cancelReason === "stale";
+        const retryable = stalled || (!entry.abort.signal.aborted && isTransientAgentError(err));
+        if (delay === undefined || !canResume || !retryable) {
           throw err;
         }
+        if (stalled) {
+          // An aborted controller can't be reused; the next attempt needs a fresh one.
+          entry.abort = new AbortController();
+          entry.cancelReason = undefined;
+          touch();
+        }
         attempt++;
-        const notice = retryNotice(attempt, delay, redactSecrets(String(err)));
+        const reason = stalled
+          ? `no activity for ${Math.round(STALLED_AFTER_MS / 60_000)} minutes`
+          : redactSecrets(String(err));
+        const notice = retryNotice(attempt, delay, reason);
         logAgent(notice);
         await convex.mutation(api.agents.addLog, { agentId, logType: "error", content: notice });
         broadcast("agent_retrying", { agentId, attempt, delayMs: delay });
-        if (!(await waitUnlessAborted(delay, abort.signal))) throw err;
+        if (!(await waitUnlessAborted(delay, entry.abort.signal))) throw err;
         if (!sessionId) buffer = "";
       }
     }
   } catch (err) {
-    status = abort.signal.aborted ? "cancelled" : "failed";
+    const stoppedByUser =
+      entry.abort.signal.aborted && (entry.cancelReason ?? "user") === "user";
+    status = stoppedByUser ? "cancelled" : "failed";
     errorMsg = redactSecrets(String(err));
+    if (entry.abort.signal.aborted && entry.cancelReason === "stale") {
+      errorMsg = `Stopped after no activity for ${Math.round(STALLED_AFTER_MS / 60_000)} minutes. ${errorMsg}`;
+    } else if (entry.abort.signal.aborted && entry.cancelReason === "timeout") {
+      errorMsg = `Stopped after hitting the run time limit. ${errorMsg}`;
+    }
     if (attempt > 0) errorMsg += ` (after ${attempt} automatic ${attempt === 1 ? "retry" : "retries"})`;
     if (isUsageLimitError(err)) usageLimited = true;
     await convex.mutation(api.agents.addLog, {
@@ -472,15 +512,26 @@ export async function spawnExecutionAgent(opts: SpawnExecutionAgentOpts): Promis
   };
 }
 
-export function cancelAgent(agentId: string): boolean {
-  const abort = running.get(agentId);
-  if (!abort) return false;
-  abort.abort();
+export function cancelAgent(agentId: string, reason: CancelReason = "user"): boolean {
+  const entry = running.get(agentId);
+  if (!entry) return false;
+  entry.cancelReason = reason;
+  entry.abort.abort();
   return true;
 }
 
 export function runningAgentIds(): string[] {
   return [...running.keys()];
+}
+
+/** Start time and last activity of each live run, for the heartbeat. */
+export function runningAgentActivity(): Map<string, { startedAt: number; lastActivity: number }> {
+  return new Map(
+    [...running.entries()].map(([id, e]) => [
+      id,
+      { startedAt: e.startedAt, lastActivity: e.lastActivity },
+    ]),
+  );
 }
 
 export async function retryAgent(

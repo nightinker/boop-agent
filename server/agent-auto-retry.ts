@@ -9,6 +9,12 @@
 import { isUsageLimitError } from "./usage-limit.js";
 import type { UsageTotals } from "./usage.js";
 
+/**
+ * A live run with no text or tool activity for this long is treated as stuck:
+ * the heartbeat stops it and it is resumed like a dropped connection.
+ */
+export const STALLED_AFTER_MS = 15 * 60 * 1000;
+
 /** Wait before each automatic retry: 3 retries after the first failure. */
 export const AUTO_RETRY_DELAYS_MS = [5_000, 15_000, 45_000] as const;
 
@@ -62,7 +68,8 @@ export function isTransientAgentError(err: unknown, errorCode?: string): boolean
  * repeated.
  */
 export const RESUME_PROMPT =
-  "The connection dropped before you finished. Carry on from where you stopped: " +
+  "The run stopped before you finished (a dropped connection or a step that hung). " +
+  "Carry on from where you stopped: " +
   "do not repeat steps that already succeeded (check before redoing anything that " +
   "sends, posts, buys or deletes), then give your final answer.";
 
