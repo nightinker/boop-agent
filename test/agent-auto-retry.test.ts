@@ -35,7 +35,7 @@ import {
   retryNotice,
   waitUnlessAborted,
 } from "../server/agent-auto-retry.js";
-import { spawnExecutionAgent } from "../server/execution-agent.js";
+import { cancelAgent, spawnExecutionAgent } from "../server/execution-agent.js";
 import { EMPTY_USAGE } from "../server/usage.js";
 
 const config = { runtime: "claude" as const, model: "sonnet", billingMode: "api" as const };
@@ -184,5 +184,78 @@ describe("spawnExecutionAgent auto-retry", () => {
 
     expect(res.status).toBe("completed");
     expect(lastUpdate().inputTokens).toBe(5);
+  });
+
+  it("resumes a run the heartbeat stopped for going quiet", async () => {
+    let agentId = "";
+    mocks.runAgentRuntime
+      .mockImplementationOnce(async (_cfg, req) => {
+        req.onSessionId?.("session-1");
+        await req.onToolUse?.("Bash", { command: "aws s3 cp" });
+        cancelAgent(agentId, "stale");
+        expect(req.abortController.signal.aborted).toBe(true);
+        throw new Error("Claude Code process aborted by user");
+      })
+      .mockImplementationOnce(async (_cfg, req) => {
+        expect(req.abortController.signal.aborted).toBe(false);
+        return { text: "Uploaded.", usage: usage(1), sessionId: "session-1" };
+      });
+
+    const res = await spawnExecutionAgent({
+      task: "Upload the renders",
+      integrations: [],
+      runtimeConfig: config,
+      onStarted: (id) => {
+        agentId = id;
+      },
+    });
+
+    expect(res.status).toBe("completed");
+    const resumed = mocks.runAgentRuntime.mock.calls[1][1];
+    expect(resumed.resumeSessionId).toBe("session-1");
+    expect(logs().some((l) => l.includes("no activity for 15 minutes"))).toBe(true);
+  });
+
+  it("does not retry a run the user stopped", async () => {
+    let agentId = "";
+    mocks.runAgentRuntime.mockImplementationOnce(async (_cfg, req) => {
+      req.onSessionId?.("session-1");
+      cancelAgent(agentId);
+      throw new Error("Claude Code process aborted by user");
+    });
+
+    const res = await spawnExecutionAgent({
+      task: "x",
+      integrations: [],
+      runtimeConfig: config,
+      onStarted: (id) => {
+        agentId = id;
+      },
+    });
+
+    expect(res.status).toBe("cancelled");
+    expect(mocks.runAgentRuntime).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not retry a run stopped at the hard time limit", async () => {
+    let agentId = "";
+    mocks.runAgentRuntime.mockImplementationOnce(async (_cfg, req) => {
+      req.onSessionId?.("session-1");
+      cancelAgent(agentId, "timeout");
+      throw new Error("Claude Code process aborted by user");
+    });
+
+    const res = await spawnExecutionAgent({
+      task: "x",
+      integrations: [],
+      runtimeConfig: config,
+      onStarted: (id) => {
+        agentId = id;
+      },
+    });
+
+    expect(res.status).toBe("failed");
+    expect(mocks.runAgentRuntime).toHaveBeenCalledTimes(1);
+    expect(lastUpdate().error).toContain("time limit");
   });
 });
