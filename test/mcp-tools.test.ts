@@ -59,9 +59,9 @@ describe("write guard", () => {
       }) as typeof fetch,
     });
     const out = await sendMessage(ctx, { content: "hello" });
-    expect(out).toEqual({ conversationId: "mcp:harley", reply: "hi" });
+    expect(out).toEqual({ conversationId: "mcp:default", reply: "hi" });
     expect(calls[0].url).toBe("http://boop.test/chat");
-    expect(JSON.parse(calls[0].body)).toEqual({ conversationId: "mcp:harley", content: "hello" });
+    expect(JSON.parse(calls[0].body)).toEqual({ conversationId: "mcp:default", content: "hello" });
   });
 
   it("surfaces a /chat failure", async () => {

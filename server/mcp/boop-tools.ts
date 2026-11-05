@@ -8,7 +8,7 @@ import {
   type MemoryTier,
 } from "../memory/types.js";
 
-export const DEFAULT_CONVERSATION_ID = "mcp:harley";
+export const DEFAULT_CONVERSATION_ID = "mcp:default";
 export const DEFAULT_BOOP_URL = "http://localhost:3456";
 const MESSAGE_PREVIEW_LIMIT = 4000;
 
@@ -19,6 +19,8 @@ export interface BoopMcpContext {
   /** Returns null when no embedding could be produced. */
   embed: (text: string) => Promise<number[] | null>;
   allowRemoteWrites: boolean;
+  /** Conversation used when a tool call names none. */
+  defaultConversationId?: string;
   fetchImpl?: typeof fetch;
 }
 
@@ -207,7 +209,7 @@ export async function sendMessage(
   ctx: BoopMcpContext,
   args: { content: string; conversationId?: string },
 ): Promise<{ conversationId: string; reply: string }> {
-  const conversationId = args.conversationId ?? DEFAULT_CONVERSATION_ID;
+  const conversationId = args.conversationId ?? ctx.defaultConversationId ?? DEFAULT_CONVERSATION_ID;
   const res = await (ctx.fetchImpl ?? fetch)(`${ctx.boopUrl}/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -226,7 +228,7 @@ export async function readMessages(
 ): Promise<
   Array<{ role: string; content: string; createdAt: number; truncated: boolean }>
 > {
-  const conversationId = args.conversationId ?? DEFAULT_CONVERSATION_ID;
+  const conversationId = args.conversationId ?? ctx.defaultConversationId ?? DEFAULT_CONVERSATION_ID;
   const rows = await ctx.convex.query(api.messages.recent, {
     conversationId,
     limit: args.limit ?? 20,

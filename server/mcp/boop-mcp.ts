@@ -39,6 +39,7 @@ const ctx: BoopMcpContext = {
   convexUrl,
   boopUrl: process.env.BOOP_URL ?? DEFAULT_BOOP_URL,
   allowRemoteWrites: process.env.BOOP_MCP_ALLOW_REMOTE_WRITES === "1",
+  defaultConversationId: process.env.BOOP_MCP_CONVERSATION_ID,
   embed: async (text) => {
     const { embed } = await import("../embeddings.js");
     return embed(text);
