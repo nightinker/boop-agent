@@ -31,6 +31,8 @@
     "start": "npm run preflight && tsx server/index.ts",
     "deploy:convex": "convex deploy",
     "typecheck": "tsc --noEmit",
+    "mcp": "tsx server/mcp/boop-mcp.ts",
+    "test:mcp": "node scripts/mcp-test.mjs",
     "test": "vitest run --passWithNoTests",
     "test:watch": "vitest",
     "mcp:self-builds": "tsx server/mcp/self-builds.ts",
