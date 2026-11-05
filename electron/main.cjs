@@ -278,14 +278,58 @@ ELECTRON_RUN_AS_NODE=1 exec "${process.execPath}" "$@"
   return { dir: shimDir, cmd: shim };
 }
 
+function compareVersions(a, b) {
+  const pa = a.replace(/^v/, "").split(".").map(Number);
+  const pb = b.replace(/^v/, "").split(".").map(Number);
+  for (let i = 0; i < 3; i++) if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) - (pb[i] || 0);
+  return 0;
+}
+
+/**
+ * The bin folder of the user's nvm default Node, if they use nvm. Apps opened
+ * from Finder don't get nvm's PATH, so without this `npm` falls through to
+ * Homebrew's Node, which can be broken or a different version.
+ */
+function nvmBinDir(env = process.env, home = os.homedir()) {
+  if (env.NVM_BIN && fs.existsSync(path.join(env.NVM_BIN, "npm"))) return env.NVM_BIN;
+  const nvmDir = env.NVM_DIR || path.join(home, ".nvm");
+  const versionsDir = path.join(nvmDir, "versions", "node");
+  let installed;
+  try {
+    installed = fs.readdirSync(versionsDir).filter((v) => /^v\d+\.\d+\.\d+$/.test(v));
+  } catch {
+    return null;
+  }
+  if (installed.length === 0) return null;
+
+  // Follow alias chains like default -> lts/* -> lts/jod -> v22.
+  let wanted = "default";
+  for (let i = 0; i < 5; i++) {
+    let next;
+    try {
+      next = fs.readFileSync(path.join(nvmDir, "alias", wanted), "utf8").trim();
+    } catch {
+      break;
+    }
+    wanted = next;
+  }
+  const prefix = /^v?\d/.test(wanted) ? `v${wanted.replace(/^v/, "")}` : "";
+  const matches = installed.filter((v) => !prefix || v === prefix || v.startsWith(`${prefix}.`));
+  const pick = (matches.length ? matches : installed).sort(compareVersions).pop();
+  const bin = path.join(versionsDir, pick, "bin");
+  return fs.existsSync(path.join(bin, "npm")) ? bin : null;
+}
+
 function childEnv() {
   const nodeShim = writeNodeShim();
+  const nvmBin = process.platform === "darwin" ? nvmBinDir() : null;
   const binDir = path.join(runtimeRoot, "node_modules", ".bin");
   const pathKey = process.platform === "win32" ? "Path" : "PATH";
   const existingPath = process.env[pathKey] || process.env.PATH || "";
   const macCliPaths =
     process.platform === "darwin"
       ? [
+          nvmBin,
           path.join(os.homedir(), ".local", "bin"),
           path.join(os.homedir(), ".npm-global", "bin"),
           "/opt/homebrew/bin",
