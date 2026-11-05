@@ -290,6 +290,17 @@ export const setLifecycle = mutation({
   },
 });
 
+export const getByMemoryId = query({
+  args: { memoryId: v.string() },
+  handler: async (ctx, args) => {
+    if (isDemoId(args.memoryId)) return null;
+    return await ctx.db
+      .query("memoryRecords")
+      .withIndex("by_memory_id", (q) => q.eq("memoryId", args.memoryId))
+      .unique();
+  },
+});
+
 export const remove = mutation({
   args: { memoryId: v.string() },
   handler: async (ctx, args) => {

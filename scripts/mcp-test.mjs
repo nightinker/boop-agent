@@ -33,9 +33,15 @@ const convex = spawn("npx", ["convex", "dev", "--typecheck=disable"], {
   cwd: root,
   env: { ...process.env, CONVEX_AGENT_MODE: "anonymous" },
   stdio: ["ignore", "pipe", "inherit"],
+  detached: true,
 });
 
-const stop = () => convex.kill("SIGTERM");
+// Kill the whole process group: `npx` spawns the backend binary as a grandchild.
+const stop = () => {
+  try {
+    process.kill(-convex.pid, "SIGTERM");
+  } catch {}
+};
 process.on("exit", stop);
 
 convex.stdout.on("data", (chunk) => process.stdout.write(chunk));
