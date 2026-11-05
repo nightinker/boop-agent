@@ -8,7 +8,7 @@ import {
   type MemoryTier,
 } from "../memory/types.js";
 
-export const DEFAULT_CONVERSATION_ID = "mcp:claude-code";
+export const DEFAULT_CONVERSATION_ID = "mcp:harley";
 export const DEFAULT_BOOP_URL = "http://localhost:3456";
 const MESSAGE_PREVIEW_LIMIT = 4000;
 
