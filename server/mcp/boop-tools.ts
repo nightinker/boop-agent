@@ -105,15 +105,6 @@ async function embedOrNull(ctx: BoopMcpContext, content: string): Promise<number
   }
 }
 
-async function findMemory(ctx: BoopMcpContext, memoryId: string): Promise<MemoryView | null> {
-  for (const lifecycle of ["active", "archived", "pruned"] as const) {
-    const rows = await ctx.convex.query(api.memoryRecords.list, { lifecycle, limit: 1000 });
-    const hit = rows.find((r) => r.memoryId === memoryId);
-    if (hit) return toView(hit as never);
-  }
-  return null;
-}
-
 export async function addMemory(
   ctx: BoopMcpContext,
   args: {
@@ -157,10 +148,12 @@ export async function updateMemory(
     importance?: number;
     tier?: MemoryTier;
   },
-): Promise<{ memoryId: string; embedded: boolean | "kept-old-vector" }> {
+): Promise<{ memoryId: string; embedding: "refreshed" | "kept-old-vector" | "unchanged" }> {
   assertWritable(ctx);
   if (args.content !== undefined) rejectSecret(args.content);
-  const existing = await findMemory(ctx, args.memoryId);
+  const existing = await ctx.convex.query(api.memoryRecords.getByMemoryId, {
+    memoryId: args.memoryId,
+  });
   if (!existing) throw new Error(`No memory with id ${args.memoryId}.`);
   const segment = args.segment ?? existing.segment;
   const content = args.content ?? existing.content;
@@ -174,7 +167,8 @@ export async function updateMemory(
     tier: args.tier ?? existing.tier,
     segment,
     importance: args.importance ?? existing.importance,
-    decayRate: SEGMENT_DEFAULTS[segment].decayRate,
+    decayRate: args.segment ? SEGMENT_DEFAULTS[segment].decayRate : existing.decayRate,
+    supersedes: existing.supersedes,
     embedding,
   });
   await ctx.convex.mutation(api.memoryEvents.emit, {
@@ -185,7 +179,7 @@ export async function updateMemory(
   const textChanged = args.content !== undefined && args.content !== existing.content;
   return {
     memoryId: args.memoryId,
-    embedded: textChanged ? (embedding ? true : "kept-old-vector") : false,
+    embedding: !textChanged ? "unchanged" : embedding ? "refreshed" : "kept-old-vector",
   };
 }
 
@@ -210,11 +204,19 @@ export async function sendMessage(
   args: { content: string; conversationId?: string },
 ): Promise<{ conversationId: string; reply: string }> {
   const conversationId = args.conversationId ?? ctx.defaultConversationId ?? DEFAULT_CONVERSATION_ID;
-  const res = await (ctx.fetchImpl ?? fetch)(`${ctx.boopUrl}/chat`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ conversationId, content: args.content }),
-  });
+  let res: Response;
+  try {
+    res = await (ctx.fetchImpl ?? fetch)(`${ctx.boopUrl}/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ conversationId, content: args.content }),
+    });
+  } catch (err) {
+    // Node drops idle requests after ~5 min; Boop may still be mid-turn.
+    throw new Error(
+      `Lost the connection to Boop at ${ctx.boopUrl}/chat (${err instanceof Error ? err.message : String(err)}). The message may have been delivered and Boop may still be answering: check boop_read_messages for conversation ${conversationId} before sending it again.`,
+    );
+  }
   const body = (await res.json().catch(() => ({}))) as { reply?: string; error?: string };
   if (!res.ok) {
     throw new Error(`Boop /chat returned ${res.status}: ${body.error ?? "no body"}`);

@@ -64,6 +64,15 @@ describe("write guard", () => {
     expect(JSON.parse(calls[0].body)).toEqual({ conversationId: "mcp:default", content: "hello" });
   });
 
+  it("tells the caller to check messages when the connection drops mid-turn", async () => {
+    const ctx = makeCtx({
+      fetchImpl: (async () => {
+        throw new TypeError("fetch failed");
+      }) as unknown as typeof fetch,
+    });
+    await expect(sendMessage(ctx, { content: "hello" })).rejects.toThrow(/boop_read_messages/);
+  });
+
   it("surfaces a /chat failure", async () => {
     const ctx = makeCtx({
       fetchImpl: (async () =>
@@ -97,7 +106,7 @@ describe.skipIf(!localUrl)("against the local anonymous backend", () => {
       content: `Harley prefers ${marker}-v2`,
       importance: 0.9,
     });
-    expect(updated.embedded).toBe(true);
+    expect(updated.embedding).toBe("refreshed");
     const after = await searchMemories(ctx, { query: `${marker}-v2` });
     expect(after[0].importance).toBe(0.9);
     expect(after[0].segment).toBe("preference");
@@ -122,7 +131,36 @@ describe.skipIf(!localUrl)("against the local anonymous backend", () => {
     expect(added.embedded).toBe(false);
     expect(added.tier).toBe("short");
     const updated = await updateMemory(ctx, { memoryId: added.memoryId, content: "changed text" });
-    expect(updated.embedded).toBe("kept-old-vector");
+    expect(updated.embedding).toBe("kept-old-vector");
+    await deleteMemory(ctx, { memoryId: added.memoryId, mode: "delete" });
+  });
+
+  it("keeps supersedes and decayRate when editing only the importance", async () => {
+    const ctx = makeCtx();
+    const memoryId = `mem_keep_${Date.now()}`;
+    await ctx.convex.mutation(api.memoryRecords.upsert, {
+      memoryId,
+      content: "consolidated fact",
+      tier: "long",
+      segment: "knowledge",
+      importance: 0.5,
+      decayRate: 0.123,
+      supersedes: ["mem_old_a", "mem_old_b"],
+    });
+    const out = await updateMemory(ctx, { memoryId, importance: 0.8 });
+    expect(out.embedding).toBe("unchanged");
+    const row = await ctx.convex.query(api.memoryRecords.getByMemoryId, { memoryId });
+    expect(row?.supersedes).toEqual(["mem_old_a", "mem_old_b"]);
+    expect(row?.decayRate).toBe(0.123);
+    expect(row?.importance).toBe(0.8);
+    await deleteMemory(ctx, { memoryId, mode: "delete" });
+  });
+
+  it("updates an archived memory found by id", async () => {
+    const ctx = makeCtx();
+    const added = await addMemory(ctx, { content: "to archive", segment: "knowledge" });
+    await deleteMemory(ctx, { memoryId: added.memoryId, mode: "archive" });
+    await expect(updateMemory(ctx, { memoryId: added.memoryId, importance: 0.2 })).resolves.toBeTruthy();
     await deleteMemory(ctx, { memoryId: added.memoryId, mode: "delete" });
   });
 
