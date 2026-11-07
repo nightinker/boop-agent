@@ -40,6 +40,7 @@ import { isUnknownArgError, withOptionalArgs } from "../convex-compat.js";
 import { requestSelfUpdateSoon } from "../self-update.js";
 import { runsOn } from "../../convex/selfBuildRules.js";
 import { sourceDir } from "./source-dir.js";
+import { fetchOriginSerialized } from "./git-fetch.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -116,6 +117,16 @@ async function sh(
 async function must(command: string, args: string[], options: Parameters<typeof sh>[2] = {}) {
   const result = await sh(command, args, options);
   if (!result.ok) throw new Error(`${command} ${args.join(" ")} failed:\n${tail(result.output, 15)}`);
+  return result.output;
+}
+
+/**
+ * `git fetch origin main` in `src`, one fetch at a time and retried when git loses
+ * a ref-lock race with another fetch (see git-fetch.ts). Throws like must().
+ */
+async function fetchMain(src: string): Promise<string> {
+  const result = await fetchOriginSerialized(sh, src);
+  if (!result.ok) throw new Error(`git fetch origin main failed:\n${tail(result.output, 15)}`);
   return result.output;
 }
 
@@ -456,7 +467,7 @@ async function runBuild(input: {
   activityLogs.delete(buildId);
   await noteActivity(buildId, `Setting up worktree on ${branch}`, { flush: true });
 
-  await must("git", ["fetch", "origin", "main"], { cwd: src });
+  await fetchMain(src);
   await must("git", ["worktree", "add", "-b", branch, worktree, "origin/main"], { cwd: src });
   await ensureDependencies(worktree, src);
   await refreshGeneratedTypes(worktree, src);
@@ -754,7 +765,7 @@ async function buildAndRestart(input: {
 }): Promise<void> {
   const buildId = input.id;
   const release = join(input.src, ".claude", "worktrees", `self-build-release-${buildId}`);
-  await must("git", ["fetch", "origin", "main"], { cwd: input.src });
+  await fetchMain(input.src);
   if (existsSync(release)) {
     await sh("git", ["worktree", "remove", "--force", release], { cwd: input.src });
   }
@@ -923,7 +934,7 @@ async function checkMissedUpdates(opts: CatchUpOptions): Promise<CatchUpOutcome>
       return "none";
     }
     // Git first: it costs nothing, and usually there's nothing to install.
-    await must("git", ["fetch", "origin", "main"], { cwd: src });
+    await fetchMain(src);
     const target = (await must("git", ["rev-parse", "origin/main"], { cwd: src })).trim();
     if (target === installed) return "none";
     // Only move forward: a local build ahead of main is left alone.
