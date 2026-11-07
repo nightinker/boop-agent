@@ -229,7 +229,7 @@ export function createSelfTools(conversationId?: string): RuntimeTool[] {
     defineRuntimeTool(
       NAMESPACE,
       "get_config",
-      "Return Boop's runtime configuration: active provider, model, billing mode, user's timezone, current local time, loaded integrations, whether Boop is keeping the Mac awake (keepAwake: caffeinate -dimsu, since when, and who holds it: heldBy is user when the owner turned it on, build when the self-build agent holds it while a build is in progress (buildIds), or both), maxConcurrentRuns (how many messages one conversation answers in parallel; more wait in the queue), remoteSecretEntry (whether secret entry links work away from the Mac, on which public host, with a one-line status), and basic env info. Use when the user asks what model/provider/runtime Boop is using, what time it is, what timezone is active, or anything about the agent itself.",
+      "Return Boop's runtime configuration: active provider, model, billing mode, user's timezone, current local time, loaded integrations, whether Boop is keeping the Mac awake (keepAwake: caffeinate -dimsu, since when, and who holds it: heldBy is user when the owner turned it on, build when the self-build agent holds it while a build is in progress (buildIds), or both), maxConcurrentRuns (how many messages one conversation answers in parallel; more wait in the queue), remoteSecretEntry (whether secret entry links work away from the Mac: public base URL, config source/path, passcode set or not, whether the 127.0.0.1 secrets listener is up, whether the tunnel reaches this Boop, exactly what's missing, and a one-line status), and basic env info. Use when the user asks what model/provider/runtime Boop is using, what time it is, what timezone is active, or anything about the agent itself.",
       {},
       async () => {
         const integrations = (await listEnabledIntegrations()).map((i) => i.name);
@@ -238,7 +238,7 @@ export function createSelfTools(conversationId?: string): RuntimeTool[] {
         const browser = await getBrowserSettings();
         const awake = keepAwake().status();
         const maxConcurrentRuns = await getMaxConcurrentRuns();
-        const remoteSecretEntry = await describeRemoteSecretEntry();
+        const remoteSecretEntry = await describeRemoteSecretEntry({ probeTunnel: true });
         const config = {
           runtime: runtime.runtime,
           model: runtime.model,

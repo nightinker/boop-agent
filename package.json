@@ -37,6 +37,7 @@
     "test:watch": "vitest",
     "mcp:self-builds": "tsx server/mcp/self-builds.ts",
     "secrets:import": "tsx scripts/secrets-import.ts",
+    "secrets:remote-setup": "tsx scripts/secrets-remote-setup.ts",
     "import:claude-mem": "tsx scripts/import-claude-mem.ts",
     "webtest:install": "patchright install chromium"
   },
