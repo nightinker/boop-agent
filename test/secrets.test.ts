@@ -410,6 +410,10 @@ describe("entry page", () => {
       expect(html).toContain('type="password"');
       expect(html).toContain("&lt;b&gt;desc&lt;/b&gt;");
       expect(form.headers.get("cache-control")).toBe("no-store");
+      // Under no-referrer a browser posts the form with `Origin: null`, which
+      // the local trust check refuses: the submit came back {"error":"not found"}.
+      expect(form.headers.get("referrer-policy")).toBe("same-origin");
+      expect(html).toContain('<meta name="referrer" content="same-origin">');
 
       const post = () =>
         fetch(`${base}/secrets/enter/${token}`, {

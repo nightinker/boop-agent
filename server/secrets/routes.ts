@@ -41,7 +41,7 @@ function page(title: string, body: string): string {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="referrer" content="no-referrer">
+<meta name="referrer" content="same-origin">
 <meta name="robots" content="noindex">
 <title>${escapeHtml(title)}</title>
 <style>
@@ -67,7 +67,10 @@ button { margin-top:16px; width:100%; padding:12px; font-size:16px; font-weight:
 export function send(res: express.Response, status: number, title: string, body: string): void {
   res.status(status);
   res.setHeader("Cache-Control", "no-store");
-  res.setHeader("Referrer-Policy", "no-referrer");
+  // same-origin, not no-referrer: under no-referrer a browser submits the
+  // entry form with `Origin: null`, which the local trust check and the
+  // public host's origin check both refuse. Other sites still get nothing.
+  res.setHeader("Referrer-Policy", "same-origin");
   res.setHeader("X-Frame-Options", "DENY");
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader(
