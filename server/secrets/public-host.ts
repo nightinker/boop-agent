@@ -11,6 +11,18 @@ import {
   type SecretsRouterDeps,
 } from "./routes.js";
 import { secretStore, secretsSupported, type SecretStore } from "./store.js";
+import {
+  parseSecretsPublicConfig,
+  PROBE_HEADER,
+  probeSecretsTunnel,
+  remoteEntryRuntime,
+  resolveSecretsRemoteConfig,
+  type RemoteEntryRuntime,
+  type SecretsPublicConfig,
+  type SecretsPublicConfigResult,
+  type SecretsRemoteConfigSource,
+  type TunnelProbeResult,
+} from "./remote-config.js";
 
 /**
  * The public secrets host: a minimal app that serves ONLY the one-time entry
@@ -18,7 +30,8 @@ import { secretStore, secretsSupported, type SecretStore } from "./store.js";
  * (e.g. https://secret.example.com) without the dashboard or API being
  * reachable there. Everything else on that host is a 404.
  *
- * Turned on by SECRETS_PUBLIC_BASE_URL (https only). Requests reach it two
+ * Turned on by ~/.config/boop/secrets-remote.json (or the legacy
+ * SECRETS_PUBLIC_BASE_URL env var; see remote-config.ts), https only. Requests reach it two
  * ways, both without touching the rest of Boop:
  *   - on Boop's main port, any request whose Host (or X-Forwarded-Host) is
  *     that base URL's host is handed to this app before the dashboard's
@@ -41,46 +54,14 @@ export const PORTAL_SESSION_TTL_MS = 15 * 60 * 1000;
 const SESSION_COOKIE = "__Host-boop_secrets";
 const MAX_SESSIONS = 200;
 
-export interface SecretsPublicConfig {
-  /** e.g. "https://secret.example.com" (no trailing slash). */
-  baseUrl: string;
-  /** Lower-case hostname requests are matched on. */
-  host: string;
-  origin: string;
-  /** Optional dedicated port for the secrets-only app. */
-  port: number | null;
-}
+export type { SecretsPublicConfig, SecretsPublicConfigResult };
 
-export type SecretsPublicConfigResult =
-  | { ok: true; config: SecretsPublicConfig }
-  | { ok: false; reason: string | null };
-
-/** Reads SECRETS_PUBLIC_BASE_URL (+ SECRETS_PUBLIC_PORT). Unset → off, not an error. */
+/** Reads SECRETS_PUBLIC_BASE_URL (+ SECRETS_PUBLIC_PORT) only. Startup uses resolveSecretsRemoteConfig. */
 export function secretsPublicConfigFromEnv(env: NodeJS.ProcessEnv = process.env): SecretsPublicConfigResult {
-  const raw = env.SECRETS_PUBLIC_BASE_URL?.trim();
-  if (!raw) return { ok: false, reason: null };
-  let url: URL;
-  try {
-    url = new URL(raw);
-  } catch {
-    return { ok: false, reason: "SECRETS_PUBLIC_BASE_URL isn't a valid URL" };
-  }
-  if (url.protocol !== "https:") return { ok: false, reason: "SECRETS_PUBLIC_BASE_URL must start with https://" };
-  if (url.username || url.password || url.search || url.hash || (url.pathname !== "/" && url.pathname !== "")) {
-    return { ok: false, reason: "SECRETS_PUBLIC_BASE_URL must be just a scheme and host, e.g. https://secret.example.com" };
-  }
-  const hostname = url.hostname.toLowerCase();
-  if (hostname === "localhost" || /^127\./.test(hostname) || hostname === "[::1]") {
-    return { ok: false, reason: "SECRETS_PUBLIC_BASE_URL must be a public host, not localhost" };
-  }
-  const portRaw = env.SECRETS_PUBLIC_PORT?.trim();
-  let port: number | null = null;
-  if (portRaw) {
-    const n = Number(portRaw);
-    if (!Number.isInteger(n) || n < 1 || n > 65535) return { ok: false, reason: "SECRETS_PUBLIC_PORT must be a port number" };
-    port = n;
-  }
-  return { ok: true, config: { baseUrl: url.origin, host: hostname, origin: url.origin, port } };
+  return parseSecretsPublicConfig(
+    { baseUrl: env.SECRETS_PUBLIC_BASE_URL, port: env.SECRETS_PUBLIC_PORT },
+    { baseUrl: "SECRETS_PUBLIC_BASE_URL", port: "SECRETS_PUBLIC_PORT" },
+  );
 }
 
 function headerList(value: string | string[] | undefined): string[] {
@@ -245,6 +226,8 @@ export interface SecretsPublicAppDeps extends Pick<SecretsRouterDeps, "onSaved" 
   requests?: SecretRequestRegistry;
   platform?: NodeJS.Platform;
   now?: () => number;
+  /** Answers GET /secrets/probe/<token> with 204, so get_config can check the tunnel. */
+  probeToken?: string;
 }
 
 function renderLogin(token: string, csrf: string, error?: string): string {
@@ -349,6 +332,14 @@ export function createSecretsPublicApp(deps: SecretsPublicAppDeps): express.Expr
     }
     return found.request;
   }
+
+  // Tunnel health check. The token only proves "this is the Boop that
+  // generated it"; it unlocks nothing, and a wrong one is a plain 404.
+  app.get("/secrets/probe/:token", (req, res, next) => {
+    if (!deps.probeToken || !safeEqual(String(req.params.token), deps.probeToken)) return next();
+    res.setHeader(PROBE_HEADER, "ok");
+    res.status(204).end();
+  });
 
   const form = express.urlencoded({ extended: false, limit: "32kb", parameterLimit: 5 });
 
@@ -460,7 +451,7 @@ export function secretsHostWebSocketGuard(config: SecretsPublicConfig) {
 
 /** Link for request_secret, when the public host is configured. */
 export function publicSecretEntryUrl(token: string, env: NodeJS.ProcessEnv = process.env): string | null {
-  const cfg = secretsPublicConfigFromEnv(env);
+  const cfg = resolveSecretsRemoteConfig(env);
   return cfg.ok ? `${cfg.config.baseUrl}/secrets/enter/${token}` : null;
 }
 
@@ -469,28 +460,64 @@ export interface RemoteSecretEntryStatus {
   baseUrl: string | null;
   port: number | null;
   passcodeSet: boolean;
+  /** Where the config came from: the external file, legacy env vars, or nowhere. */
+  source: SecretsRemoteConfigSource;
+  configPath: string | null;
+  /** Exactly what has to be added or fixed; empty when everything's in place. */
+  missing: string[];
+  warnings: string[];
+  listener: { state: RemoteEntryRuntime["listener"]["state"]; port: number | null; error: string | null };
+  tunnel: TunnelProbeResult;
   status: string;
 }
 
-/** For get_config: is remote entry on, where, and if not, why. */
+/**
+ * For get_config: is remote entry on, where, is the listener up, does the
+ * tunnel reach this Boop, and if not, exactly what's missing. Never includes
+ * the passcode or any other secret value.
+ */
 export async function describeRemoteSecretEntry(
-  opts: { env?: NodeJS.ProcessEnv; store?: () => SecretStore; platform?: NodeJS.Platform } = {},
+  opts: {
+    env?: NodeJS.ProcessEnv;
+    store?: () => SecretStore;
+    platform?: NodeJS.Platform;
+    runtime?: RemoteEntryRuntime;
+    /** Fetch <base>/secrets/probe/<token> through the tunnel. Off by default. */
+    probeTunnel?: boolean;
+    fetch?: typeof fetch;
+  } = {},
 ): Promise<RemoteSecretEntryStatus> {
   const env = opts.env ?? process.env;
   const platform = opts.platform ?? process.platform;
-  const cfg = secretsPublicConfigFromEnv(env);
+  const runtime = opts.runtime ?? remoteEntryRuntime;
+  const cfg = resolveSecretsRemoteConfig(env);
   const baseUrl = cfg.ok ? cfg.config.baseUrl : null;
   const port = cfg.ok ? cfg.config.port : null;
+  const listener = { ...runtime.listener };
+  const notChecked: TunnelProbeResult = { checked: false, reachable: null, detail: "not checked" };
+  const base = { source: cfg.source, configPath: cfg.configPath, warnings: cfg.warnings, listener };
   if (!secretsSupported(platform)) {
-    return { enabled: false, baseUrl, port, passcodeSet: false, status: "Remote secret entry: off (secrets only live on the Mac)" };
+    return {
+      ...base,
+      enabled: false,
+      baseUrl,
+      port,
+      passcodeSet: false,
+      missing: [],
+      tunnel: notChecked,
+      status: "Remote secret entry: off (secrets only live on the Mac)",
+    };
   }
   if (!cfg.ok) {
     return {
+      ...base,
       enabled: false,
       baseUrl: null,
       port: null,
       passcodeSet: false,
-      status: `Remote secret entry: off (${cfg.reason ?? "SECRETS_PUBLIC_BASE_URL not set"})`,
+      missing: cfg.missing,
+      tunnel: notChecked,
+      status: `Remote secret entry: off (${cfg.reason}). Missing: ${cfg.missing.join("; ")}`,
     };
   }
   let passcode: string | null = null;
@@ -500,14 +527,42 @@ export async function describeRemoteSecretEntry(
     passcode = null;
   }
   const passcodeSet = Boolean(passcode && passcode.length >= MIN_PORTAL_PASSCODE_LENGTH);
+  passcode = null;
+
+  const missing: string[] = [];
+  if (!passcodeSet) {
+    missing.push(`${SECRETS_PORTAL_PASSCODE_NAME} (${MIN_PORTAL_PASSCODE_LENGTH}+ characters) in the Keychain: request it with request_secret and open the LOCAL link on the Mac`);
+  }
+  if (runtime.started && runtime.activeBaseUrl !== cfg.config.baseUrl) {
+    missing.push(`a restart: the config now says ${cfg.config.baseUrl} but the running Boop routes ${runtime.activeBaseUrl ?? "nothing"}`);
+  }
+  if (runtime.started && cfg.config.port && listener.state !== "listening") {
+    missing.push(
+      `the listener on 127.0.0.1:${cfg.config.port} (${listener.state}${listener.error ? `: ${listener.error}` : ""}); the tunnel can point at Boop's main port instead`,
+    );
+  }
+  const tunnel = opts.probeTunnel ? await probeSecretsTunnel(cfg.config.baseUrl, runtime.probeToken, { fetch: opts.fetch }) : notChecked;
+  if (tunnel.checked && !tunnel.reachable) missing.push(`a working tunnel: ${tunnel.detail}`);
+
   const where = `${cfg.config.baseUrl}${cfg.config.port ? ` (also on 127.0.0.1:${cfg.config.port})` : ""}`;
+  let status: string;
+  if (passcodeSet) {
+    status = `Remote secret entry: enabled at ${where}`;
+    const problems = missing.filter((m) => !m.startsWith(SECRETS_PORTAL_PASSCODE_NAME));
+    if (problems.length) status += `, but needs ${problems.join("; ")}`;
+    else if (tunnel.reachable) status += "; tunnel reachable";
+  } else {
+    status = `Remote secret entry: configured at ${where} but locked until ${SECRETS_PORTAL_PASSCODE_NAME} (${MIN_PORTAL_PASSCODE_LENGTH}+ characters) is set on the Mac`;
+    if (missing.length > 1) status += `; also needs ${missing.slice(1).join("; ")}`;
+  }
   return {
+    ...base,
     enabled: passcodeSet,
     baseUrl: cfg.config.baseUrl,
     port: cfg.config.port,
     passcodeSet,
-    status: passcodeSet
-      ? `Remote secret entry: enabled at ${where}`
-      : `Remote secret entry: configured at ${where} but locked until ${SECRETS_PORTAL_PASSCODE_NAME} (${MIN_PORTAL_PASSCODE_LENGTH}+ characters) is set on the Mac`,
+    missing,
+    tunnel,
+    status,
   };
 }

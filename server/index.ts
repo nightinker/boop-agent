@@ -35,10 +35,11 @@ import { createChangelogRouter } from "./changelog.js";
 import { createSecretsRouter, type SecretsRouterDeps } from "./secrets/routes.js";
 import {
   createSecretsPublicApp,
+  SECRETS_PORTAL_PASSCODE_NAME,
   secretsHostDispatcher,
   secretsHostWebSocketGuard,
-  secretsPublicConfigFromEnv,
 } from "./secrets/public-host.js";
+import { remoteEntryRuntime, resolveSecretsRemoteConfig, startSecretsRemoteListener } from "./secrets/remote-config.js";
 import { secretStore, secretsSupported } from "./secrets/store.js";
 import {
   getRuntimeConfig,
@@ -137,21 +138,45 @@ async function main() {
   };
 
   const app = express();
-  // The public secrets host (SECRETS_PUBLIC_BASE_URL): a request addressed to
-  // it only ever reaches the secrets-only app, which 404s everything but the
-  // entry pages. It runs before the access check below, which would otherwise
-  // turn every tunnelled request into {"error":"not found"}.
-  const secretsPublic = secretsPublicConfigFromEnv();
-  if (!secretsPublic.ok && secretsPublic.reason) console.warn(`[secrets] remote entry off: ${secretsPublic.reason}`);
+  // The public secrets host (~/.config/boop/secrets-remote.json, or the
+  // legacy SECRETS_PUBLIC_BASE_URL): a request addressed to it only ever
+  // reaches the secrets-only app, which 404s everything but the entry pages.
+  // It runs before the access check below, which would otherwise turn every
+  // tunnelled request into {"error":"not found"}.
+  const secretsPublic = resolveSecretsRemoteConfig();
+  for (const warning of secretsPublic.warnings) console.warn(`[secrets] ${warning}`);
+  remoteEntryRuntime.started = true;
+  if (!secretsSupported()) {
+    if (secretsPublic.ok) console.warn("[secrets] remote entry OFF: secrets only live on the Mac");
+  } else if (!secretsPublic.ok) {
+    console.warn(
+      `[secrets] remote entry OFF: ${secretsPublic.reason}. request_secret will return localhost-only links. Missing: ${secretsPublic.missing.join("; ")}`,
+    );
+  }
   if (secretsPublic.ok) {
-    const secretsApp = createSecretsPublicApp({ config: secretsPublic.config, ...secretsDeps });
-    console.log(`[secrets] remote entry served for ${secretsPublic.config.baseUrl}`);
-    app.use(secretsHostDispatcher(secretsPublic.config, secretsApp));
-    if (secretsPublic.config.port) {
-      // Secrets-only listener for a tunnel; loopback so only the tunnel agent reaches it.
-      createServer(secretsApp)
-        .on("error", (err) => console.warn(`[secrets] couldn't listen on ${secretsPublic.config.port}: ${err.message}`))
-        .listen(secretsPublic.config.port, "127.0.0.1");
+    const { config } = secretsPublic;
+    const secretsApp = createSecretsPublicApp({ config, probeToken: remoteEntryRuntime.probeToken, ...secretsDeps });
+    remoteEntryRuntime.activeBaseUrl = config.baseUrl;
+    console.log(
+      `[secrets] remote entry served for ${config.baseUrl} (config: ${secretsPublic.source === "file" ? secretsPublic.configPath : "environment"})`,
+    );
+    app.use(secretsHostDispatcher(config, secretsApp));
+    if (config.port && secretsSupported()) {
+      // Secrets-only listener for a tunnel; loopback so only the tunnel agent
+      // reaches it. Retries while a previous Boop still holds the port.
+      void startSecretsRemoteListener({ port: config.port, handler: secretsApp });
+    }
+    if (secretsSupported()) {
+      secretStore()
+        .has(SECRETS_PORTAL_PASSCODE_NAME)
+        .then((set) => {
+          if (!set) {
+            console.warn(
+              `[secrets] remote entry LOCKED: ${SECRETS_PORTAL_PASSCODE_NAME} isn't in the Keychain; request it and open the local link on the Mac`,
+            );
+          }
+        })
+        .catch(() => console.warn("[secrets] couldn't check the remote entry passcode"));
     }
   }
   // Behind Cloudflare Access (CF_ACCESS_TEAM_DOMAIN + CF_ACCESS_AUD), a visitor
