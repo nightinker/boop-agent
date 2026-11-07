@@ -242,6 +242,9 @@ export default defineSchema({
     platform: v.string(),
     priority: v.number(),
     publicUrl: v.optional(v.string()),
+    // The git commit a server copy runs, so the Mac can tell, from its
+    // regular check-in, that main moved on and install it.
+    commit: v.optional(v.string()),
     startedAt: v.number(),
     lastSeenAt: v.number(),
   }).index("by_instanceId", ["instanceId"]),
@@ -497,6 +500,10 @@ export default defineSchema({
     activity: v.optional(v.string()),
     // The build this one re-runs, when it was started with Retry.
     retryOf: v.optional(v.string()),
+    // Which copy of Boop (instances.instanceId) is coding or shipping it, so
+    // a restart only fails the builds it actually cut off. Older rows have
+    // none; those ran on the Mac.
+    runner: v.optional(v.string()),
     createdAt: v.number(),
     updatedAt: v.number(),
   })

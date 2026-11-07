@@ -44,11 +44,17 @@ export type UpdateResult =
   | { status: "updated"; from: string; to: string }
   | { status: "failed"; error: string };
 
-/** Which follow-up work an update needs, from the files it changes. */
-export function updatePlan(changedFiles: string[]): { install: boolean; dashboard: boolean } {
+/**
+ * Which follow-up work an update needs, from the files it changes. `convex`:
+ * the Convex functions changed, so they're pushed before restarting. The Mac
+ * app does that on every start, but a build shipped from the server while
+ * the Mac is off would otherwise run against the old functions.
+ */
+export function updatePlan(changedFiles: string[]): { install: boolean; dashboard: boolean; convex: boolean } {
   const install = changedFiles.some((f) => f === "package.json" || f === "package-lock.json");
   const dashboard = install || changedFiles.some((f) => f.startsWith("debug/"));
-  return { install, dashboard };
+  const convex = changedFiles.some((f) => f.startsWith("convex/") && !f.startsWith("convex/_generated/"));
+  return { install, dashboard, convex };
 }
 
 export async function checkForUpdate(deps: UpdateDeps = {}): Promise<UpdateResult> {
@@ -76,6 +82,11 @@ export async function checkForUpdate(deps: UpdateDeps = {}): Promise<UpdateResul
     await run("git", ["checkout", "--quiet", "--detach", target]);
     if (plan.install) await run("npm", ["install", "--no-audit", "--no-fund"], { timeoutMs: 15 * 60_000 });
     if (plan.dashboard) await run("npm", ["run", "dashboard:build"], { timeoutMs: 10 * 60_000 });
+    // Last, so a failed step above leaves the deployed functions alone. Also
+    // regenerates convex/_generated for the new code.
+    if (plan.convex && process.env.BOOP_AUTO_UPDATE_CONVEX !== "false") {
+      await run("npx", ["convex", "dev", "--once", "--typecheck=disable"], { timeoutMs: 5 * 60_000 });
+    }
   } catch (err) {
     const error = err instanceof Error ? err.message.split("\n")[0]! : String(err);
     log.warn(`[self-update] update failed, staying on ${head.slice(0, 7)}: ${error}`);
@@ -94,6 +105,19 @@ function defaultRestart(from: string, to: string): void {
   // The SIGTERM handler hands over to another copy and exits; systemd's
   // Restart=always starts the new code.
   process.kill(process.pid, "SIGTERM");
+}
+
+let soon: (() => void) | null = null;
+
+/**
+ * Checks for an update shortly instead of at the next interval: right after
+ * this copy merged a build into main. A no-op unless the loop is running.
+ */
+export function requestSelfUpdateSoon(delayMs = 15_000): boolean {
+  if (!soon) return false;
+  const run = soon;
+  setTimeout(run, delayMs).unref?.();
+  return true;
 }
 
 export function startSelfUpdateLoop(deps: UpdateDeps = {}): () => void {
@@ -117,11 +141,13 @@ export function startSelfUpdateLoop(deps: UpdateDeps = {}): () => void {
       running = false;
     }
   };
+  soon = () => void tick();
   const first = setTimeout(() => void tick(), 60_000);
   const timer = setInterval(() => void tick(), intervalMs);
   first.unref();
   timer.unref();
   return () => {
+    soon = null;
     clearTimeout(first);
     clearInterval(timer);
   };
