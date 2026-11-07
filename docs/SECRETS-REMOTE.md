@@ -29,7 +29,8 @@ webhooks, websockets) is a plain 404.
   passcode, unknown or dead link, bad form token) per client and 30 overall
   per 15 minutes, then 429.
 - **HTTPS only**: the base URL must be `https://`, plain-HTTP requests
-  (`X-Forwarded-Proto: http`) get 403, and responses send HSTS.
+  get 403 (every `X-Forwarded-Proto` / `Forwarded: proto=` value must be
+  `https`, so a client can't prepend a fake one), and responses send HSTS.
 - **No caching or logging**: every response is `Cache-Control: no-store`, and
   nothing logs values, passcodes or tokens.
 

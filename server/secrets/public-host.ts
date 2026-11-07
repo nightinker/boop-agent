@@ -1,5 +1,5 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import type { IncomingHttpHeaders } from "node:http";
+import type { IncomingHttpHeaders, IncomingMessage } from "node:http";
 import express from "express";
 import { secretRequests, type SecretRequestRegistry } from "./requests.js";
 import {
@@ -115,18 +115,23 @@ export function isSecretsHostRequest(headers: IncomingHttpHeaders, config: Secre
   return authorities.some((a) => hostnameOf(a) === config.host);
 }
 
-/** True when the visitor's connection to the tunnel was HTTPS. */
-export function isHttpsRequest(req: express.Request): boolean {
+/**
+ * True when the visitor's connection to the tunnel was HTTPS. Every proto the
+ * request carries (X-Forwarded-Proto and Forwarded proto=) must say https: a
+ * tunnel may append its own value after one the client sent, so trusting just
+ * the first would let a plain-HTTP visitor claim HTTPS.
+ */
+export function isHttpsRequest(req: Pick<express.Request, "headers" | "socket">): boolean {
   if ((req.socket as { encrypted?: boolean }).encrypted) return true;
-  const proto = headerList(req.headers["x-forwarded-proto"])[0]?.trim().toLowerCase();
-  if (proto) return proto === "https";
-  for (const entry of headerList(req.headers.forwarded)) {
-    for (const p of entry.split(";")) {
-      const [k, v] = p.split("=");
-      if (k?.trim().toLowerCase() === "proto") return v?.trim().replace(/^"|"$/g, "").toLowerCase() === "https";
-    }
-  }
-  return false;
+  const protos = [
+    ...headerList(req.headers["x-forwarded-proto"]),
+    ...headerList(req.headers.forwarded)
+      .flatMap((entry) => entry.split(";"))
+      .map((p) => p.split("="))
+      .filter(([k]) => k?.trim().toLowerCase() === "proto")
+      .map(([, v]) => v ?? ""),
+  ].map((v) => v.trim().replace(/^"|"$/g, "").toLowerCase());
+  return protos.length > 0 && protos.every((p) => p === "https");
 }
 
 /** Fixed-window counter per key, plus memory cleanup. */
@@ -435,6 +440,21 @@ export function secretsHostDispatcher(config: SecretsPublicConfig, secretsApp: e
   return (req, res, next) => {
     if (isSecretsHostRequest(req.headers, config)) secretsApp(req, res);
     else next();
+  };
+}
+
+/**
+ * verifyClient for the main port's WebSocketServer: upgrades addressed to the
+ * secrets host are refused with a 404 (they bypass Express, so the dispatcher
+ * above never sees them). Everything else is left to the usual trust check.
+ */
+export function secretsHostWebSocketGuard(config: SecretsPublicConfig) {
+  return (
+    info: { req: Pick<IncomingMessage, "headers"> },
+    done: (ok: boolean, code?: number, message?: string) => void,
+  ): void => {
+    if (isSecretsHostRequest(info.req.headers, config)) done(false, 404, "Not Found");
+    else done(true);
   };
 }
 

@@ -13,6 +13,7 @@ Format:
 - Added: `SECRETS_PUBLIC_BASE_URL` (https only, e.g. `https://secret.example.com`). When set, `request_secret` links point there, and a secrets-only app serves just `/secrets/enter/<token>` on that host; the dashboard, API and everything else return 404 there. Optional `SECRETS_PUBLIC_PORT` serves the same app alone on a loopback port for a tunnel.
 - Fixed: entry links opened through a tunnel answered `{"error":"not found"}`; requests addressed to the secrets host are now routed before the local-only check.
 - Security: a passcode login (`SECRETS_PORTAL_PASSCODE`, kept in the Keychain, settable only from the Mac) before the form, CSRF tokens + same-origin check, rate limits, HTTPS only with HSTS, no-store, no logging. Token lookup is now constant-time.
+- Fixed: `/ws` upgrades addressed to the secrets host are refused with 404 (upgrades skip Express, so the host routing didn't cover them), and the HTTPS check now requires every forwarded proto to be `https`, not just the first.
 - Added: `get_config` reports `remoteSecretEntry` (enabled, base URL, one-line status). Tunnel setup: docs/SECRETS-REMOTE.md.
 
 ## Unreleased — One combined reply for batched messages

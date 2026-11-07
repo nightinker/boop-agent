@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import express from "express";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { WebSocket, WebSocketServer } from "ws";
 import { isPublicServerRequest, isTrustedLocalRequest } from "../server/local-access.js";
 import {
   RateLimiter,
@@ -14,6 +15,7 @@ import {
   isSecretsHostRequest,
   safeEqual,
   secretsHostDispatcher,
+  secretsHostWebSocketGuard,
   secretsPublicConfigFromEnv,
   type SecretsPublicConfig,
 } from "../server/secrets/public-host.js";
@@ -350,6 +352,13 @@ describe("the secrets host on the main port", () => {
     try {
       const http = await call("GET", `/secrets/enter/${token}`, { headers: { "x-forwarded-proto": "http" } });
       expect(http.status).toBe(403);
+      // A client-sent "https" ahead of the tunnel's own "http" doesn't count.
+      const spoofed = await call("GET", `/secrets/enter/${token}`, { headers: { "x-forwarded-proto": "https, http" } });
+      expect(spoofed.status).toBe(403);
+      const forwarded = await call("GET", `/secrets/enter/${token}`, {
+        headers: { "x-forwarded-proto": "https", forwarded: "for=1.2.3.4;proto=http" },
+      });
+      expect(forwarded.status).toBe(403);
       const locked = await call("GET", `/secrets/enter/${token}`);
       expect(locked.status).toBe(503);
       expect(locked.body).not.toContain('name="value"');
@@ -389,6 +398,32 @@ describe("the secrets host on the main port", () => {
       expect((await call("GET", `/secrets/enter/${token}`)).status).toBe(403);
     } finally {
       await close();
+    }
+  });
+});
+
+describe("websockets on the secrets host", () => {
+  it("refuses /ws upgrades addressed to the secrets host, and only those", async () => {
+    const app = express();
+    const server = app.listen(0, "127.0.0.1");
+    await new Promise((r) => server.once("listening", r));
+    const wss = new WebSocketServer({ server, path: "/ws", verifyClient: secretsHostWebSocketGuard(config()) });
+    const port = (server.address() as AddressInfo).port;
+    const connect = (headers: Record<string, string>) =>
+      new Promise<number>((resolve) => {
+        const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`, { headers });
+        ws.on("open", () => (ws.close(), resolve(101)));
+        ws.on("unexpected-response", (_req, res) => resolve(res.statusCode ?? 0));
+        ws.on("error", () => resolve(-1));
+      });
+    try {
+      expect(await connect({ host: HOST })).toBe(404);
+      expect(await connect({ host: "localhost:3456", "x-forwarded-host": HOST })).toBe(404);
+      expect(await connect({ host: "localhost:3456" })).toBe(101);
+    } finally {
+      for (const c of wss.clients) c.terminate();
+      wss.close();
+      await new Promise((r) => server.close(r));
     }
   });
 });
