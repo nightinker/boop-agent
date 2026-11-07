@@ -2,7 +2,7 @@ import { z } from "zod";
 import { accessConfigFromEnv } from "../cloudflare-access.js";
 import { defineRuntimeTool } from "../runtimes/tool.js";
 import { runtimeText, type RuntimeTool } from "../runtimes/types.js";
-import { MIN_PORTAL_PASSCODE_LENGTH, SECRETS_PORTAL_PASSCODE_NAME } from "./public-host.js";
+import { describeRemoteSecretEntry, SECRETS_PORTAL_PASSCODE_NAME } from "./public-host.js";
 import { remoteEntryRuntime, resolveSecretsRemoteConfig, type RemoteEntryRuntime } from "./remote-config.js";
 import { redactSecrets } from "./redact.js";
 import { secretRequests, SECRET_REQUEST_TTL_MS, type SecretRequestRegistry } from "./requests.js";
@@ -42,6 +42,21 @@ Secrets:
 - Don't source env files of credentials (e.g. ~/.config/boop/*.env) or read them with cat/grep; if a skill says to, use run_with_secrets with the same variable names instead.
 - If a secret you need isn't stored, stop and say which NAME is missing so Boop can ask the user for it securely. Never ask the user to paste it.`;
 
+/** The link that only opens on the Mac itself. */
+function localSecretEntryUrl(token: string, env: NodeJS.ProcessEnv): string {
+  const port = Number(env.PORT ?? 3456);
+  return `http://localhost:${port}/secrets/enter/${token}`;
+}
+
+/** The Access-protected PUBLIC_URL link, when there is one (fallback when the secrets host is off). */
+function accessSecretEntryUrl(token: string, env: NodeJS.ProcessEnv): string | null {
+  const publicUrl = env.PUBLIC_URL?.trim();
+  if (publicUrl && !/localhost|127\.0\.0\.1/.test(publicUrl) && accessConfigFromEnv(env)) {
+    return `${publicUrl.replace(/\/+$/, "")}/secrets/enter/${token}`;
+  }
+  return null;
+}
+
 /**
  * Where the owner can open an entry link: the Mac itself, plus a remote link.
  * The remote one is the dedicated secrets host (~/.config/boop/secrets-remote.json
@@ -52,17 +67,12 @@ export function secretEntryUrls(
   token: string,
   env: NodeJS.ProcessEnv = process.env,
 ): { local: string; remote: string | null; remoteKind: "secrets-host" | "access" | null; remoteMissing: string[] } {
-  const port = Number(env.PORT ?? 3456);
-  const local = `http://localhost:${port}/secrets/enter/${token}`;
+  const local = localSecretEntryUrl(token, env);
   const cfg = resolveSecretsRemoteConfig(env);
   if (cfg.ok) {
     return { local, remote: `${cfg.config.baseUrl}/secrets/enter/${token}`, remoteKind: "secrets-host", remoteMissing: [] };
   }
-  let remote: string | null = null;
-  const publicUrl = env.PUBLIC_URL?.trim();
-  if (publicUrl && !/localhost|127\.0\.0\.1/.test(publicUrl) && accessConfigFromEnv(env)) {
-    remote = `${publicUrl.replace(/\/+$/, "")}/secrets/enter/${token}`;
-  }
+  const remote = accessSecretEntryUrl(token, env);
   return { local, remote, remoteKind: remote ? "access" : null, remoteMissing: cfg.missing };
 }
 
@@ -131,39 +141,42 @@ export function createSecretDispatcherTools(conversationId: string, deps: Secret
           description: redactSecrets(args.description.trim()),
           conversationId,
         });
-        const urls = secretEntryUrls(token, env);
-        // The passcode that guards the secrets host can only be set on the Mac.
-        if (args.name === SECRETS_PORTAL_PASSCODE_NAME) {
-          urls.remote = null;
-          urls.remoteMissing = [];
-          urls.remoteKind = null;
-        }
+        const local = localSecretEntryUrl(token, env);
         const isPasscode = args.name === SECRETS_PORTAL_PASSCODE_NAME;
+        let remote: string | null = null;
         let remoteLine: string | null = null;
-        if (urls.remoteKind === "access") remoteLine = `Away from the Mac (behind the dashboard login): ${urls.remote}`;
-        if (urls.remoteKind === "secrets-host") {
-          const passcode = await d.store().get(SECRETS_PORTAL_PASSCODE_NAME).catch(() => null);
-          remoteLine =
-            passcode && passcode.length >= MIN_PORTAL_PASSCODE_LENGTH
-              ? `Away from the Mac (asks for the secrets passcode first): ${urls.remote}`
-              : `Remote link (won't open until ${SECRETS_PORTAL_PASSCODE_NAME} is set on the Mac): ${urls.remote}`;
-          const remoteHost = urls.remote ? new URL(urls.remote).origin : null;
-          if (runtime.started && runtime.activeBaseUrl !== remoteHost) {
-            remoteLine += `\nWarning: the running Boop doesn't serve ${remoteHost} yet; restart Boop to apply the new remote-entry config.`;
-          } else if (runtime.started && runtime.listener.port && runtime.listener.state === "failed") {
-            remoteLine += `\nWarning: the secrets listener on 127.0.0.1:${runtime.listener.port} isn't up (${runtime.listener.error ?? "failed"}); the remote link only works if the tunnel points at Boop's main port.`;
+        if (isPasscode) {
+          // The passcode that guards the secrets host can only be set on the Mac.
+          remoteLine = `No remote link: ${SECRETS_PORTAL_PASSCODE_NAME} guards remote entry, so it can only be set on the Mac.`;
+        } else {
+          // Same resolution as get_config's remoteSecretEntry (config file, then
+          // env), so the two never disagree. Never returns the passcode itself.
+          const status = await describeRemoteSecretEntry({ env, store: d.store, platform: d.platform, runtime });
+          if (status.baseUrl) {
+            remote = `${status.baseUrl}/secrets/enter/${token}`;
+            remoteLine = status.passcodeSet
+              ? `Away from the Mac (asks for the secrets passcode first): ${remote}`
+              : `Remote link (won't open until ${SECRETS_PORTAL_PASSCODE_NAME} is set on the Mac): ${remote}`;
+            if (runtime.started && runtime.activeBaseUrl !== status.baseUrl) {
+              remoteLine += `\nWarning: the running Boop doesn't serve ${status.baseUrl} yet; restart Boop to apply the new remote-entry config.`;
+            } else if (runtime.started && runtime.listener.port && runtime.listener.state === "failed") {
+              remoteLine += `\nWarning: the secrets listener on 127.0.0.1:${runtime.listener.port} isn't up (${runtime.listener.error ?? "failed"}); the remote link only works if the tunnel points at Boop's main port.`;
+            }
+          } else {
+            remote = accessSecretEntryUrl(token, env);
+            if (remote) remoteLine = `Away from the Mac (behind the dashboard login): ${remote}`;
+            else if (status.missing.length) {
+              remoteLine = `No remote link: remote secret entry isn't configured. Missing: ${status.missing.join("; ")}`;
+            }
           }
-        }
-        if (!urls.remote && !isPasscode && urls.remoteMissing.length) {
-          remoteLine = `No remote link: remote secret entry isn't configured. Missing: ${urls.remoteMissing.join("; ")}`;
         }
         const minutes = Math.round(SECRET_REQUEST_TTL_MS / 60_000);
         return runtimeText(
           [
             `Entry link for ${args.name}${exists ? " (replaces the stored value)" : ""}:`,
-            urls.local,
+            local,
             remoteLine,
-            `It works once, for ${minutes} minutes. The local link only opens on the Mac itself${urls.remote ? "" : " (there's no private remote link configured)"}.`,
+            `It works once, for ${minutes} minutes. The local link only opens on the Mac itself${remote || isPasscode ? "" : " (there's no private remote link configured)"}.`,
             "Send the user the link and tell them to type the value on that page, not in chat. You'll get a message in this conversation when it's saved.",
           ]
             .filter(Boolean)
