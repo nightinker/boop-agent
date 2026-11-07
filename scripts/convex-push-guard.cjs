@@ -13,7 +13,12 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 
-/** The commit this app was built from: stamped at build time, else the install record. */
+/**
+ * The commit this app was built from: stamped at build time
+ * (scripts/stamp-build-info.cjs), else the install record. The install record
+ * is only for apps built before the stamp: on the first start after an
+ * install it still names the previous build.
+ */
 function appCommit({ appDir, home = os.homedir() } = {}) {
   for (const file of [
     appDir && path.join(appDir, "build-info.json"),
@@ -30,10 +35,16 @@ function appCommit({ appDir, home = os.homedir() } = {}) {
   return null;
 }
 
+// This runs before every Mac start's Convex sync, so keep it short: a slow
+// network gives up after a few seconds and the app pushes as usual.
+const FETCH_TIMEOUT_MS = 5_000;
+const LOCAL_TIMEOUT_MS = 3_000;
+
 function defaultGit(cwd) {
   return (args) =>
     new Promise((resolve, reject) => {
-      execFile("git", args, { cwd, timeout: 20_000 }, (error, stdout) => (error ? reject(error) : resolve(String(stdout).trim())));
+      const timeout = args[0] === "fetch" ? FETCH_TIMEOUT_MS : LOCAL_TIMEOUT_MS;
+      execFile("git", args, { cwd, timeout }, (error, stdout) => (error ? reject(error) : resolve(String(stdout).trim())));
     });
 }
 

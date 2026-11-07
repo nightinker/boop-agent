@@ -167,6 +167,14 @@ export function startSelfUpdateLoop(deps: UpdateDeps = {}): () => void {
   const intervalMs = Number(process.env.BOOP_AUTO_UPDATE_INTERVAL_MS ?? 5 * 60_000);
   const branch = process.env.BOOP_AUTO_UPDATE_BRANCH?.trim() || "main";
   console.log(`[self-update] following origin/${branch} every ${Math.round(intervalMs / 1000)}s`);
+  if (deps.pushConvex === undefined && process.env.BOOP_AUTO_UPDATE_CONVEX !== "true") {
+    // Pushing used to be on unless turned off; say so once, loudly.
+    console.warn(
+      "[self-update] BOOP_AUTO_UPDATE_CONVEX isn't true: this server won't push Convex functions when it updates. " +
+        "Until the Mac installs the same commit, new code runs against the deployed (older) functions. " +
+        "Set BOOP_AUTO_UPDATE_CONVEX=true (with Convex credentials) to push from here.",
+    );
+  }
   let running = false;
   let lastProblem = "";
   const backoff = createUpdateBackoff(intervalMs);

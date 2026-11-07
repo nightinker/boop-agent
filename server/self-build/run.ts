@@ -766,9 +766,7 @@ async function buildAndRestart(input: {
     await must("npm", ["ci"], { cwd: release, timeout: BUILD_TIMEOUT_MS });
   }
   const commit = (await must("git", ["rev-parse", "HEAD"], { cwd: release })).trim();
-  // Stamped into the app so it knows, on start, whether main has newer
-  // Convex functions than its own (scripts/convex-push-guard.cjs).
-  await writeFile(join(release, "electron", "build-info.json"), JSON.stringify({ commit }));
+  // desktop:pack stamps the commit into the app (scripts/stamp-build-info.cjs).
   await must("npm", ["run", "desktop:pack"], { cwd: release, timeout: BUILD_TIMEOUT_MS });
   const newApp = join(release, "dist", process.arch === "arm64" ? "mac-arm64" : "mac", "Boop.app");
   if (!existsSync(newApp)) throw new Error(`The build finished but ${newApp} is missing.`);
