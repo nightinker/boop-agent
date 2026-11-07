@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 
 /**
  * One-time links for entering a secret. Each request gets a random 256-bit
@@ -24,6 +24,20 @@ export type ConsumeResult =
 
 function hashToken(token: string): string {
   return createHash("sha256").update(token, "utf8").digest("hex");
+}
+
+/**
+ * Finds an open request by token hash in constant time: every open hash is
+ * compared with timingSafeEqual (all are the same length), and the loop never
+ * stops early, so response timing says nothing about how close a guess was.
+ */
+function findOpen(open: Map<string, SecretRequest>, hash: string): string | undefined {
+  const wanted = Buffer.from(hash, "hex");
+  let match: string | undefined;
+  for (const candidate of open.keys()) {
+    if (timingSafeEqual(Buffer.from(candidate, "hex"), wanted) && match === undefined) match = candidate;
+  }
+  return match;
 }
 
 export class SecretRequestRegistry {
@@ -64,7 +78,8 @@ export class SecretRequestRegistry {
 
   /** Looks a token up without using it (to show the form). */
   peek(token: string): ConsumeResult {
-    const hash = hashToken(String(token));
+    const tokenHash = hashToken(String(token));
+    const hash = findOpen(this.open, tokenHash) ?? tokenHash;
     const req = this.open.get(hash);
     if (req) {
       if (this.now() >= req.expiresAt) {

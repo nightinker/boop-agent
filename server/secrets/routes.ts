@@ -31,7 +31,7 @@ export interface SecretsRouterDeps {
   onChanged?: () => void;
 }
 
-function escapeHtml(value: string): string {
+export function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
 }
 
@@ -64,7 +64,7 @@ button { margin-top:16px; width:100%; padding:12px; font-size:16px; font-weight:
 </html>`;
 }
 
-function send(res: express.Response, status: number, title: string, body: string): void {
+export function send(res: express.Response, status: number, title: string, body: string): void {
   res.status(status);
   res.setHeader("Cache-Control", "no-store");
   res.setHeader("Referrer-Policy", "no-referrer");
@@ -77,24 +77,72 @@ function send(res: express.Response, status: number, title: string, body: string
   res.type("html").send(page(title, body));
 }
 
-function deadLinkMessage(reason: "unknown" | "expired" | "used"): string {
+export function deadLinkMessage(reason: "unknown" | "expired" | "used"): string {
   if (reason === "expired") return "This link has expired. Ask Boop for a new one.";
   if (reason === "used") return "This link was already used. Ask Boop for a new one to change the value.";
   return "This link isn't valid. Ask Boop for a new one.";
 }
 
-export function renderEntryForm(request: SecretRequest, opts: { error?: string; replaces?: boolean } = {}): string {
+export function renderEntryForm(
+  request: SecretRequest,
+  opts: { error?: string; replaces?: boolean; csrfToken?: string } = {},
+): string {
   const minutesLeft = Math.max(1, Math.round((request.expiresAt - Date.now()) / 60_000));
   return `<h1>🔐 Set ${escapeHtml(request.name)}</h1>
 <p>${escapeHtml(request.description || "Boop asked for this secret.")}</p>
 <p>The value goes straight into this Mac's Keychain. It is never sent to chat, the AI model, memory or logs.${opts.replaces ? " <strong>It replaces the value stored now.</strong>" : ""}</p>
 <form method="post" autocomplete="off">
+${opts.csrfToken ? `<input type="hidden" name="csrf" value="${escapeHtml(opts.csrfToken)}">` : ""}
 <label for="value">Value</label>
 <input id="value" name="value" type="password" autocomplete="new-password" autocapitalize="off" autocorrect="off" spellcheck="false" required autofocus>
 ${opts.error ? `<p class="err">${escapeHtml(opts.error)}</p>` : ""}
 <button type="submit">Save secret</button>
 </form>
 <p>This link works once and expires in about ${minutesLeft} minute${minutesLeft === 1 ? "" : "s"}.</p>`;
+}
+
+/**
+ * Saves the value typed on an entry page and spends the link. Shared by the
+ * local router and the public secrets host, so both validate and save the
+ * same way. Never logs the value or the token.
+ */
+export async function saveFromLink(
+  token: string,
+  raw: unknown,
+  res: express.Response,
+  ctx: {
+    store: () => SecretStore;
+    requests: SecretRequestRegistry;
+    deps: Pick<SecretsRouterDeps, "onSaved" | "onChanged">;
+    formOptions?: { csrfToken?: string };
+  },
+): Promise<void> {
+  const { store, requests, deps } = ctx;
+  const found = requests.peek(token);
+  if (!found.ok) return send(res, 410, "Link expired", `<h1>Link no longer works</h1><p>${deadLinkMessage(found.reason)}</p>`);
+  // Trailing newlines sneak in from copy-paste; nothing else is altered.
+  const value = typeof raw === "string" ? raw.replace(/[\r\n]+$/, "") : raw;
+  const valueError = validateSecretValue(value);
+  if (valueError) {
+    return send(res, 400, `Set ${found.request.name}`, renderEntryForm(found.request, { ...ctx.formOptions, error: valueError }));
+  }
+  // Spend the link before saving, so a second submit can't race in.
+  const consumed = requests.consume(token);
+  if (!consumed.ok) return send(res, 410, "Link expired", `<h1>Link no longer works</h1><p>${deadLinkMessage(consumed.reason)}</p>`);
+  try {
+    const saved = await store().set(consumed.request.name, value as string);
+    deps.onChanged?.();
+    void Promise.resolve(deps.onSaved?.(consumed.request)).catch(() => undefined);
+    send(
+      res,
+      200,
+      "Saved",
+      `<h1 class="ok">✓ Saved ${escapeHtml(saved.name)}</h1><p>Stored in ${saved.backend === "keychain" ? "the macOS Keychain" : "Boop's private secrets file"}. You can close this tab and go back to Boop.</p>`,
+    );
+  } catch {
+    // Not logged: the error could, in theory, quote the input.
+    send(res, 500, "Not saved", `<h1 class="err">Couldn't save it</h1><p>Nothing was stored. Ask Boop for a new link and try again.</p>`);
+  }
 }
 
 export function createSecretsRouter(deps: SecretsRouterDeps = {}): express.Router {
@@ -116,30 +164,7 @@ export function createSecretsRouter(deps: SecretsRouterDeps = {}): express.Route
     express.urlencoded({ extended: false, limit: "32kb", parameterLimit: 5 }),
     async (req, res) => {
       if (!secretsSupported(platform)) return send(res, 404, "Not available", `<h1>Not available</h1><p>${SECRETS_UNSUPPORTED_MESSAGE}</p>`);
-      const found = requests.peek(req.params.token);
-      if (!found.ok) return send(res, 410, "Link expired", `<h1>Link no longer works</h1><p>${deadLinkMessage(found.reason)}</p>`);
-      const raw = (req.body as { value?: unknown } | undefined)?.value;
-      // Trailing newlines sneak in from copy-paste; nothing else is altered.
-      const value = typeof raw === "string" ? raw.replace(/[\r\n]+$/, "") : raw;
-      const valueError = validateSecretValue(value);
-      if (valueError) return send(res, 400, `Set ${found.request.name}`, renderEntryForm(found.request, { error: valueError }));
-      // Spend the link before saving, so a second submit can't race in.
-      const consumed = requests.consume(req.params.token);
-      if (!consumed.ok) return send(res, 410, "Link expired", `<h1>Link no longer works</h1><p>${deadLinkMessage(consumed.reason)}</p>`);
-      try {
-        const saved = await store().set(consumed.request.name, value as string);
-        deps.onChanged?.();
-        void Promise.resolve(deps.onSaved?.(consumed.request)).catch(() => undefined);
-        send(
-          res,
-          200,
-          "Saved",
-          `<h1 class="ok">✓ Saved ${escapeHtml(saved.name)}</h1><p>Stored in ${saved.backend === "keychain" ? "the macOS Keychain" : "Boop's private secrets file"}. You can close this tab and go back to Boop.</p>`,
-        );
-      } catch {
-        // Not logged: the error could, in theory, quote the input.
-        send(res, 500, "Not saved", `<h1 class="err">Couldn't save it</h1><p>Nothing was stored. Ask Boop for a new link and try again.</p>`);
-      }
+      await saveFromLink(req.params.token, (req.body as { value?: unknown } | undefined)?.value, res, { store, requests, deps });
     },
   );
 

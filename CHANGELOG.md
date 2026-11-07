@@ -8,6 +8,13 @@ Format:
 
 ---
 
+## Unreleased — Enter secrets remotely on a dedicated secrets host
+
+- Added: `SECRETS_PUBLIC_BASE_URL` (https only, e.g. `https://secret.example.com`). When set, `request_secret` links point there, and a secrets-only app serves just `/secrets/enter/<token>` on that host; the dashboard, API and everything else return 404 there. Optional `SECRETS_PUBLIC_PORT` serves the same app alone on a loopback port for a tunnel.
+- Fixed: entry links opened through a tunnel answered `{"error":"not found"}`; requests addressed to the secrets host are now routed before the local-only check.
+- Security: a passcode login (`SECRETS_PORTAL_PASSCODE`, kept in the Keychain, settable only from the Mac) before the form, CSRF tokens + same-origin check, rate limits, HTTPS only with HSTS, no-store, no logging. Token lookup is now constant-time.
+- Added: `get_config` reports `remoteSecretEntry` (enabled, base URL, one-line status). Tunnel setup: docs/SECRETS-REMOTE.md.
+
 ## Unreleased — One combined reply for batched messages
 
 - Changed: texts that waited behind a busy slot are answered under a clearer header: they're from the same person in the same conversation, numbered oldest first, and the model writes ONE combined reply that covers them in order, merges overlapping or duplicate asks, doesn't answer each as its own message, doesn't repeat itself, and goes with a later correction.
