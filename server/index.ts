@@ -33,7 +33,12 @@ import { createAppleRouter } from "./apple-routes.js";
 import { closeLocalBrowser } from "./browser/launcher.js";
 import { createChangelogRouter } from "./changelog.js";
 import { createSecretsRouter, type SecretsRouterDeps } from "./secrets/routes.js";
-import { createSecretsPublicApp, secretsHostDispatcher, secretsPublicConfigFromEnv } from "./secrets/public-host.js";
+import {
+  createSecretsPublicApp,
+  secretsHostDispatcher,
+  secretsHostWebSocketGuard,
+  secretsPublicConfigFromEnv,
+} from "./secrets/public-host.js";
 import { secretStore, secretsSupported } from "./secrets/store.js";
 import {
   getRuntimeConfig,
@@ -437,7 +442,12 @@ async function main() {
   mountDashboard(app);
 
   const server = createServer(app);
-  const wss = new WebSocketServer({ server, path: "/ws" });
+  const wss = new WebSocketServer({
+    server,
+    path: "/ws",
+    // Nothing but the entry pages exists on the secrets host, websockets included.
+    ...(secretsPublic.ok ? { verifyClient: secretsHostWebSocketGuard(secretsPublic.config) } : {}),
+  });
   wss.on("connection", (ws, request) => {
     void isTrustedRequest(request).then((trusted) => {
       if (!trusted) {
