@@ -10,6 +10,9 @@ const { appCommit, newerFunctionsOnMain } = require("../scripts/convex-push-guar
   appCommit: (opts: { appDir?: string; home?: string }) => string | null;
   newerFunctionsOnMain: (opts: { sourceDir?: string; commit: string | null }) => Promise<{ skip: boolean; target?: string }>;
 };
+const { stampBuildInfo } = require("../scripts/stamp-build-info.cjs") as {
+  stampBuildInfo: (root: string) => string | null;
+};
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync("git", ["-c", "user.email=test@example.com", "-c", "user.name=test", ...args], {
@@ -74,5 +77,32 @@ describe("the Mac's Convex push guard", () => {
     expect(appCommit({ appDir, home })).toBe("old");
     writeFileSync(join(appDir, "build-info.json"), JSON.stringify({ commit: "new" }));
     expect(appCommit({ appDir, home })).toBe("new");
+  });
+
+  it("stamps the packed app with its own commit, so a fresh install doesn't read the old install record", async () => {
+    // The first start after an install: the install record still names the
+    // previous build, and main is this build. The stamp must win, or the app
+    // thinks main is ahead of it and skips pushing its functions.
+    const home = join(root, "home");
+    const state = join(home, "Library", "Application Support", "Boop", "self-build");
+    mkdirSync(state, { recursive: true });
+    writeFileSync(join(state, "installed.json"), JSON.stringify({ commit: git(mac, "rev-parse", "HEAD") }));
+    git(mac, "pull", "-q", "origin", "main");
+    landOnMain("convex/selfBuilds.ts");
+    git(mac, "pull", "-q", "origin", "main");
+    mkdirSync(join(mac, "electron"));
+    const stamped = stampBuildInfo(mac);
+    expect(stamped).toBe(git(mac, "rev-parse", "HEAD"));
+    const commit = appCommit({ appDir: join(mac, "electron"), home });
+    expect(commit).toBe(stamped);
+    expect((await newerFunctionsOnMain({ sourceDir: mac, commit })).skip).toBe(false);
+  });
+
+  it("removes a stale stamp outside a git checkout", () => {
+    const dir = join(root, "plain");
+    mkdirSync(join(dir, "electron"), { recursive: true });
+    writeFileSync(join(dir, "electron", "build-info.json"), JSON.stringify({ commit: "stale" }));
+    expect(stampBuildInfo(dir)).toBeNull();
+    expect(appCommit({ appDir: join(dir, "electron"), home: join(root, "nohome") })).toBeNull();
   });
 });
