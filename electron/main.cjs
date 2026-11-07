@@ -5,6 +5,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
 const { retryWithBackoff } = require("../scripts/convex-sync-retry.cjs");
+const { appCommit, newerFunctionsOnMain } = require("../scripts/convex-push-guard.cjs");
 
 const isMac = process.platform === "darwin";
 const productName = "Boop";
@@ -347,6 +348,9 @@ function childEnv() {
     BOOP_DESKTOP: "1",
     BOOP_NODE_CMD: nodeShim.cmd,
     FORCE_COLOR: "0",
+    // This app is older than main and main changed Convex functions: the
+    // `convex dev` watcher in scripts/dev.mjs must not push them either.
+    ...(skipConvexPush ? { BOOP_SKIP_CONVEX_PUSH: "1" } : {}),
     [pathKey]: [nodeShim.dir, binDir, ...macCliPaths, existingPath].filter(Boolean).join(path.delimiter),
   };
 }
@@ -833,10 +837,31 @@ function errorText(error) {
   return error instanceof Error ? error.message : String(error);
 }
 
+// Set when this app is older than main and main changed Convex functions.
+let skipConvexPush = false;
+
 // Resolves to { ok, stopped, error, canStartServer }. Never throws.
 async function syncConvexRuntime(isSuperseded = () => false) {
   const generatedApi = path.join(runtimeRoot, "convex", "_generated", "api.js");
   const hasGenerated = fs.existsSync(generatedApi);
+  // A build shipped from the server while the Mac was off may have pushed
+  // newer functions. Pushing this app's older ones would undo that while the
+  // server runs the new code; the catch-up install builds main and the new
+  // app pushes when it starts.
+  skipConvexPush = false;
+  if (hasGenerated) {
+    const sourceDir = readRuntimeEnv().BOOP_SOURCE_DIR || process.env.BOOP_SOURCE_DIR;
+    const guard = await newerFunctionsOnMain({ sourceDir, commit: appCommit({ appDir: __dirname }) });
+    if (guard.skip) {
+      skipConvexPush = true;
+      writeStartupLog(
+        `[electron] main (${guard.target.slice(0, 7)}) is ahead of this app and changed Convex functions; skipping the push until it's installed`,
+      );
+      startupPhase("convex sync: skipped (newer functions on main)");
+      refreshConnectionStatus();
+      return { ok: true, attempts: 0, canStartServer: true };
+    }
+  }
   const convex = localCommand("convex");
   setStatus({
     state: "starting",

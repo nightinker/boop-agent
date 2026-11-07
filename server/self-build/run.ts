@@ -39,6 +39,7 @@ import { currentInstance, instanceIdentity, isActiveInstance, type InstanceSumma
 import { isUnknownArgError, withOptionalArgs } from "../convex-compat.js";
 import { requestSelfUpdateSoon } from "../self-update.js";
 import { runsOn } from "../../convex/selfBuildRules.js";
+import { sourceDir } from "./source-dir.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -50,6 +51,10 @@ const DEFAULT_MODEL = "claude-opus-5-5";
 const running = new Map<string, AbortController>();
 // Builds this process is coding, checking or shipping right now.
 const localBuilds = new Set<string>();
+// After the server ships, queued builds wait this long for its self-update
+// (a build would hold the update back until it finished).
+const QUEUE_HOLD_AFTER_SHIP_MS = 10 * 60_000;
+let queueHeldUntil = 0;
 
 /**
  * Which copy of Boop this is (its instances.instanceId). Recorded on every
@@ -57,6 +62,15 @@ const localBuilds = new Set<string>();
  */
 export function thisRunner(): string {
   return currentInstance()?.identity.instanceId ?? instanceIdentity().instanceId;
+}
+
+/**
+ * Whether this copy may record a build without its runner when the deployed
+ * Convex functions are too old to take one. Only the Mac: a runner-less build
+ * counts as the Mac's, so the Mac would fail a server's build on restart.
+ */
+function runnerOptional(): boolean {
+  return process.platform === "darwin";
 }
 
 /** Builds with no runner predate runners: they ran on the Mac. */
@@ -155,10 +169,7 @@ async function ensureDependencies(worktree: string, src: string): Promise<void> 
   });
 }
 
-export function sourceDir(): string | null {
-  const dir = process.env.BOOP_SOURCE_DIR;
-  return dir && existsSync(join(dir, ".git")) ? dir : null;
-}
+export { sourceDir };
 
 function stateDir(): string {
   return join(homedir(), "Library", "Application Support", "Boop", "self-build");
@@ -267,7 +278,13 @@ async function setStatus(
     if (typeof value === "string") redacted[key] = redactBuildText(value);
   }
   try {
-    await withOptionalArgs((args) => convex.mutation(api.selfBuilds.update, args), { buildId, ...redacted }, ["runner"]);
+    await withOptionalArgs(
+      "selfBuilds.update",
+      (args) => convex.mutation(api.selfBuilds.update, args),
+      { buildId, ...redacted },
+      ["runner"],
+      { fallback: runnerOptional() },
+    );
   } finally {
     // Take or release the build's wake lock right away, not at the next poll.
     syncBuildWakeLock();
@@ -315,38 +332,53 @@ export async function startSelfBuild(input: {
   if (!src && process.platform !== "darwin") {
     // A server copy can't build or ship (that needs the Mac app), so it
     // queues the request for the Mac, which starts it when it's back.
-    const buildId = newBuildId();
-    const slot = await convex.mutation(api.selfBuilds.enqueue, {
-      buildId,
-      conversationId: input.conversationId,
-      request: input.request,
-      ...(input.retryOf ? { retryOf: input.retryOf } : {}),
-      forceQueue: true,
-    });
-    return `I'm running on the server right now, and builds happen on your Mac. I queued this as build ${buildId} (#${slot.position} in line); your Mac starts it as soon as it's back online, and I'll text you then.`;
+    return queueForMac(input);
   }
   if (!src) return "Self-build isn't set up: set BOOP_SOURCE_DIR in .env.local to Boop's git checkout.";
   // With a checkout, the server builds too (while the Mac is off, it's the
   // copy taking requests). Convex starts at most one build at a time across
   // every copy, so the Mac and the server never both code one.
   const buildId = newBuildId();
-  const slot = await withOptionalArgs(
-    (args) => convex.mutation(api.selfBuilds.enqueue, args),
-    {
-      buildId,
-      conversationId: input.conversationId,
-      request: input.request,
-      ...(input.retryOf ? { retryOf: input.retryOf } : {}),
-      runner: thisRunner(),
-    },
-    ["runner"],
-  );
+  let slot;
+  try {
+    slot = await withOptionalArgs(
+      "selfBuilds.enqueue",
+      (args) => convex.mutation(api.selfBuilds.enqueue, args),
+      {
+        buildId,
+        conversationId: input.conversationId,
+        request: input.request,
+        ...(input.retryOf ? { retryOf: input.retryOf } : {}),
+        runner: thisRunner(),
+      },
+      ["runner"],
+      { fallback: runnerOptional() },
+    );
+  } catch (err) {
+    // The deployed functions can't record which copy runs a build, so a
+    // server build would look like the Mac's (and be failed by its restart).
+    // Leave it to the Mac, which pushes newer functions when it starts.
+    if (runnerOptional() || !isUnknownArgError(err)) throw err;
+    return queueForMac(input);
+  }
   syncBuildWakeLock();
   if (slot.status === "queued") {
     return queuedMessage({ buildId, position: slot.position, blockedBy: slot.blockedBy });
   }
   launchBuild({ conversationId: input.conversationId, request: input.request, buildId, src });
   return `Started build ${buildId}. I'm coding it on its own branch and will text you the PR when it's ready (usually 5–30 minutes).`;
+}
+
+async function queueForMac(input: { conversationId: string; request: string; retryOf?: string }): Promise<string> {
+  const buildId = newBuildId();
+  const slot = await convex.mutation(api.selfBuilds.enqueue, {
+    buildId,
+    conversationId: input.conversationId,
+    request: input.request,
+    ...(input.retryOf ? { retryOf: input.retryOf } : {}),
+    forceQueue: true,
+  });
+  return `I'm running on the server right now, and builds happen on your Mac. I queued this as build ${buildId} (#${slot.position} in line); your Mac starts it as soon as it's back online, and I'll text you then.`;
 }
 
 type BuildInput = { conversationId: string; request: string; buildId: string; src: string };
@@ -387,12 +419,21 @@ export async function startNextQueuedBuild(): Promise<void> {
   // A catch-up install is about to restart Boop, or waits for running work
   // to finish first; queued builds wait for it (they resume after the restart).
   if (!src || catchingUp || catchUpRetry || !isActiveInstance()) return;
+  // Just shipped on the server: let it update itself first (it waits while
+  // building). The queue resumes after the restart, or once this runs out.
+  if (Date.now() < queueHeldUntil) return;
   try {
     const next = await withOptionalArgs(
+      "selfBuilds.claimNextQueued",
       (args) => convex.mutation(api.selfBuilds.claimNextQueued, args),
       { runner: thisRunner() },
       ["runner"],
-    );
+      { fallback: runnerOptional() },
+    ).catch((err) => {
+      // Too old to record the runner: the server leaves the queue to the Mac.
+      if (!runnerOptional() && isUnknownArgError(err)) return null;
+      throw err;
+    });
     if (!next) return;
     console.log(`[self-build ${next.buildId}] starting from the queue`);
     await notify(next.conversationId, `Starting queued build ${next.buildId}: ${next.request.slice(0, 120)}`);
@@ -613,7 +654,12 @@ export async function shipSelfBuild(input: {
   }
   const blocker = shipBlocker(recent, build.buildId, process.env.BOOP_DESKTOP === "1", runsHere);
   if (blocker) return blocker;
-  await setStatus(build.buildId, { status: "shipping", runner: thisRunner() });
+  try {
+    await setStatus(build.buildId, { status: "shipping", runner: thisRunner() });
+  } catch (err) {
+    if (runnerOptional() || !isUnknownArgError(err)) throw err;
+    return "The Convex functions deployed are older than this server's code, so I can't ship from here safely. Ask me again once your Mac is back; it pushes the newer functions when it starts.";
+  }
   localBuilds.add(build.buildId);
   activityLogs.set(build.buildId, { text: build.activity });
   await noteActivity(build.buildId, "Shipping: merging the PR and rebuilding", { flush: true });
@@ -660,6 +706,7 @@ async function shipBuild(input: {
     // pulls it and restarts; the Mac installs it once it's back online.
     const server = process.platform !== "darwin";
     const updating = server && requestSelfUpdateSoon();
+    if (updating) queueHeldUntil = Date.now() + QUEUE_HOLD_AFTER_SHIP_MS;
     await noteActivity(buildId, updating ? "Merged; updating this server" : "Merged; restart Boop to load it", {
       flush: true,
     });
@@ -718,6 +765,10 @@ async function buildAndRestart(input: {
   } else {
     await must("npm", ["ci"], { cwd: release, timeout: BUILD_TIMEOUT_MS });
   }
+  const commit = (await must("git", ["rev-parse", "HEAD"], { cwd: release })).trim();
+  // Stamped into the app so it knows, on start, whether main has newer
+  // Convex functions than its own (scripts/convex-push-guard.cjs).
+  await writeFile(join(release, "electron", "build-info.json"), JSON.stringify({ commit }));
   await must("npm", ["run", "desktop:pack"], { cwd: release, timeout: BUILD_TIMEOUT_MS });
   const newApp = join(release, "dist", process.arch === "arm64" ? "mac-arm64" : "mac", "Boop.app");
   if (!existsSync(newApp)) throw new Error(`The build finished but ${newApp} is missing.`);
@@ -744,7 +795,6 @@ async function buildAndRestart(input: {
     }),
   );
   await chmod(script, 0o755);
-  const commit = (await must("git", ["rev-parse", "HEAD"], { cwd: release })).trim();
   await writeInstalling({ id: buildId, commit, conversationId: input.conversationId });
   await input.beforeRestart();
   // `open` hands its environment to the app it launches, so ELECTRON_RUN_AS_NODE
@@ -820,7 +870,10 @@ export interface CatchUpOptions {
   install?: (input: Parameters<typeof buildAndRestart>[0]) => Promise<void>;
 }
 
-let catchUpInflight: Promise<boolean> | null = null;
+/** started: an install is under way; deferred: waiting for running work; error: the check itself failed. */
+type CatchUpOutcome = "started" | "none" | "deferred" | "error";
+
+let catchUpInflight: Promise<CatchUpOutcome> | null = null;
 let catchUpRetry: ReturnType<typeof setTimeout> | null = null;
 
 /**
@@ -830,7 +883,11 @@ let catchUpRetry: ReturnType<typeof setTimeout> | null = null;
  * reports back and texts the owner. Waits for a running execution agent or
  * a build on this Mac to finish first.
  */
-export function installMissedUpdates(opts: CatchUpOptions = {}): Promise<boolean> {
+export async function installMissedUpdates(opts: CatchUpOptions = {}): Promise<boolean> {
+  return (await checkOnce(opts)) === "started";
+}
+
+function checkOnce(opts: CatchUpOptions): Promise<CatchUpOutcome> {
   catchUpInflight ??= checkMissedUpdates(opts).finally(() => {
     catchUpInflight = null;
   });
@@ -847,38 +904,42 @@ function deferCatchUp(opts: CatchUpOptions): void {
       catchUpRetry.unref?.();
       return;
     }
-    void installMissedUpdates(opts);
+    // Queued builds waited for this install. If it didn't start after all
+    // (nothing to install, or the check failed), let them go.
+    void checkOnce(opts).then((outcome) => {
+      if (outcome !== "started") void startNextQueuedBuild();
+    });
   };
   catchUpRetry = setTimeout(again, retryMs);
   catchUpRetry.unref?.();
 }
 
-async function checkMissedUpdates(opts: CatchUpOptions): Promise<boolean> {
-  if (catchingUp || process.env.BOOP_DESKTOP !== "1") return false;
+async function checkMissedUpdates(opts: CatchUpOptions): Promise<CatchUpOutcome> {
+  if (catchingUp || process.env.BOOP_DESKTOP !== "1") return "none";
   const src = sourceDir();
-  if (!src) return false;
+  if (!src) return "none";
   try {
     const installed = await readInstalledCommit();
     if (!installed) {
       console.log("[self-build] no record of the installed version yet; skipping the catch-up check");
-      return false;
+      return "none";
     }
     // Git first: it costs nothing, and usually there's nothing to install.
     await must("git", ["fetch", "origin", "main"], { cwd: src });
     const target = (await must("git", ["rev-parse", "origin/main"], { cwd: src })).trim();
-    if (target === installed) return false;
+    if (target === installed) return "none";
     // Only move forward: a local build ahead of main is left alone.
-    if (!(await sh("git", ["merge-base", "--is-ancestor", installed, target], { cwd: src })).ok) return false;
+    if (!(await sh("git", ["merge-base", "--is-ancestor", installed, target], { cwd: src })).ok) return "none";
     if (localBuilds.size > 0 || opts.isBusy?.()) {
       console.log(`[self-build] main is at ${target.slice(0, 7)}; installing once the running work finishes`);
       deferCatchUp(opts);
-      return false;
+      return "deferred";
     }
     // A build coding or shipping on this Mac would be cut off by the restart.
     // One running on the server isn't: the Mac restarting doesn't touch it.
     const recent = await convex.query(api.selfBuilds.recent, { limit: 10 });
     if (recent.some((b) => ["coding", "testing", "shipping", "restarting"].includes(b.status) && runsHere(b))) {
-      return false;
+      return "none";
     }
     const subjects = (await must("git", ["log", "--first-parent", "--format=%s", `${installed}..${target}`], { cwd: src }))
       .split("\n")
@@ -902,14 +963,18 @@ async function checkMissedUpdates(opts: CatchUpOptions): Promise<boolean> {
       console.error("[self-build] catch-up install failed", err);
       if (conversationId) await notify(conversationId, `Installing the latest main failed: ${message.split("\n")[0]}`);
     });
-    return true;
+    return "started";
   } catch (err) {
     console.warn("[self-build] catch-up check failed", err instanceof Error ? err.message : err);
-    return false;
+    return "error";
   }
 }
 
+// The last peer commit a catch-up check completed for, and when a failed
+// check (say, git fetch offline) for a commit may be tried again.
 let lastPeerCommit: string | null = null;
+let peerRetry: { commit: string; at: number } | null = null;
+const PEER_RETRY_MS = 60_000;
 
 /**
  * Runs on the Mac with every instance check-in it already does (no extra
@@ -922,16 +987,25 @@ export async function catchUpWithPeers(summary: InstanceSummary, opts: CatchUpOp
   const me = thisRunner();
   const peer = summary.instances.find((i) => i.instanceId !== me && i.commit)?.commit;
   if (!peer || peer === lastPeerCommit) return false;
-  lastPeerCommit = peer;
+  if (peerRetry?.commit === peer && Date.now() < peerRetry.at) return false;
   const installed = await readInstalledCommit();
-  if (!installed || installed === peer) return false;
-  return installMissedUpdates(opts);
+  if (!installed || installed === peer) {
+    lastPeerCommit = peer;
+    return false;
+  }
+  const outcome = await checkOnce(opts);
+  // Only a check that completed counts; a failed one is retried a minute on.
+  if (outcome === "error") peerRetry = { commit: peer, at: Date.now() + PEER_RETRY_MS };
+  else lastPeerCommit = peer;
+  return outcome === "started";
 }
 
 /** Test hook. */
 export function resetCatchUpState(): void {
   catchingUp = false;
   lastPeerCommit = null;
+  peerRetry = null;
+  queueHeldUntil = 0;
   catchUpInflight = null;
   if (catchUpRetry) clearTimeout(catchUpRetry);
   catchUpRetry = null;

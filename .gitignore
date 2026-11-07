@@ -18,3 +18,6 @@ data/
 debug/dist/
 .cache/
 .tsbuildinfo
+
+# Commit stamp written into release builds by self-build
+electron/build-info.json

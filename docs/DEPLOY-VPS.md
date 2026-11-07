@@ -421,11 +421,21 @@ only if they changed, then restarts (systemd starts it again). It waits while
 it's answering a text, never overwrites local changes, and goes back to the old
 code if a step fails. Install the dev dependencies once so it can build the
 dashboard: `ELECTRON_SKIP_BINARY_DOWNLOAD=1 npm install`. It also waits while
-it's running an execution agent or a self-build. The Mac app pushes Convex
-functions every time it starts; when an update changes `convex/`, the server
-pushes them too (`npx convex dev --once`), so a build shipped while the Mac is
-off doesn't run against old functions. Set `BOOP_AUTO_UPDATE_CONVEX=false` to
-leave that to the Mac.
+it's running an execution agent or a self-build. After a failed update it waits
+before trying the same commit again (5 minutes, doubling up to 6 hours); a new
+commit on `main` is tried right away.
+
+Convex functions: the Mac app pushes them every time it starts. A build that
+changes `convex/` and ships from the server while the Mac is off would run
+against the old functions until the Mac is back. To have the server push them
+when it updates, set `BOOP_AUTO_UPDATE_CONVEX=true`. The `boop` user then needs
+Convex credentials: either the `npx convex login` from setup step 3, or a
+deploy key (`CONVEX_DEPLOY_KEY`) from the deployment's settings in
+`.env.local`. If the push fails, the server keeps the new code and logs it;
+the Mac pushes the functions when it installs that commit. A Mac older than
+`main` doesn't push its own functions over the newer ones: when `main` changed
+`convex/` since the Mac's app was built, it skips its startup push and installs
+`main` instead.
 
 By hand:
 

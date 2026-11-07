@@ -34,6 +34,13 @@ export interface UpdateDeps {
   isBusy?: () => boolean;
   /** Restart into the new code (the default exits and lets systemd restart). */
   restart?: (from: string, to: string) => void;
+  /** True to leave this target alone for now (it failed recently; see the loop's backoff). */
+  skipTarget?: (target: string) => boolean;
+  /**
+   * Push the Convex functions when an update changes convex/. Off unless
+   * BOOP_AUTO_UPDATE_CONVEX=true: it needs Convex credentials on the server.
+   */
+  pushConvex?: boolean;
   log?: Pick<Console, "log" | "warn">;
 }
 
@@ -41,8 +48,9 @@ export type UpdateResult =
   | { status: "current" }
   | { status: "busy" }
   | { status: "dirty" }
-  | { status: "updated"; from: string; to: string }
-  | { status: "failed"; error: string };
+  | { status: "backoff"; target: string }
+  | { status: "updated"; from: string; to: string; convexPush?: "pushed" | "skipped" | "failed" }
+  | { status: "failed"; target: string; error: string };
 
 /**
  * Which follow-up work an update needs, from the files it changes. `convex`:
@@ -74,6 +82,7 @@ export async function checkForUpdate(deps: UpdateDeps = {}): Promise<UpdateResul
   if (!isAncestor) return { status: "dirty" };
   if ((await run("git", ["status", "--porcelain", "--untracked-files=no"])) !== "") return { status: "dirty" };
   if (deps.isBusy?.()) return { status: "busy" };
+  if (deps.skipTarget?.(target)) return { status: "backoff", target };
 
   const changed = (await run("git", ["diff", "--name-only", head, target])).split("\n").filter(Boolean);
   const plan = updatePlan(changed);
@@ -82,11 +91,6 @@ export async function checkForUpdate(deps: UpdateDeps = {}): Promise<UpdateResul
     await run("git", ["checkout", "--quiet", "--detach", target]);
     if (plan.install) await run("npm", ["install", "--no-audit", "--no-fund"], { timeoutMs: 15 * 60_000 });
     if (plan.dashboard) await run("npm", ["run", "dashboard:build"], { timeoutMs: 10 * 60_000 });
-    // Last, so a failed step above leaves the deployed functions alone. Also
-    // regenerates convex/_generated for the new code.
-    if (plan.convex && process.env.BOOP_AUTO_UPDATE_CONVEX !== "false") {
-      await run("npx", ["convex", "dev", "--once", "--typecheck=disable"], { timeoutMs: 5 * 60_000 });
-    }
   } catch (err) {
     const error = err instanceof Error ? err.message.split("\n")[0]! : String(err);
     log.warn(`[self-update] update failed, staying on ${head.slice(0, 7)}: ${error}`);
@@ -94,10 +98,48 @@ export async function checkForUpdate(deps: UpdateDeps = {}): Promise<UpdateResul
     if (plan.install) {
       await run("npm", ["install", "--no-audit", "--no-fund"], { timeoutMs: 15 * 60_000 }).catch(() => undefined);
     }
-    return { status: "failed", error };
+    return { status: "failed", target, error };
+  }
+  // After the code is in place, and never a reason to undo it: a server
+  // without Convex credentials (or offline) keeps the new code and the old
+  // functions, and the Mac pushes them when it installs this commit.
+  let convexPush: "pushed" | "skipped" | "failed" | undefined;
+  if (plan.convex) {
+    const push = deps.pushConvex ?? process.env.BOOP_AUTO_UPDATE_CONVEX === "true";
+    convexPush = push ? "pushed" : "skipped";
+    if (push) {
+      await run("npx", ["convex", "dev", "--once", "--typecheck=disable"], { timeoutMs: 5 * 60_000 }).catch((err) => {
+        convexPush = "failed";
+        log.warn(
+          `[self-update] couldn't push the Convex functions (${err instanceof Error ? err.message.split("\n")[0] : err}); keeping the new code, the Mac pushes them when it installs it`,
+        );
+      });
+    } else {
+      log.log("[self-update] Convex functions changed; not pushing them (BOOP_AUTO_UPDATE_CONVEX isn't true), the Mac does when it installs this");
+    }
   }
   (deps.restart ?? defaultRestart)(head, target);
-  return { status: "updated", from: head, to: target };
+  return { status: "updated", from: head, to: target, ...(convexPush ? { convexPush } : {}) };
+}
+
+/**
+ * After a failed update, wait before trying the same commit again: one
+ * interval, then doubling up to six hours. A new commit on main is tried at once.
+ */
+export function createUpdateBackoff(intervalMs: number, now: () => number = Date.now) {
+  let failed: { target: string; count: number; until: number } | null = null;
+  return {
+    skip: (target: string) => Boolean(failed && failed.target === target && now() < failed.until),
+    note(result: UpdateResult) {
+      if (result.status === "failed") {
+        const count = failed?.target === result.target ? failed.count + 1 : 1;
+        const waitMs = Math.min(intervalMs * 2 ** (count - 1), 6 * 60 * 60_000);
+        failed = { target: result.target, count, until: now() + waitMs };
+      } else if (result.status === "updated" || result.status === "current") {
+        failed = null;
+      }
+    },
+  };
 }
 
 function defaultRestart(from: string, to: string): void {
@@ -127,11 +169,13 @@ export function startSelfUpdateLoop(deps: UpdateDeps = {}): () => void {
   console.log(`[self-update] following origin/${branch} every ${Math.round(intervalMs / 1000)}s`);
   let running = false;
   let lastProblem = "";
+  const backoff = createUpdateBackoff(intervalMs);
   const tick = async () => {
     if (running) return;
     running = true;
     try {
-      const result = await checkForUpdate({ ...deps, branch });
+      const result = await checkForUpdate({ ...deps, branch, skipTarget: backoff.skip });
+      backoff.note(result);
       const problem = result.status === "dirty" ? "local changes or commits not on main; not updating" : "";
       if (problem && problem !== lastProblem) console.warn(`[self-update] ${problem}`);
       lastProblem = problem;

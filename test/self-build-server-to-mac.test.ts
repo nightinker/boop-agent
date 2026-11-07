@@ -35,6 +35,7 @@ import {
   startSelfBuild,
 } from "../server/self-build/run.js";
 import { shipBlocker } from "../server/self-build/queue.js";
+import { resetCompatState } from "../server/convex-compat.js";
 
 const SERVER = "linux:test-server";
 const MAC = "darwin:test-mac";
@@ -91,11 +92,13 @@ beforeEach(() => {
   convexMock.mutation.mockReset();
   notifyMock.mockReset();
   resetCatchUpState();
+  resetCompatState();
 });
 
 afterEach(() => {
   setBuildRunnerForTests(null);
   resetCatchUpState();
+  vi.useRealTimers();
   setPlatform(realPlatform);
   process.env = { ...env };
   home.dir = "";
@@ -255,5 +258,95 @@ describe("no double build", () => {
     const runsHere = (b: { runner?: string }) => b.runner === MAC;
     expect(shipBlocker(builds, "ship-me", true, runsHere)).toBeNull();
     expect(shipBlocker([{ ...builds[0]!, runner: MAC }], "ship-me", true, runsHere)).toContain("still coding");
+  });
+});
+
+describe("review fixes", () => {
+  const oldFunctions = () => new Error("ArgumentValidationError: Object contains extra field `runner` that is not in the validator.");
+  const serverAt = (commit: string) => ({
+    activeInstanceId: MAC,
+    instances: [{ instanceId: SERVER, label: "server", platform: "linux", priority: 10, publicUrl: null, commit, lastSeenAt: 0, online: true }],
+  });
+
+  it("queued builds start once a deferred install turns out to have nothing to do", async () => {
+    onMac();
+    const stamp = join(stateDir, "installed.json");
+    writeFileSync(stamp, JSON.stringify({ commit: git(macCheckout, "rev-parse", "HEAD") }));
+    const shipped = mergeToMain("feature.txt");
+    let agentRunning = true;
+    const install = vi.fn();
+    convexMock.mutation.mockResolvedValue(null);
+
+    expect(await installMissedUpdates({ install, isBusy: () => agentRunning, retryMs: 20 })).toBe(false);
+    // While the install waits, the queue holds too.
+    await startNextQueuedBuild();
+    expect(convexMock.mutation).not.toHaveBeenCalled();
+
+    // Meanwhile main got installed some other way (a manual install).
+    writeFileSync(stamp, JSON.stringify({ commit: shipped }));
+    agentRunning = false;
+    await vi.waitFor(() => expect(convexMock.mutation).toHaveBeenCalledWith(expect.anything(), { runner: MAC }));
+    expect(install).not.toHaveBeenCalled();
+  });
+
+  it("the server never creates a build without its runner: with old functions it queues for the Mac", async () => {
+    onServer();
+    const ran = vi.fn();
+    setBuildRunnerForTests(async () => ran());
+    convexMock.mutation.mockImplementation(async (_fn: unknown, args: Record<string, unknown>) => {
+      if ("runner" in args) throw oldFunctions();
+      return { status: "queued", position: 1, blockedBy: null };
+    });
+
+    const reply = await startSelfBuild({ conversationId: OWNER, request: "Add X" });
+
+    expect(reply).toContain("your Mac starts it as soon as it's back online");
+    const sent = convexMock.mutation.mock.calls.map(([, args]) => args);
+    expect(sent).toHaveLength(2);
+    expect(sent[1]).toMatchObject({ request: "Add X", forceQueue: true });
+    expect(sent[1]).not.toHaveProperty("runner");
+    expect(ran).not.toHaveBeenCalled();
+
+    // The downgrade is remembered: the next request goes straight to the queue,
+    // and the server doesn't claim queued builds it can't mark as its own.
+    convexMock.mutation.mockClear();
+    await startSelfBuild({ conversationId: OWNER, request: "Add Y" });
+    expect(convexMock.mutation.mock.calls.map(([, args]) => args)).toEqual([expect.objectContaining({ request: "Add Y", forceQueue: true })]);
+    convexMock.mutation.mockClear();
+    await startNextQueuedBuild(); // one try per function: rejected, so nothing is claimed
+    await startNextQueuedBuild(); // remembered: no call at all
+    expect(convexMock.mutation).toHaveBeenCalledTimes(1);
+    expect(ran).not.toHaveBeenCalled();
+  });
+
+  it("the server refuses to ship when it can't record itself as the runner", async () => {
+    onServer();
+    convexMock.query.mockResolvedValue([
+      { buildId: "b1", status: "pr_open", prUrl: "https://github.com/org/repo/pull/7", testsPassed: true, conversationId: OWNER },
+    ]);
+    const bin = join(root, "bin");
+    mkdirSync(bin);
+    writeFileSync(join(bin, "gh"), "#!/bin/sh\necho OPEN\n");
+    chmodSync(join(bin, "gh"), 0o755);
+    process.env.PATH = `${bin}:${process.env.PATH}`;
+    convexMock.mutation.mockRejectedValue(oldFunctions());
+    expect(await shipSelfBuild({ conversationId: OWNER })).toContain("can't ship from here safely");
+  });
+
+  it("a peer commit whose check failed (git fetch offline) is checked again later", async () => {
+    onMac();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    writeFileSync(join(stateDir, "installed.json"), JSON.stringify({ commit: git(macCheckout, "rev-parse", "HEAD") }));
+    const shipped = mergeToMain("feature.txt");
+    const install = vi.fn().mockResolvedValue(undefined);
+    git(macCheckout, "remote", "set-url", "origin", join(root, "missing.git"));
+
+    expect(await catchUpWithPeers(serverAt(shipped), { install })).toBe(false);
+    git(macCheckout, "remote", "set-url", "origin", origin);
+    // Not on every check-in: it waits a minute before trying that commit again.
+    expect(await catchUpWithPeers(serverAt(shipped), { install })).toBe(false);
+    vi.setSystemTime(Date.now() + 61_000);
+    expect(await catchUpWithPeers(serverAt(shipped), { install })).toBe(true);
+    expect(install).toHaveBeenCalledTimes(1);
   });
 });

@@ -276,7 +276,16 @@ const convexBin = localBin("convex");
 let shuttingDown = false;
 let resolveConvexReady;
 const convexReady = new Promise((resolve) => (resolveConvexReady = resolve));
-const convexSupervisor = restartOnFailure({
+// The desktop app skips pushing when main has newer Convex functions than
+// this copy (see scripts/convex-push-guard.cjs); the watcher would push too.
+const skipConvexPush = process.env.BOOP_SKIP_CONVEX_PUSH === "1";
+if (skipConvexPush) {
+  console.warn(`${C.convex}convex${C.reset} │ main has newer Convex functions; not pushing this copy's (it installs main next)`);
+  resolveConvexReady();
+}
+const convexSupervisor = skipConvexPush
+  ? { current: () => null }
+  : restartOnFailure({
   start: () => {
     const child = run(
       "convex",
