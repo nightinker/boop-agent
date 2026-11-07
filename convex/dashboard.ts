@@ -153,7 +153,7 @@ export const metrics = query({
 // only when an open dashboard asks (refreshMetrics). Viewers subscribe to
 // that one small record, which Convex can serve from cache until it changes.
 
-const STATS_MAX_AGE_MS = 10 * 60_000;
+const STATS_MAX_AGE_MS = 30 * 60_000;
 const statsKey = (demoMode: boolean) => (demoMode ? "metrics:demo" : "metrics");
 
 export const cachedMetrics = query({
@@ -171,7 +171,7 @@ export const cachedMetrics = query({
 });
 
 /**
- * Recomputes the cached metrics if they're older than maxAgeMs (default 10
+ * Recomputes the cached metrics if they're older than maxAgeMs (default 30
  * minutes). Cheap when fresh: one small read. Called by open dashboards.
  */
 export const refreshMetrics = mutation({

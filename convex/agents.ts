@@ -1,6 +1,6 @@
 import { mutation, query, type QueryCtx } from "./_generated/server";
 import { v } from "convex/values";
-import { DEMO_SCAN_LIMIT, isDemoId, isDemoModeEnabled } from "./demoMode";
+import { takeMatching, isDemoId, isDemoModeEnabled } from "./demoMode";
 
 type AgentStatus = "spawned" | "running" | "completed" | "failed" | "cancelled";
 
@@ -87,17 +87,15 @@ async function readAgents(
   demoOnly: boolean,
 ) {
   const limit = args.limit ?? 50;
-  // Read a few more rows than asked for (demo rows are filtered out below),
-  // not the whole table: a live dashboard query re-runs on every agent write.
-  const scan = Math.min(DEMO_SCAN_LIMIT, limit * 2 + 50);
+  // Stop once `limit` rows match, not after a fixed scan: a live dashboard
+  // query re-runs on every agent write.
   const rows = args.status
-    ? await ctx.db
+    ? ctx.db
         .query("executionAgents")
         .withIndex("by_status", (q) => q.eq("status", args.status!))
         .order("desc")
-        .take(scan)
-    : await ctx.db.query("executionAgents").order("desc").take(scan);
-  return rows.filter((agent) => isDemoId(agent.agentId) === demoOnly).slice(0, limit);
+    : ctx.db.query("executionAgents").order("desc");
+  return takeMatching(rows, (agent) => isDemoId(agent.agentId) === demoOnly, limit);
 }
 
 export const list = query({

@@ -1,6 +1,6 @@
 import { mutation, query, type QueryCtx } from "./_generated/server";
 import { v } from "convex/values";
-import { DEMO_SCAN_LIMIT, isDemoAutomationRun, isDemoId, isDemoModeEnabled } from "./demoMode";
+import { takeMatching, isDemoAutomationRun, isDemoId, isDemoModeEnabled } from "./demoMode";
 
 export const create = mutation({
   args: {
@@ -34,13 +34,12 @@ async function readAutomations(
   demoOnly: boolean,
 ) {
   const rows = enabledOnly
-    ? await ctx.db
+    ? ctx.db
         .query("automations")
         .withIndex("by_enabled", (q) => q.eq("enabled", true))
         .order("desc")
-        .take(DEMO_SCAN_LIMIT)
-    : await ctx.db.query("automations").order("desc").take(DEMO_SCAN_LIMIT);
-  return rows.filter((automation) => isDemoId(automation.automationId) === demoOnly);
+    : ctx.db.query("automations").order("desc");
+  return takeMatching(rows, (automation) => isDemoId(automation.automationId) === demoOnly, 500);
 }
 
 export const list = query({
@@ -166,20 +165,13 @@ export const recentRuns = query({
   handler: async (ctx, args) => {
     const limit = args.limit ?? 50;
     if (args.automationId && isDemoId(args.automationId)) return [];
-    if (args.automationId) {
-      return (await ctx.db
-        .query("automationRuns")
-        .withIndex("by_automation", (q) => q.eq("automationId", args.automationId!))
-        .order("desc")
-        .take(DEMO_SCAN_LIMIT))
-        .filter((run) => !isDemoAutomationRun(run))
-        .slice(0, limit);
-    }
-    const rows = await ctx.db
-      .query("automationRuns")
-      .order("desc")
-      .take(DEMO_SCAN_LIMIT);
-    return rows.filter((run) => !isDemoAutomationRun(run)).slice(0, limit);
+    const rows = args.automationId
+      ? ctx.db
+          .query("automationRuns")
+          .withIndex("by_automation", (q) => q.eq("automationId", args.automationId!))
+          .order("desc")
+      : ctx.db.query("automationRuns").order("desc");
+    return takeMatching(rows, (run) => !isDemoAutomationRun(run), limit);
   },
 });
 
@@ -190,12 +182,11 @@ export const recentRunsForDashboard = query({
     const demoOnly = await isDemoModeEnabled(ctx);
     if (args.automationId && isDemoId(args.automationId) !== demoOnly) return [];
     const rows = args.automationId
-      ? await ctx.db
+      ? ctx.db
           .query("automationRuns")
           .withIndex("by_automation", (q) => q.eq("automationId", args.automationId!))
           .order("desc")
-          .take(DEMO_SCAN_LIMIT)
-      : await ctx.db.query("automationRuns").order("desc").take(DEMO_SCAN_LIMIT);
-    return rows.filter((run) => isDemoAutomationRun(run) === demoOnly).slice(0, limit);
+      : ctx.db.query("automationRuns").order("desc");
+    return takeMatching(rows, (run) => isDemoAutomationRun(run) === demoOnly, limit);
   },
 });

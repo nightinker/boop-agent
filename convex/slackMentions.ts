@@ -1,5 +1,6 @@
 import { mutation, query } from "./_generated/server.js";
 import { v } from "convex/values";
+import { takeMatching } from "./demoMode";
 
 export const record = mutation({
   args: {
@@ -61,8 +62,15 @@ export const markAnswered = mutation({
 export const pendingDigest = query({
   args: {},
   handler: async (ctx) => {
-    const rows = await ctx.db.query("slackMentions").withIndex("by_created").order("asc").collect();
-    return rows.filter((r) => !r.answeredAt && !r.digestedAt);
+    // Newest first and capped: the table only grows, and a digest only
+    // needs the recent backlog. Returned oldest first.
+    const rows = await takeMatching(
+      ctx.db.query("slackMentions").withIndex("by_created").order("desc"),
+      (r) => !r.answeredAt && !r.digestedAt,
+      200,
+      2000,
+    );
+    return rows.reverse();
   },
 });
 

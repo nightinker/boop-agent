@@ -3,7 +3,7 @@ import { v } from "convex/values";
 import { internal } from "./_generated/api";
 import { deleteEmbedding, isEmbedded, saveEmbedding, syncEmbeddingLifecycle } from "./embeddingStore";
 import type { Doc, Id } from "./_generated/dataModel";
-import { DEMO_SCAN_LIMIT, isDemoId, isDemoModeEnabled } from "./demoMode";
+import { takeMatching, isDemoId, isDemoModeEnabled } from "./demoMode";
 
 const tierV = v.union(v.literal("short"), v.literal("long"), v.literal("permanent"));
 const segmentV = v.union(
@@ -200,23 +200,23 @@ type MemoryListArgs = {
 
 async function readMemories(ctx: QueryCtx, args: MemoryListArgs, demoOnly: boolean) {
   const limit = args.limit ?? 100;
-  const results = args.tier
-    ? await ctx.db
+  const rows = args.tier
+    ? ctx.db
         .query("memoryRecords")
         .withIndex("by_tier", (q) => q.eq("tier", args.tier!))
         .order("desc")
-        .take(DEMO_SCAN_LIMIT)
     : args.segment
-      ? await ctx.db
+      ? ctx.db
           .query("memoryRecords")
           .withIndex("by_segment", (q) => q.eq("segment", args.segment!))
           .order("desc")
-          .take(DEMO_SCAN_LIMIT)
-      : await ctx.db.query("memoryRecords").order("desc").take(DEMO_SCAN_LIMIT);
+      : ctx.db.query("memoryRecords").order("desc");
   const lifecycle = args.lifecycle ?? "active";
-  return results
-    .filter((record) => isDemoId(record.memoryId) === demoOnly && record.lifecycle === lifecycle)
-    .slice(0, limit);
+  return takeMatching(
+    rows,
+    (record) => isDemoId(record.memoryId) === demoOnly && record.lifecycle === lifecycle,
+    limit,
+  );
 }
 
 const listArgs = {

@@ -1,6 +1,6 @@
 import { mutation, query, type QueryCtx } from "./_generated/server";
 import { v } from "convex/values";
-import { DEMO_SCAN_LIMIT, isDemoId, isDemoMemoryEvent, isDemoModeEnabled } from "./demoMode";
+import { takeMatching, isDemoId, isDemoMemoryEvent, isDemoModeEnabled } from "./demoMode";
 
 export const emit = mutation({
   args: {
@@ -20,11 +20,11 @@ async function readRecent(
   limit: number,
   demoOnly: boolean,
 ) {
-  const rows = await ctx.db
-    .query("memoryEvents")
-    .order("desc")
-    .take(DEMO_SCAN_LIMIT);
-  return rows.filter((event) => isDemoMemoryEvent(event) === demoOnly).slice(0, limit);
+  return takeMatching(
+    ctx.db.query("memoryEvents").order("desc"),
+    (event) => isDemoMemoryEvent(event) === demoOnly,
+    limit,
+  );
 }
 
 export const recent = query({

@@ -122,6 +122,21 @@ async function setDemoSetting(ctx: MutationCtx, enabled: boolean) {
   });
 }
 
+function emptyCounts(): DemoCounts {
+  return {
+    conversations: 0,
+    messages: 0,
+    agents: 0,
+    agentLogs: 0,
+    memories: 0,
+    memoryEvents: 0,
+    automations: 0,
+    automationRuns: 0,
+    consolidationRuns: 0,
+    usageRecords: 0,
+  };
+}
+
 async function demoCounts(ctx: QueryCtx | MutationCtx): Promise<DemoCounts> {
   const [
     conversations,
@@ -1570,13 +1585,45 @@ async function seedDemoData(ctx: MutationCtx) {
   return counts;
 }
 
+// demo:status is a live query on every dashboard screen, so it must stay
+// tiny: Convex re-runs it whenever anything it read changes. Counting demo
+// rows live meant scanning 5000 rows of ten tables (about 8 MB) after every
+// agent log line, message or memory. setMode saves the counts instead.
+const DEMO_COUNTS_KEY = "debug_demo_counts";
+
+async function readSavedCounts(ctx: QueryCtx | MutationCtx): Promise<DemoCounts | null> {
+  const row = await ctx.db
+    .query("settings")
+    .withIndex("by_key", (q) => q.eq("key", DEMO_COUNTS_KEY))
+    .unique();
+  if (!row) return null;
+  try {
+    return JSON.parse(row.value) as DemoCounts;
+  } catch {
+    return null;
+  }
+}
+
+async function saveCounts(ctx: MutationCtx, counts: DemoCounts) {
+  const value = JSON.stringify(counts);
+  const existing = await ctx.db
+    .query("settings")
+    .withIndex("by_key", (q) => q.eq("key", DEMO_COUNTS_KEY))
+    .unique();
+  if (existing) await ctx.db.patch(existing._id, { value, updatedAt: Date.now() });
+  else await ctx.db.insert("settings", { key: DEMO_COUNTS_KEY, value, updatedAt: Date.now() });
+}
+
 export const status = query({
   args: {},
   handler: async (ctx) => {
-    const [setting, counts] = await Promise.all([readDemoSetting(ctx), demoCounts(ctx)]);
+    const setting = await readDemoSetting(ctx);
+    const enabled = setting === "true";
+    // Demo turned on before counts were saved: count once (only then).
+    const counts = (await readSavedCounts(ctx)) ?? (enabled ? await demoCounts(ctx) : emptyCounts());
     const total = Object.values(counts).reduce((sum, count) => sum + count, 0);
     return {
-      enabled: setting === "true",
+      enabled,
       seeded: total > 0,
       counts,
       total,
@@ -1591,18 +1638,8 @@ export const setMode = mutation({
     const removed = await deleteDemoRows(ctx);
     const seeded = args.enabled ? await seedDemoData(ctx) : null;
     await setDemoSetting(ctx, args.enabled);
-    const counts: DemoCounts = seeded ?? {
-      conversations: 0,
-      messages: 0,
-      agents: 0,
-      agentLogs: 0,
-      memories: 0,
-      memoryEvents: 0,
-      automations: 0,
-      automationRuns: 0,
-      consolidationRuns: 0,
-      usageRecords: 0,
-    };
+    const counts: DemoCounts = seeded ?? emptyCounts();
+    await saveCounts(ctx, counts);
     return {
       enabled: args.enabled,
       removed,
