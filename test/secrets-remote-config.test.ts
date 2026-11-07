@@ -1,8 +1,11 @@
+import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer, request as httpRequest, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   createSecretsPublicApp,
@@ -304,6 +307,76 @@ describe("request_secret", () => {
     const stale = await make(runtime({ activeBaseUrl: null })).handle({ name: "A_KEY", description: "x" });
     expect(stale.text).toMatch(/restart Boop/);
   });
+});
+
+describe("request_secret uses the same remote-entry config as get_config", () => {
+  it("includes the remote link whenever get_config reports remote entry enabled", async () => {
+    await writeConfig({ publicBaseUrl: BASE, port: DEFAULT_SECRETS_REMOTE_PORT });
+    const store = fileStore();
+    await store.set(SECRETS_PORTAL_PASSCODE_NAME, PASSCODE);
+    const env = { HOME: home, PORT: "3456" };
+    const status = await describeRemoteSecretEntry({ env, store: () => store, platform: "darwin", runtime: runtime() });
+    expect(status.enabled).toBe(true);
+    const res = await createSecretDispatcherTools("c", {
+      store: () => store,
+      requests: new SecretRequestRegistry(),
+      platform: "darwin",
+      env,
+      runtime: runtime(),
+    })
+      .find((t) => t.name === "request_secret")!
+      .handle({ name: "R2_SECRET", description: "x" });
+    expect(res.text).toContain("http://localhost:3456/secrets/enter/");
+    expect(res.text).toContain(`${status.baseUrl}/secrets/enter/`);
+    expect(res.text).not.toContain("No remote link");
+    expect(res.text).not.toContain(PASSCODE);
+  });
+
+  it("says why there's no remote link when the passcode itself is requested", async () => {
+    await writeConfig({ publicBaseUrl: BASE });
+    const res = await createSecretDispatcherTools("c", {
+      store: () => fileStore(),
+      requests: new SecretRequestRegistry(),
+      platform: "darwin",
+      env: { HOME: home },
+      runtime: runtime(),
+    })
+      .find((t) => t.name === "request_secret")!
+      .handle({ name: SECRETS_PORTAL_PASSCODE_NAME, description: "x" });
+    expect(res.text).not.toContain(`${BASE}/secrets/enter/`);
+    expect(res.text).toContain("can only be set on the Mac");
+    expect(res.text).not.toContain("isn't configured");
+  });
+
+  it("returns the remote link in a separate process that only has the config file", async () => {
+    await writeConfig({ publicBaseUrl: BASE, port: DEFAULT_SECRETS_REMOTE_PORT });
+    const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+    const mod = (rel: string) => JSON.stringify(path.join(root, rel));
+    const script = path.join(home, "request-secret-child.mts");
+    // Uses the real process.env (no injected env): only HOME + PATH, no SECRETS_PUBLIC_BASE_URL.
+    await writeFile(
+      script,
+      `import { createSecretDispatcherTools } from ${mod("server/secrets/tools.ts")};
+import { SecretRequestRegistry } from ${mod("server/secrets/requests.ts")};
+import { SecretStore } from ${mod("server/secrets/store.ts")};
+const store = new SecretStore({ dir: process.argv[2], prefer: "file", platform: "darwin", updateRedactor: false });
+await store.set("SECRETS_PORTAL_PASSCODE", process.argv[3]);
+const tool = createSecretDispatcherTools("c", { store: () => store, requests: new SecretRequestRegistry(), platform: "darwin" })
+  .find((t) => t.name === "request_secret")!;
+const res = await tool.handle({ name: "R2_SECRET", description: "x" });
+process.stdout.write(res.text);
+`,
+    );
+    const { stdout } = await promisify(execFile)(
+      path.join(root, "node_modules", ".bin", "tsx"),
+      [script, path.join(home, "store"), PASSCODE],
+      { cwd: home, env: { HOME: home, PATH: process.env.PATH ?? "" }, timeout: 30_000 },
+    );
+    expect(stdout).toContain("http://localhost:3456/secrets/enter/");
+    expect(stdout).toContain(`Away from the Mac (asks for the secrets passcode first): ${BASE}/secrets/enter/`);
+    expect(stdout).not.toContain("No remote link");
+    expect(stdout).not.toContain(PASSCODE);
+  }, 40_000);
 });
 
 describe("tunnel launchd files", () => {

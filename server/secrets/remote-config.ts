@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { createServer, type RequestListener, type Server } from "node:http";
+import { homedir } from "node:os";
 import path from "node:path";
 
 /**
@@ -87,15 +88,28 @@ export function parseSecretsPublicConfig(
   return { ok: true, config: { baseUrl: url.origin, host: hostname, origin: url.origin, port } };
 }
 
-/** The config file's path: $BOOP_SECRETS_REMOTE_CONFIG, else ~/.config/boop/secrets-remote.json. */
+/**
+ * The config file's path: $BOOP_SECRETS_REMOTE_CONFIG, else ~/.config/boop/secrets-remote.json.
+ * When this is the live process env and HOME isn't set (a tool host or child
+ * process started with a trimmed env), the OS home folder is used instead, so
+ * every process finds the same file.
+ */
 export function secretsRemoteConfigPath(env: NodeJS.ProcessEnv = process.env): string | null {
-  const home = env.HOME?.trim() || null;
+  const home = env.HOME?.trim() || (env === process.env ? osHome() : null);
   const explicit = env[SECRETS_REMOTE_CONFIG_ENV]?.trim();
   if (explicit) {
     if (explicit === "~" || explicit.startsWith("~/")) return home ? path.join(home, explicit.slice(1)) : null;
     return path.resolve(explicit);
   }
   return home ? path.join(home, ".config", "boop", "secrets-remote.json") : null;
+}
+
+function osHome(): string | null {
+  try {
+    return homedir().trim() || null;
+  } catch {
+    return null;
+  }
 }
 
 export interface ResolveOptions {
