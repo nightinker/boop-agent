@@ -25,9 +25,9 @@ function fakeRun(opts: { head: string; target: string; changed?: string[]; dirty
 
 describe("what an update needs", () => {
   it("reinstalls only when dependencies change, and rebuilds the dashboard when it changes", () => {
-    expect(updatePlan(["server/index.ts"])).toEqual({ install: false, dashboard: false });
-    expect(updatePlan(["debug/src/App.tsx"])).toEqual({ install: false, dashboard: true });
-    expect(updatePlan(["package-lock.json"])).toEqual({ install: true, dashboard: true });
+    expect(updatePlan(["server/index.ts"])).toEqual({ install: false, dashboard: false, convex: false });
+    expect(updatePlan(["debug/src/App.tsx"])).toEqual({ install: false, dashboard: true, convex: false });
+    expect(updatePlan(["package-lock.json"])).toEqual({ install: true, dashboard: true, convex: false });
   });
 });
 

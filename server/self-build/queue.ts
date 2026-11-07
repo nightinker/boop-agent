@@ -41,17 +41,20 @@ export function queuedMessage(input: {
 /**
  * Why a build can't ship right now, or null if it can. Another build that's
  * shipping or restarting always blocks. On the desktop app shipping restarts
- * Boop, which would kill a build that's still coding or testing.
+ * Boop, which would kill a build that's still coding or testing here.
+ * `runsHere` says which builds run on this copy; one coding on the other
+ * machine (the server while the Mac ships) isn't stopped by this restart.
  */
-export function shipBlocker(
-  builds: Pick<BuildSummary, "buildId" | "status">[],
+export function shipBlocker<B extends Pick<BuildSummary, "buildId" | "status">>(
+  builds: B[],
   shippingBuildId: string,
   restartsBoop: boolean,
+  runsHere: (build: B) => boolean = () => true,
 ): string | null {
   const blocking = builds.find((b) => {
     if (b.buildId === shippingBuildId) return false;
     if (b.status === "shipping" || b.status === "restarting") return true;
-    return restartsBoop && (b.status === "coding" || b.status === "testing");
+    return restartsBoop && (b.status === "coding" || b.status === "testing") && runsHere(b);
   });
   if (!blocking) return null;
   if (blocking.status === "coding" || blocking.status === "testing") {

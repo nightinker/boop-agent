@@ -1,5 +1,6 @@
 import { mutation, query, type MutationCtx } from "./_generated/server.js";
 import { v } from "convex/values";
+import { runsOn } from "./selfBuildRules.js";
 
 const statusV = v.union(
   v.literal("queued"),
@@ -50,12 +51,20 @@ export const enqueue = mutation({
     // Always queue, even if nothing is building: used when the copy taking
     // the request can't build (a server), so the Mac starts it later.
     forceQueue: v.optional(v.boolean()),
+    // The copy that starts it now, if nothing else is building.
+    runner: v.optional(v.string()),
   },
-  handler: async (ctx, { forceQueue, ...args }) => {
+  handler: async (ctx, { forceQueue, runner, ...args }) => {
     const now = Date.now();
     const active = await firstActive(ctx);
     if (!active && !forceQueue) {
-      await ctx.db.insert("selfBuilds", { ...args, status: "coding", createdAt: now, updatedAt: now });
+      await ctx.db.insert("selfBuilds", {
+        ...args,
+        status: "coding",
+        ...(runner ? { runner } : {}),
+        createdAt: now,
+        updatedAt: now,
+      });
       return { status: "coding" as const, position: 0, blockedBy: null };
     }
     const ahead = await ctx.db
@@ -71,17 +80,25 @@ export const enqueue = mutation({
   },
 });
 
-/** Moves the oldest queued build to "coding", if nothing else is building. */
+/**
+ * Moves the oldest queued build to "coding", if nothing else is building
+ * anywhere. One transaction, so when the Mac and the server both ask, only
+ * one of them gets it.
+ */
 export const claimNextQueued = mutation({
-  args: {},
-  handler: async (ctx) => {
+  args: { runner: v.optional(v.string()) },
+  handler: async (ctx, { runner }) => {
     if (await firstActive(ctx)) return null;
     const next = await ctx.db
       .query("selfBuilds")
       .withIndex("by_status_and_createdAt", (q) => q.eq("status", "queued"))
       .first();
     if (!next) return null;
-    await ctx.db.patch("selfBuilds", next._id, { status: "coding", updatedAt: Date.now() });
+    await ctx.db.patch("selfBuilds", next._id, {
+      status: "coding",
+      ...(runner ? { runner } : {}),
+      updatedAt: Date.now(),
+    });
     return { buildId: next.buildId, conversationId: next.conversationId, request: next.request };
   },
 });
@@ -91,10 +108,14 @@ export const claimNextQueued = mutation({
  * Builds still coding, testing or shipping lost their process when Boop
  * restarted, and one still "restarting" never got its result back. They're
  * marked failed so the queue can move on.
+ *
+ * With `runner`, only that copy's builds count: the server restarting (say,
+ * to update itself) must not fail a build the Mac is coding, and the other
+ * way round. `claimsUnowned` also takes builds with no runner (the Mac).
  */
 export const failInterrupted = mutation({
-  args: {},
-  handler: async (ctx) => {
+  args: { runner: v.optional(v.string()), claimsUnowned: v.optional(v.boolean()) },
+  handler: async (ctx, { runner, claimsUnowned }) => {
     const now = Date.now();
     const interrupted: { buildId: string; conversationId: string; request: string; status: string }[] = [];
     for (const status of ACTIVE) {
@@ -103,6 +124,7 @@ export const failInterrupted = mutation({
         .withIndex("by_status_and_createdAt", (q) => q.eq("status", status))
         .take(20);
       for (const build of rows) {
+        if (runner && !runsOn(build, runner, claimsUnowned ?? false)) continue;
         await ctx.db.patch("selfBuilds", build._id, {
           status: "failed",
           error:
@@ -137,6 +159,7 @@ export const update = mutation({
     startupLogPath: v.optional(v.string()),
     startupLogTail: v.optional(v.string()),
     activity: v.optional(v.string()),
+    runner: v.optional(v.string()),
   },
   handler: async (ctx, { buildId, ...patch }) => {
     const build = await ctx.db
@@ -217,7 +240,9 @@ export const inProgress = query({
         .query("selfBuilds")
         .withIndex("by_status_and_createdAt", (q) => q.eq("status", status))
         .take(50);
-      for (const b of builds) rows.push({ buildId: b.buildId, status: b.status, createdAt: b.createdAt });
+      for (const b of builds) {
+        rows.push({ buildId: b.buildId, status: b.status, createdAt: b.createdAt, runner: b.runner });
+      }
     }
     return rows;
   },

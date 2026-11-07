@@ -15,7 +15,7 @@ import { startAutomationLoop } from "./automations.js";
 import { startHeartbeatLoop } from "./heartbeat.js";
 import { startConsolidationLoop } from "./consolidation.js";
 import { runCurator, startCuratorLoop } from "./skills/curator.js";
-import { availableIntegrations, cancelAgent, retryAgent, spawnExecutionAgent } from "./execution-agent.js";
+import { availableIntegrations, cancelAgent, retryAgent, runningAgentIds, spawnExecutionAgent } from "./execution-agent.js";
 import { startAgentRetry } from "./agent-retry.js";
 import { notifyConversation } from "./notify.js";
 import { createOrchestratorBridgeRouter } from "./orchestrator-bridge.js";
@@ -49,11 +49,16 @@ import { accessConfigFromEnv, isAccessAuthenticatedRequest } from "./cloudflare-
 import { mountDashboard } from "./dashboard.js";
 import {
   cancelSelfBuild,
+  catchUpWithPeers,
   installMissedUpdates,
   resumeSelfBuilds,
   retrySelfBuild,
+  selfBuildBusy,
   startNextQueuedBuild,
+  type CatchUpOptions,
 } from "./self-build/run.js";
+import { isUnknownArgError } from "./convex-compat.js";
+import { execFileSync } from "node:child_process";
 import { instanceIdentity, isActiveInstance, resolvePublicUrl, startInstanceCoordinator } from "./instance.js";
 import type { Id } from "../convex/_generated/dataModel.js";
 import { networkHealth, probeNetwork } from "./network-health.js";
@@ -428,6 +433,9 @@ async function main() {
   let coordinator: ReturnType<typeof startInstanceCoordinator> | null = null;
   let stopPoller: (() => void) | null = null;
   let resumedSelfBuilds = false;
+  // The Mac installs what landed on main, but not while an execution agent is
+  // working: the restart would cut it off, so the install waits for it.
+  const catchUp: CatchUpOptions = { isBusy: () => runningAgentIds().length > 0 };
   const onActivate = async (othersOnline: boolean) => {
     awake.setActiveCopy(true);
     // Texts a crash cut off are only re-answered when no other copy is up;
@@ -463,7 +471,7 @@ async function main() {
         resumedSelfBuilds = true;
         await resumeSelfBuilds({ startQueued: false });
       }
-      if (!(await installMissedUpdates())) await startNextQueuedBuild();
+      if (!(await installMissedUpdates(catchUp))) await startNextQueuedBuild();
     })();
   };
 
@@ -491,7 +499,23 @@ async function main() {
   });
 
   // A server copy follows main, so builds shipped from the Mac reach it too.
-  startSelfUpdateLoop({ isBusy: () => inboundQueue.isBusy() });
+  // It waits while it's answering, running an agent, or coding a build.
+  startSelfUpdateLoop({
+    isBusy: () => inboundQueue.isBusy() || runningAgentIds().length > 0 || selfBuildBusy(),
+  });
+
+  // A server cleans up its own builds a restart cut off right away, active or
+  // not: they're marked with its id, so the Mac would never fail them, and
+  // they'd hold up the queue. (The Mac does this on its first activation.)
+  if (process.platform !== "darwin") {
+    resumedSelfBuilds = true;
+    void resumeSelfBuilds({ startQueued: false });
+  }
+
+  // A server reports the commit it runs with each check-in, so the Mac can
+  // tell main moved on (a build shipped here) and install it.
+  const runningCommit = process.platform === "darwin" ? undefined : gitHead();
+  let sendCommit = Boolean(runningCommit);
 
   const port = Number(process.env.PORT ?? 3456);
   server.listen(port, () => {
@@ -499,8 +523,21 @@ async function main() {
     // Work that must happen once, or costs tokens, runs only on the active
     // copy of Boop (the Mac first, a server while the Mac is offline).
     coordinator = startInstanceCoordinator({
-      identity: instanceIdentity(),
-      checkIn: (identity) => convex.mutation(api.instances.checkIn, identity),
+      identity: { ...instanceIdentity(), ...(runningCommit ? { commit: runningCommit } : {}) },
+      checkIn: async ({ commit, ...identity }) => {
+        if (!sendCommit || !commit) return convex.mutation(api.instances.checkIn, identity);
+        try {
+          return await convex.mutation(api.instances.checkIn, { ...identity, commit });
+        } catch (err) {
+          // Convex functions older than this code: check in without it.
+          if (!isUnknownArgError(err)) throw err;
+          sendCommit = false;
+          return convex.mutation(api.instances.checkIn, identity);
+        }
+      },
+      onSummary: (summary) => {
+        if (process.platform === "darwin") void catchUpWithPeers(summary, catchUp);
+      },
       leave: async (instanceId) => {
         await convex.mutation(api.instances.leave, { instanceId });
       },
@@ -565,3 +602,11 @@ main().catch((err) => {
   console.error("fatal", err);
   process.exit(1);
 });
+
+function gitHead(): string | undefined {
+  try {
+    return execFileSync("git", ["rev-parse", "HEAD"], { cwd: process.cwd(), encoding: "utf8", timeout: 5_000 }).trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}

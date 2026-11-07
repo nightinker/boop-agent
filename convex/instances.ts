@@ -13,6 +13,7 @@ function summarize(rows: InstanceRow[], now: number) {
         platform: row.platform,
         priority: row.priority,
         publicUrl: row.publicUrl ?? null,
+        commit: row.commit ?? null,
         lastSeenAt: row.lastSeenAt,
         online: isOnline(row, now),
       }))
@@ -32,6 +33,7 @@ export const checkIn = mutation({
     platform: v.string(),
     priority: v.number(),
     publicUrl: v.optional(v.string()),
+    commit: v.optional(v.string()),
     startedAt: v.number(),
   },
   handler: async (ctx, args) => {

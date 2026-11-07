@@ -17,6 +17,8 @@ export interface InstanceIdentity {
   platform: string;
   priority: number;
   startedAt: number;
+  /** The git commit this copy runs; servers report it so the Mac can catch up. */
+  commit?: string;
 }
 
 export interface InstanceSummary {
@@ -27,6 +29,7 @@ export interface InstanceSummary {
     platform: string;
     priority: number;
     publicUrl: string | null;
+    commit?: string | null;
     lastSeenAt: number;
     online: boolean;
   }[];
@@ -112,6 +115,8 @@ export interface CoordinatorDeps {
   /** Called when this copy becomes active. `othersOnline`: was another copy still up? */
   onActivate: (info: { othersOnline: boolean; summary: InstanceSummary }) => void | Promise<void>;
   onDeactivate: (info: { summary: InstanceSummary }) => void | Promise<void>;
+  /** Every check-in's answer, active or not (e.g. to notice a peer's new commit). */
+  onSummary?: (summary: InstanceSummary) => void;
   intervalMs?: number;
   graceMs?: number;
   /**
@@ -187,6 +192,11 @@ export function startInstanceCoordinator(deps: CoordinatorDeps): { stop: () => P
         : deps.identity.priority;
       const summary = await deps.checkIn({ ...deps.identity, priority, ...(publicUrl ? { publicUrl } : {}) });
       lastCheckInAt = now();
+      try {
+        deps.onSummary?.(summary);
+      } catch (e) {
+        log.warn("[instance] onSummary failed", e instanceof Error ? e.message : e);
+      }
       if (summary.activeInstanceId !== lastActiveId) {
         const who = summary.instances.find((i) => i.instanceId === summary.activeInstanceId);
         log.log(`[instance] active copy: ${who ? who.label : "none"}`);
@@ -299,7 +309,9 @@ export function instancePromptNote(state = current): string {
   }
   if (identity.platform !== "darwin") {
     lines.push(
-      "Self-builds code and ship on the Mac. If asked for a new build here, start_self_build queues it and the Mac starts it when it's back online; shipping waits for the Mac. Don't suggest editing .env on this server to fix that.",
+      process.env.BOOP_SOURCE_DIR?.trim()
+        ? "Self-builds run here too: start_self_build codes the build on this server and opens the PR, and ship_self_build merges it to main and updates this server. The Mac installs it on its own once it's back online and texts the owner then."
+        : "Self-builds code and ship on the Mac. If asked for a new build here, start_self_build queues it and the Mac starts it when it's back online; shipping waits for the Mac. Don't suggest editing .env on this server to fix that.",
     );
   }
   return `\n\n${lines.join("\n")}`;

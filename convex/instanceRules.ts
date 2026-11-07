@@ -10,6 +10,7 @@ export interface InstanceRow {
   platform: string;
   priority: number;
   publicUrl?: string;
+  commit?: string;
   startedAt: number;
   lastSeenAt: number;
 }

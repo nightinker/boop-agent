@@ -119,7 +119,7 @@ nano .env.local
 | `BOOP_RUNTIME`, `BOOP_MODEL` | As on your Mac. |
 | `ANTHROPIC_API_KEY` | Optional; only if you use an API key instead of a Claude login (step 4). |
 | `BOOP_APPLE_*`, `BOOP_BROWSER_*` | Leave out; they are ignored on Linux. |
-| `BOOP_SOURCE_DIR`, `BOOP_OWNER_NUMBERS` | Leave out; self-build's restart is Mac-only. |
+| `BOOP_SOURCE_DIR`, `BOOP_OWNER_NUMBERS` | Optional: set them to let the server code and ship self-builds while the Mac is off (see [Self-builds on the server](#self-builds-on-the-server)). Without them, builds asked for here wait for the Mac. |
 
 Keep `.env.local` readable only by the `boop` user and never commit it.
 
@@ -307,13 +307,34 @@ turns instead of doing the work twice:
 - The active copy points Composio's webhook (one address per account) at
   itself when it takes over.
 - Boop knows which copy it is: its prompt says where it runs, whether it's
-  active and how the other copy is doing. Self-builds asked for on the server
-  are queued; the Mac starts them when it's back. Shipping happens on the Mac.
+  active and how the other copy is doing. Without a checkout on the server,
+  self-builds asked for there are queued and the Mac starts them when it's
+  back; with one, the server builds them itself (see below).
 - When the Mac comes back online and `main` has moved on (PRs merged on
-  GitHub, builds shipped from the server's queue), the desktop app builds and
-  installs it like "ship it" does, and texts you which PRs landed. It tracks
-  the installed commit in `~/Library/Application Support/Boop/self-build/installed.json`,
-  written after each successful install; until the first one it skips the check.
+  GitHub, builds shipped from the server), the desktop app builds and
+  installs it like "ship it" does, and texts you which PRs landed. The server
+  reports the commit it runs with every check-in, so a Mac that stayed online
+  but standing by notices too. It waits for a running execution agent to
+  finish before restarting. It tracks the installed commit in
+  `~/Library/Application Support/Boop/self-build/installed.json`, written
+  after each successful install; until the first one it skips the check.
+
+### Self-builds on the server
+
+Set `BOOP_SOURCE_DIR` to the server's checkout (the app directory works) and
+`BOOP_OWNER_NUMBERS` like on the Mac, and give the `boop` user a GitHub login
+that can push branches and merge PRs (`gh auth login`, plus a git credential
+helper or deploy key). Then, while the server is the active copy:
+
+- "Build X" codes it in a worktree under `.claude/worktrees/`, runs the
+  typecheck and tests, and opens the PR, as on the Mac.
+- "Ship it" merges the PR into `main`. With `BOOP_AUTO_UPDATE=true` the
+  server updates itself right after (see [Updating](#updating)); the Mac
+  installs it once it's back online and texts you.
+- Only one build codes at a time across both copies: Convex hands a queued
+  build to one copy only, and each build records which copy runs it, so a
+  restart on one machine never fails a build running on the other. A copy
+  standing by doesn't pick up queued builds.
 
 To run only the server, quit the Mac app; to run only the Mac,
 `sudo systemctl disable --now boop`.
@@ -399,8 +420,12 @@ merged) it fast-forwards, reinstalls dependencies and rebuilds the dashboard
 only if they changed, then restarts (systemd starts it again). It waits while
 it's answering a text, never overwrites local changes, and goes back to the old
 code if a step fails. Install the dev dependencies once so it can build the
-dashboard: `ELECTRON_SKIP_BINARY_DOWNLOAD=1 npm install`. Convex functions are
-pushed by the Mac app when it ships.
+dashboard: `ELECTRON_SKIP_BINARY_DOWNLOAD=1 npm install`. It also waits while
+it's running an execution agent or a self-build. The Mac app pushes Convex
+functions every time it starts; when an update changes `convex/`, the server
+pushes them too (`npx convex dev --once`), so a build shipped while the Mac is
+off doesn't run against old functions. Set `BOOP_AUTO_UPDATE_CONVEX=false` to
+leave that to the Mac.
 
 By hand:
 
