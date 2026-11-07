@@ -32,7 +32,8 @@ import { createBrowserRouter } from "./browser-routes.js";
 import { createAppleRouter } from "./apple-routes.js";
 import { closeLocalBrowser } from "./browser/launcher.js";
 import { createChangelogRouter } from "./changelog.js";
-import { createSecretsRouter } from "./secrets/routes.js";
+import { createSecretsRouter, type SecretsRouterDeps } from "./secrets/routes.js";
+import { createSecretsPublicApp, secretsHostDispatcher, secretsPublicConfigFromEnv } from "./secrets/public-host.js";
 import { secretStore, secretsSupported } from "./secrets/store.js";
 import {
   getRuntimeConfig,
@@ -108,7 +109,46 @@ async function main() {
     getApiKey: async () => (secretsSupported() ? secretStore().get(SIDECAR_KEY_NAME) : null),
   });
 
+  // What happens when a secret is saved from an entry link, on the Mac or on
+  // the public secrets host.
+  const secretsDeps: Pick<SecretsRouterDeps, "onChanged" | "onSaved"> = {
+    onChanged: () => {
+      broadcast("secrets_changed", {});
+      // A newly saved ANTHROPIC_API_KEY restarts the sidecar with it.
+      void sidecar.refreshKey().catch(() => undefined);
+    },
+    // Tell the owner it's done (name only), so the chat can pick up again.
+    onSaved: async (request) => {
+      const text = `🔐 Saved ${request.name} securely on your Mac. Tell me when you want me to carry on.`;
+      if (!request.conversationId) return;
+      if (request.conversationId.startsWith("sms:")) await sendImessage(request.conversationId.slice(4), text);
+      await convex.mutation(api.messages.send, {
+        conversationId: request.conversationId,
+        role: "assistant",
+        content: text,
+      });
+      broadcast("assistant_message", { conversationId: request.conversationId, content: text });
+    },
+  };
+
   const app = express();
+  // The public secrets host (SECRETS_PUBLIC_BASE_URL): a request addressed to
+  // it only ever reaches the secrets-only app, which 404s everything but the
+  // entry pages. It runs before the access check below, which would otherwise
+  // turn every tunnelled request into {"error":"not found"}.
+  const secretsPublic = secretsPublicConfigFromEnv();
+  if (!secretsPublic.ok && secretsPublic.reason) console.warn(`[secrets] remote entry off: ${secretsPublic.reason}`);
+  if (secretsPublic.ok) {
+    const secretsApp = createSecretsPublicApp({ config: secretsPublic.config, ...secretsDeps });
+    console.log(`[secrets] remote entry served for ${secretsPublic.config.baseUrl}`);
+    app.use(secretsHostDispatcher(secretsPublic.config, secretsApp));
+    if (secretsPublic.config.port) {
+      // Secrets-only listener for a tunnel; loopback so only the tunnel agent reaches it.
+      createServer(secretsApp)
+        .on("error", (err) => console.warn(`[secrets] couldn't listen on ${secretsPublic.config.port}: ${err.message}`))
+        .listen(secretsPublic.config.port, "127.0.0.1");
+    }
+  }
   // Behind Cloudflare Access (CF_ACCESS_TEAM_DOMAIN + CF_ACCESS_AUD), a visitor
   // who passed its login is trusted like a local one, so the dashboard works
   // at the public URL. Everyone else only reaches /health and the webhooks.
@@ -315,28 +355,7 @@ async function main() {
     const result = await sidecar.selfTest();
     res.json({ selfTest: result, status: sidecar.status() });
   });
-  app.use(
-    "/secrets",
-    createSecretsRouter({
-      onChanged: () => {
-        broadcast("secrets_changed", {});
-        // A newly saved ANTHROPIC_API_KEY restarts the sidecar with it.
-        void sidecar.refreshKey().catch(() => undefined);
-      },
-      // Tell the owner it's done (name only), so the chat can pick up again.
-      onSaved: async (request) => {
-        const text = `🔐 Saved ${request.name} securely on your Mac. Tell me when you want me to carry on.`;
-        if (!request.conversationId) return;
-        if (request.conversationId.startsWith("sms:")) await sendImessage(request.conversationId.slice(4), text);
-        await convex.mutation(api.messages.send, {
-          conversationId: request.conversationId,
-          role: "assistant",
-          content: text,
-        });
-        broadcast("assistant_message", { conversationId: request.conversationId, content: text });
-      },
-    }),
-  );
+  app.use("/secrets", createSecretsRouter(secretsDeps));
 
   app.post("/agents/:id/cancel", (req, res) => {
     const ok = cancelAgent(req.params.id);

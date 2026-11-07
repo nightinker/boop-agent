@@ -2,6 +2,7 @@ import { z } from "zod";
 import { accessConfigFromEnv } from "../cloudflare-access.js";
 import { defineRuntimeTool } from "../runtimes/tool.js";
 import { runtimeText, type RuntimeTool } from "../runtimes/types.js";
+import { MIN_PORTAL_PASSCODE_LENGTH, publicSecretEntryUrl, SECRETS_PORTAL_PASSCODE_NAME } from "./public-host.js";
 import { redactSecrets } from "./redact.js";
 import { secretRequests, SECRET_REQUEST_TTL_MS, type SecretRequestRegistry } from "./requests.js";
 import { DEFAULT_TIMEOUT_MS, formatRunResult, runCommandWithSecrets } from "./run.js";
@@ -25,7 +26,7 @@ export const SECRETS_DISPATCHER_ALLOWED_TOOLS = [
 export const SECRETS_DISPATCHER_PROMPT = `
 Secrets (API keys, tokens, passwords, env variables):
 - Secret VALUES never pass through chat, you, sub-agents, memory or logs. Boop keeps them in the Mac's Keychain.
-- When a task needs a credential or env var that isn't stored yet (list_secrets shows what is), call request_secret(name, description) and send the user the link it returns. They open it on the Mac (or through the private dashboard login) and type the value there. NEVER ask the user to paste a secret into chat, and never have a sub-agent derive, write, echo or save one to a file.
+- When a task needs a credential or env var that isn't stored yet (list_secrets shows what is), call request_secret(name, description) and send the user the link it returns. They open it on the Mac (or remotely, behind the secrets passcode or the private dashboard login) and type the value there. NEVER ask the user to paste a secret into chat, and never have a sub-agent derive, write, echo or save one to a file.
 - To change a stored secret, call request_secret again for the same name; the user enters the new value on a fresh link.
 - Sub-agents use secrets with their run_with_secrets tool: tell them the secret NAMES to use (e.g. "run the upload with run_with_secrets, secrets R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY"). Names only.
 - An env file of credentials (e.g. ~/.config/boop/r2.env): import_secrets_from_file moves it into the store; pass removeFile: true when the user agrees to delete the plaintext file. Afterwards, have a sub-agent update any skill that sourced that file to use run_with_secrets with those names instead.
@@ -40,16 +41,25 @@ Secrets:
 - Don't source env files of credentials (e.g. ~/.config/boop/*.env) or read them with cat/grep; if a skill says to, use run_with_secrets with the same variable names instead.
 - If a secret you need isn't stored, stop and say which NAME is missing so Boop can ask the user for it securely. Never ask the user to paste it.`;
 
-/** Where the owner can open an entry link: the Mac itself, plus the Access-protected URL if there is one. */
-export function secretEntryUrls(token: string, env: NodeJS.ProcessEnv = process.env): { local: string; remote: string | null } {
+/**
+ * Where the owner can open an entry link: the Mac itself, plus a remote link.
+ * The remote one is the dedicated secrets host (SECRETS_PUBLIC_BASE_URL) when
+ * set, else the Access-protected PUBLIC_URL if there is one.
+ */
+export function secretEntryUrls(
+  token: string,
+  env: NodeJS.ProcessEnv = process.env,
+): { local: string; remote: string | null; remoteKind: "secrets-host" | "access" | null } {
   const port = Number(env.PORT ?? 3456);
   const local = `http://localhost:${port}/secrets/enter/${token}`;
+  const secretsHost = publicSecretEntryUrl(token, env);
+  if (secretsHost) return { local, remote: secretsHost, remoteKind: "secrets-host" };
   let remote: string | null = null;
   const publicUrl = env.PUBLIC_URL?.trim();
   if (publicUrl && !/localhost|127\.0\.0\.1/.test(publicUrl) && accessConfigFromEnv(env)) {
     remote = `${publicUrl.replace(/\/+$/, "")}/secrets/enter/${token}`;
   }
-  return { local, remote };
+  return { local, remote, remoteKind: remote ? "access" : null };
 }
 
 function formatWhen(ms: number): string {
@@ -116,12 +126,26 @@ export function createSecretDispatcherTools(conversationId: string, deps: Secret
           conversationId,
         });
         const urls = secretEntryUrls(token, env);
+        // The passcode that guards the secrets host can only be set on the Mac.
+        if (args.name === SECRETS_PORTAL_PASSCODE_NAME) {
+          urls.remote = null;
+          urls.remoteKind = null;
+        }
+        let remoteLine: string | null = null;
+        if (urls.remoteKind === "access") remoteLine = `Away from the Mac (behind the dashboard login): ${urls.remote}`;
+        if (urls.remoteKind === "secrets-host") {
+          const passcode = await d.store().get(SECRETS_PORTAL_PASSCODE_NAME).catch(() => null);
+          remoteLine =
+            passcode && passcode.length >= MIN_PORTAL_PASSCODE_LENGTH
+              ? `Away from the Mac (asks for the secrets passcode first): ${urls.remote}`
+              : `Remote link (won't open until ${SECRETS_PORTAL_PASSCODE_NAME} is set on the Mac): ${urls.remote}`;
+        }
         const minutes = Math.round(SECRET_REQUEST_TTL_MS / 60_000);
         return runtimeText(
           [
             `Entry link for ${args.name}${exists ? " (replaces the stored value)" : ""}:`,
             urls.local,
-            urls.remote ? `Away from the Mac (behind the dashboard login): ${urls.remote}` : null,
+            remoteLine,
             `It works once, for ${minutes} minutes. The local link only opens on the Mac itself${urls.remote ? "" : " (there's no private remote link configured)"}.`,
             "Send the user the link and tell them to type the value on that page, not in chat. You'll get a message in this conversation when it's saved.",
           ]

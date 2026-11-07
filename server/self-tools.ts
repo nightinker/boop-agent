@@ -36,6 +36,7 @@ import {
   setUserTimezone,
 } from "./timezone-config.js";
 import { formatUptime, serverUptimeSeconds } from "./uptime.js";
+import { describeRemoteSecretEntry } from "./secrets/public-host.js";
 import { describeKeepAwake, keepAwake } from "./keep-awake.js";
 import {
   checkCswapLogin,
@@ -228,7 +229,7 @@ export function createSelfTools(conversationId?: string): RuntimeTool[] {
     defineRuntimeTool(
       NAMESPACE,
       "get_config",
-      "Return Boop's runtime configuration: active provider, model, billing mode, user's timezone, current local time, loaded integrations, whether Boop is keeping the Mac awake (keepAwake: caffeinate -dimsu, since when, and who holds it: heldBy is user when the owner turned it on, build when the self-build agent holds it while a build is in progress (buildIds), or both), maxConcurrentRuns (how many messages one conversation answers in parallel; more wait in the queue), and basic env info. Use when the user asks what model/provider/runtime Boop is using, what time it is, what timezone is active, or anything about the agent itself.",
+      "Return Boop's runtime configuration: active provider, model, billing mode, user's timezone, current local time, loaded integrations, whether Boop is keeping the Mac awake (keepAwake: caffeinate -dimsu, since when, and who holds it: heldBy is user when the owner turned it on, build when the self-build agent holds it while a build is in progress (buildIds), or both), maxConcurrentRuns (how many messages one conversation answers in parallel; more wait in the queue), remoteSecretEntry (whether secret entry links work away from the Mac, on which public host, with a one-line status), and basic env info. Use when the user asks what model/provider/runtime Boop is using, what time it is, what timezone is active, or anything about the agent itself.",
       {},
       async () => {
         const integrations = (await listEnabledIntegrations()).map((i) => i.name);
@@ -237,6 +238,7 @@ export function createSelfTools(conversationId?: string): RuntimeTool[] {
         const browser = await getBrowserSettings();
         const awake = keepAwake().status();
         const maxConcurrentRuns = await getMaxConcurrentRuns();
+        const remoteSecretEntry = await describeRemoteSecretEntry();
         const config = {
           runtime: runtime.runtime,
           model: runtime.model,
@@ -278,6 +280,7 @@ export function createSelfTools(conversationId?: string): RuntimeTool[] {
             caveat: awake.caveat,
           },
           maxConcurrentRuns,
+          remoteSecretEntry,
           composioEnabled: Boolean(process.env.COMPOSIO_API_KEY),
           embeddingsEnabled: true,
           embeddingsProvider: activeEmbeddingProvider(),
