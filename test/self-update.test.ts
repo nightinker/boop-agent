@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { checkForUpdate, updatePlan, type Run } from "../server/self-update.js";
+import { checkForUpdate, createUpdateBackoff, updatePlan, type Run } from "../server/self-update.js";
 
 const quiet = { log: () => undefined, warn: () => undefined };
 
@@ -71,5 +71,48 @@ describe("updating the server", () => {
     expect(result).toMatchObject({ status: "failed" });
     expect(calls).toContain("git checkout --quiet --detach aaa");
     expect(restart).not.toHaveBeenCalled();
+  });
+});
+
+describe("pushing Convex functions on update", () => {
+  it("is off unless asked for: the code updates, nothing is pushed", async () => {
+    const { run, calls } = fakeRun({ head: "aaa", target: "bbb", changed: ["convex/selfBuilds.ts"] });
+    const restart = vi.fn();
+    const result = await checkForUpdate({ run, restart, log: quiet });
+    expect(result).toEqual({ status: "updated", from: "aaa", to: "bbb", convexPush: "skipped" });
+    expect(calls.some((c) => c.startsWith("npx convex"))).toBe(false);
+    expect(restart).toHaveBeenCalled();
+  });
+
+  it("a failed push keeps the new code instead of undoing it", async () => {
+    const { run, calls } = fakeRun({ head: "aaa", target: "bbb", changed: ["convex/selfBuilds.ts"], failOn: "npx convex" });
+    const restart = vi.fn();
+    const result = await checkForUpdate({ run, restart, pushConvex: true, log: quiet });
+    expect(result).toEqual({ status: "updated", from: "aaa", to: "bbb", convexPush: "failed" });
+    expect(calls).not.toContain("git checkout --quiet --detach aaa");
+    expect(restart).toHaveBeenCalledWith("aaa", "bbb");
+  });
+});
+
+describe("backing off after a failed update", () => {
+  it("leaves a commit that failed alone for a while, longer each time", async () => {
+    let now = 0;
+    const backoff = createUpdateBackoff(5 * 60_000, () => now);
+    backoff.note({ status: "failed", target: "bbb", error: "npm broke" });
+    expect(backoff.skip("bbb")).toBe(true);
+    expect(backoff.skip("ccc")).toBe(false); // a new commit is tried at once
+    now = 5 * 60_000;
+    expect(backoff.skip("bbb")).toBe(false);
+    backoff.note({ status: "failed", target: "bbb", error: "npm broke" });
+    now += 9 * 60_000;
+    expect(backoff.skip("bbb")).toBe(true); // second failure waits 10 minutes
+    now += 2 * 60_000;
+    expect(backoff.skip("bbb")).toBe(false);
+  });
+
+  it("skips the commit without touching the checkout", async () => {
+    const { run, calls } = fakeRun({ head: "aaa", target: "bbb", changed: ["package-lock.json"] });
+    expect(await checkForUpdate({ run, skipTarget: (t) => t === "bbb", log: quiet })).toEqual({ status: "backoff", target: "bbb" });
+    expect(calls.some((c) => c.includes("checkout") || c.startsWith("npm"))).toBe(false);
   });
 });

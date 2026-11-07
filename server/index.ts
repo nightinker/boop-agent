@@ -57,7 +57,7 @@ import {
   startNextQueuedBuild,
   type CatchUpOptions,
 } from "./self-build/run.js";
-import { isUnknownArgError } from "./convex-compat.js";
+import { withOptionalArgs } from "./convex-compat.js";
 import { execFileSync } from "node:child_process";
 import { instanceIdentity, isActiveInstance, resolvePublicUrl, startInstanceCoordinator } from "./instance.js";
 import type { Id } from "../convex/_generated/dataModel.js";
@@ -515,7 +515,6 @@ async function main() {
   // A server reports the commit it runs with each check-in, so the Mac can
   // tell main moved on (a build shipped here) and install it.
   const runningCommit = process.platform === "darwin" ? undefined : gitHead();
-  let sendCommit = Boolean(runningCommit);
 
   const port = Number(process.env.PORT ?? 3456);
   server.listen(port, () => {
@@ -524,17 +523,10 @@ async function main() {
     // copy of Boop (the Mac first, a server while the Mac is offline).
     coordinator = startInstanceCoordinator({
       identity: { ...instanceIdentity(), ...(runningCommit ? { commit: runningCommit } : {}) },
-      checkIn: async ({ commit, ...identity }) => {
-        if (!sendCommit || !commit) return convex.mutation(api.instances.checkIn, identity);
-        try {
-          return await convex.mutation(api.instances.checkIn, { ...identity, commit });
-        } catch (err) {
-          // Convex functions older than this code: check in without it.
-          if (!isUnknownArgError(err)) throw err;
-          sendCommit = false;
-          return convex.mutation(api.instances.checkIn, identity);
-        }
-      },
+      // Convex functions older than this code: check in without the commit
+      // (remembered, so each check-in is still one call).
+      checkIn: (identity) =>
+        withOptionalArgs("instances.checkIn", (args) => convex.mutation(api.instances.checkIn, args), identity, ["commit"]),
       onSummary: (summary) => {
         if (process.platform === "darwin") void catchUpWithPeers(summary, catchUp);
       },

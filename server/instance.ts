@@ -1,6 +1,7 @@
 import { hostname } from "node:os";
 import { INSTANCE_OFFLINE_AFTER_MS } from "../convex/instanceRules.js";
 import { isNetworkError } from "./network-health.js";
+import { sourceDir } from "./self-build/source-dir.js";
 
 /**
  * Boop can run in more than one place at once: the owner's Mac (primary) and a
@@ -309,7 +310,7 @@ export function instancePromptNote(state = current): string {
   }
   if (identity.platform !== "darwin") {
     lines.push(
-      process.env.BOOP_SOURCE_DIR?.trim()
+      sourceDir()
         ? "Self-builds run here too: start_self_build codes the build on this server and opens the PR, and ship_self_build merges it to main and updates this server. The Mac installs it on its own once it's back online and texts the owner then."
         : "Self-builds code and ship on the Mac. If asked for a new build here, start_self_build queues it and the Mac starts it when it's back online; shipping waits for the Mac. Don't suggest editing .env on this server to fix that.",
     );
