@@ -35,6 +35,7 @@ export const convexInboundStore: InboundStore = {
       conversationId,
       ...(opts?.maxGapMs !== undefined ? { maxGapMs: opts.maxGapMs } : {}),
       ...(opts?.maxConcurrent !== undefined ? { maxConcurrent: opts.maxConcurrent } : {}),
+      ...(opts?.heldIds?.length ? { heldIds: opts.heldIds as Id<"inboundMessages">[] } : {}),
     });
     return rows.map(toItem);
   },
