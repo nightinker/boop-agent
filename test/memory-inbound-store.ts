@@ -25,7 +25,8 @@ export function memoryInboundStore() {
     },
     async claimQueued(conversationId, opts) {
       const mine = rows.filter((r) => r.conversationId === conversationId);
-      if (processingCount(mine) >= (opts?.maxConcurrent ?? 1)) return [];
+      const held = new Set(opts?.heldIds ?? []);
+      if (processingCount(mine.filter((r) => !held.has(r._id))) >= (opts?.maxConcurrent ?? 1)) return [];
       const queued = mine.filter((r) => r.status === "queued");
       const claimed = [];
       for (const [i, row] of queued.entries()) {

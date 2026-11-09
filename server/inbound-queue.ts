@@ -36,6 +36,15 @@ import { scanForSecrets } from "./secrets/redact.js";
  * everything that waited is answered in one turn, oldest first and
  * numbered. A bare "never mind" while texts are waiting
  * drops those texts instead.
+ *
+ * With mergeInFlight on, a text that arrives while a reply in its
+ * conversation is still being written (a long turn, a running sub-agent)
+ * doesn't get its own answer. Just before that reply would be sent, the run
+ * waits out the new texts' quiet period, claims them, holds the draft back
+ * unsent and answers again: every text, old and new, numbered oldest first,
+ * with the held draft (and what it already did) in the prompt, so one final
+ * reply covers everything. A reply with no new texts behind it goes out
+ * exactly as before. Redone at most maxRedos times, then it's sent.
  */
 
 export interface InboundInput {
@@ -64,9 +73,14 @@ export interface InboundStore {
   /**
    * Every queued text, oldest first; empty if none or maxConcurrent (default
    * 1) texts are already being answered. With maxGapMs it stops at the first
-   * text sent more than that long after the one before it.
+   * text sent more than that long after the one before it. heldIds are texts
+   * the caller is already answering and merging these into; they don't count
+   * against maxConcurrent.
    */
-  claimQueued(conversationId: string, opts?: { maxGapMs?: number; maxConcurrent?: number }): Promise<InboundItem[]>;
+  claimQueued(
+    conversationId: string,
+    opts?: { maxGapMs?: number; maxConcurrent?: number; heldIds?: string[] },
+  ): Promise<InboundItem[]>;
   finish(id: string, status: "done" | "failed", error?: string): Promise<void>;
   recoverInterrupted(): Promise<{ requeued: number; failed: number }>;
   pendingConversations(): Promise<string[]>;
@@ -81,9 +95,26 @@ export interface InboundStore {
   cancel(ids: string[], reason: string): Promise<number>;
 }
 
+/** A reply that was written but held back unsent because more texts arrived. */
+export interface HeldReply {
+  reply: string;
+  /** What the reply would have sent with it (images); carried to the final reply. */
+  attachments: unknown[];
+  /** How many of the batch's texts (oldest first) that reply was answering. */
+  answered: number;
+}
+
+/** What process() hands back when it held its reply instead of sending it. */
+export interface ProcessOutcome {
+  held?: { reply: string; attachments?: unknown[] };
+}
+
 /** What an answer knows about the other answers running in its conversation. */
 export interface RunContext {
-  /** The saved texts this answer covers, oldest first (before they were combined). */
+  /**
+   * The saved texts this answer covers, oldest first (before they were
+   * combined). Grows when later texts are merged into this answer.
+   */
   batch: InboundItem[];
   /**
    * True when these texts waited behind a busy slot (numbered in the combined
@@ -100,6 +131,16 @@ export interface RunContext {
   claimedElsewhere(): InboundItem[];
   /** True once another answer in this conversation has run at the same time as this one. */
   overlapped(): boolean;
+  /**
+   * Call with the reply written, just before sending it. True means newer
+   * texts were merged into this answer: don't send, return { held: reply }
+   * from process(), and the queue answers again with every text. False
+   * means send it (and later texts get their own answer). Resolves at once
+   * when nothing new arrived; never rejects.
+   */
+  beforeSend(): Promise<boolean>;
+  /** Replies already held back for this answer, oldest first (empty on the first try). */
+  held: readonly HeldReply[];
 }
 
 /** Who to send a "queued" acknowledgement to. */
@@ -182,6 +223,8 @@ export const DEFAULT_TYPING_IDLE_MS = 30_000;
  * finishing a moment later doesn't come with a pointless "queued" text.
  */
 export const DEFAULT_ACK_DELAY_MS = 2_000;
+/** Most times one answer is held back and redone for newer texts before it's sent anyway. */
+export const DEFAULT_MAX_REDOS = 3;
 /**
  * Texts that waited behind an answer are answered together only when each
  * came within this long of the one before; a bigger gap starts a new turn.
@@ -202,6 +245,13 @@ export function queuedAckText(positions: number[]): string {
   const contiguous = sorted.every((p, i) => i === 0 || p === sorted[i - 1] + 1);
   const where = contiguous ? `${sorted[0]}–${sorted[sorted.length - 1]}` : sorted.join(", ");
   return `Got it, ${sorted.length} messages queued behind the current task (positions ${where}).`;
+}
+
+/** The ack for texts that will be folded into the reply being written. */
+export function mergeAckText(count: number): string {
+  return count === 1
+    ? "Got it, I'll fold that into the reply I'm working on."
+    : `Got it, I'll fold those ${count} messages into the reply I'm working on.`;
 }
 
 /** The ack for a "never mind" that dropped waiting texts. */
@@ -232,6 +282,23 @@ export function debounceMsFromEnv(value: string | undefined): number {
   if (value === undefined || value.trim() === "") return DEFAULT_DEBOUNCE_MS;
   const ms = Number(value);
   return Number.isFinite(ms) && ms >= 0 ? ms : DEFAULT_DEBOUNCE_MS;
+}
+
+/**
+ * BOOP_MESSAGE_MAX_HOLD_MS: hard cap on a hold with texts alone (default 15s),
+ * counted from the first waiting text. Never below the quiet period; at most
+ * the typing ceiling (120s).
+ */
+export function maxHoldMsFromEnv(value: string | undefined): number {
+  if (value === undefined || value.trim() === "") return DEFAULT_MAX_HOLD_MS;
+  const ms = Number(value);
+  return Number.isFinite(ms) && ms >= 0 ? Math.min(ms, MAX_TYPING_HOLD_CEILING_MS) : DEFAULT_MAX_HOLD_MS;
+}
+
+/** BOOP_MERGE_INFLIGHT_REPLIES: hold back and redo a reply when texts arrive mid-reply (default on). */
+export function mergeInFlightFromEnv(value: string | undefined): boolean {
+  if (value === undefined || value.trim() === "") return true;
+  return !/^(0|false|off|no)$/i.test(value.trim());
 }
 
 /**
@@ -277,17 +344,35 @@ export function queuedBatchHeader(count: number): string {
 }
 
 /**
+ * The line above a numbered batch that grew while its reply was being
+ * written: the reply to the first texts was held back unsent so one answer
+ * covers them all.
+ */
+export function mergedBatchHeader(count: number): string {
+  return (
+    `[${count} messages from the same person in this same conversation, numbered oldest first. ` +
+    `The later ones arrived while you were still answering the earlier ones, so that reply was held back and never sent. ` +
+    `Write ONE combined reply that addresses all ${count}: merge overlapping or duplicate asks, ` +
+    `don't answer each one as a separate standalone message, and don't repeat yourself. ` +
+    `If a later message corrects, changes or cancels an earlier one, go with the later one.]`
+  );
+}
+
+/**
  * Folds a burst of texts into one: contents joined by newlines, in order, with
  * every image. Texts that waited behind a running answer are numbered instead,
  * each line noting its own images, so their order and what goes with what
  * survive the merge.
  */
-export function combineInbound(items: InboundItem[], opts: { waitedBehindRun?: boolean } = {}): InboundItem {
+export function combineInbound(
+  items: InboundItem[],
+  opts: { waitedBehindRun?: boolean; merged?: boolean } = {},
+): InboundItem {
   if (items.length === 1) return items[0];
   const last = items[items.length - 1];
-  const content = opts.waitedBehindRun
+  const content = opts.waitedBehindRun || opts.merged
     ? [
-        queuedBatchHeader(items.length),
+        opts.merged ? mergedBatchHeader(items.length) : queuedBatchHeader(items.length),
         ...items.map((item, i) => {
           const images = item.mediaUrls.length;
           const note = images > 0 ? ` [${images === 1 ? "1 image" : `${images} images`} attached]` : "";
@@ -311,7 +396,7 @@ export function combineInbound(items: InboundItem[], opts: { waitedBehindRun?: b
 
 export function createInboundQueue(deps: {
   store: InboundStore;
-  process: (item: InboundItem, run: RunContext) => Promise<void>;
+  process: (item: InboundItem, run: RunContext) => Promise<void | ProcessOutcome>;
   log?: Pick<Console, "error" | "warn"> & Partial<Pick<Console, "log">>;
   retryDelayMs?: number;
   /**
@@ -346,6 +431,16 @@ export function createInboundQueue(deps: {
    * claim, so a changed setting applies to the next text.
    */
   maxConcurrentRuns?: number | (() => number | Promise<number>);
+  /** Hard cap on a hold with texts alone, from the first waiting text (default 15s). */
+  maxHoldMs?: number;
+  /**
+   * Texts that arrive while a reply in their conversation is still being
+   * written are merged into it (the reply is held back and redone) instead of
+   * getting their own answer. Off by default here; Boop's server turns it on.
+   */
+  mergeInFlight?: boolean;
+  /** Most times one answer is redone for newer texts (default 3). */
+  maxRedos?: number;
 }): InboundQueue {
   const { store, process } = deps;
   const isActive = deps.isActive ?? (() => true);
@@ -366,7 +461,9 @@ export function createInboundQueue(deps: {
   const typingIdleMs = Math.max(debounceMs, deps.typingIdleMs ?? DEFAULT_TYPING_IDLE_MS);
   // The hard deadline of a hold with texts only. Never shorter than one
   // quiet period, so a lone text still gets its full wait.
-  const maxHoldMs = Math.max(debounceMs, DEFAULT_MAX_HOLD_MS);
+  const maxHoldMs = Math.max(debounceMs, deps.maxHoldMs ?? DEFAULT_MAX_HOLD_MS);
+  const mergeInFlight = deps.mergeInFlight ?? false;
+  const maxRedos = Math.max(0, deps.maxRedos ?? DEFAULT_MAX_REDOS);
   // The hard deadline once the sender has been seen typing; never below the text cap.
   const maxTypingHoldMs = Math.max(maxHoldMs, maxTypingWaitMs);
   // Open quiet periods: a conversation in here isn't answered until it fires.
@@ -385,8 +482,18 @@ export function createInboundQueue(deps: {
   const ackDelayMs = Math.max(0, deps.ackDelayMs ?? DEFAULT_ACK_DELAY_MS);
   const queueBatchGapMs = Math.max(0, deps.queueBatchGapMs ?? DEFAULT_QUEUE_BATCH_GAP_MS);
   // Answers running on this copy right now, per conversation, oldest first.
-  const answering = new Map<string, Array<{ item: InboundItem; batch: InboundItem[]; overlapped: boolean }>>();
+  // open: the reply isn't written yet, so newer texts can still be merged
+  // into it; newTexts: a text arrived since, check before sending.
+  const answering = new Map<
+    string,
+    Array<{ item: InboundItem; batch: InboundItem[]; overlapped: boolean; open: boolean; newTexts: boolean }>
+  >();
   const answeringCount = (conversationId: string) => answering.get(conversationId)?.length ?? 0;
+  /** True while a reply here is still being written and would take newer texts in. */
+  const mergeTarget = (conversationId: string) =>
+    mergeInFlight && (answering.get(conversationId) ?? []).some((r) => r.open);
+  // Callers waiting for a conversation's open hold to end (see holdEnded).
+  const holdWaiters = new Map<string, Array<() => void>>();
   // Texts (by handle) that arrived while their conversation was being answered.
   const behindRun = new Set<string>();
   // Conversations with texts waiting behind an answer: drained as one batch next.
@@ -461,6 +568,19 @@ export function createInboundQueue(deps: {
     holdStartedAt.delete(conversationId);
     typingNow.delete(conversationId);
     sawTyping.delete(conversationId);
+    const waiters = holdWaiters.get(conversationId);
+    holdWaiters.delete(conversationId);
+    if (waiters) for (const resolve of waiters) resolve();
+  }
+
+  /** Resolves once the conversation has no open hold (right away if none). */
+  function holdEnded(conversationId: string): Promise<void> {
+    if (!timers.has(conversationId)) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      const list = holdWaiters.get(conversationId) ?? [];
+      list.push(resolve);
+      holdWaiters.set(conversationId, list);
+    });
   }
 
   function cancelQuietPeriod(conversationId: string): void {
@@ -511,34 +631,88 @@ export function createInboundQueue(deps: {
     }
   }
 
+  /**
+   * Just before a reply is sent: if newer texts arrived while it was being
+   * written, wait out their quiet period and claim them into this answer.
+   * True = they're merged, hold the reply back. Never rejects.
+   */
+  async function mergeNewTexts(
+    conversationId: string,
+    mine: { batch: InboundItem[]; open: boolean; newTexts: boolean },
+    redos: number,
+  ): Promise<boolean> {
+    if (!mine.open) return false;
+    let merged: InboundItem[] = [];
+    try {
+      if (!mergeInFlight || !mine.newTexts || redos >= maxRedos || !isActive()) return false;
+      // The sender may still be mid-burst: take the whole burst at once.
+      await holdEnded(conversationId);
+      mine.newTexts = false;
+      merged = await store.claimQueued(conversationId, {
+        maxConcurrent: await concurrencyLimit(),
+        heldIds: mine.batch.map((claimed) => claimed._id),
+      });
+      if (merged.length === 0) return false;
+      for (const claimed of merged) behindRun.delete(claimed.handle);
+      mine.batch.push(...merged);
+      info(
+        `[inbound] holding back a reply for ${who(conversationId)}: ${merged.length} newer text(s) arrived; answering all ${mine.batch.length} together`,
+      );
+      return true;
+    } catch (err) {
+      log.warn(`[inbound] couldn't merge newer texts into a reply; sending it as is`, err);
+      return false;
+    } finally {
+      if (merged.length === 0) {
+        // The reply is going out: newer texts get their own answer now.
+        mine.open = false;
+        if (mine.newTexts) void drain(conversationId);
+      }
+    }
+  }
+
   /** Answers one claimed batch in its own slot; never rejects. */
   async function runBatch(conversationId: string, batch: InboundItem[]): Promise<void> {
     const waitedBehindRun = batch.some((claimed) => behindRun.has(claimed.handle));
     for (const claimed of batch) behindRun.delete(claimed.handle);
-    const item = combineInbound(batch, { waitedBehindRun });
+    let item = combineInbound(batch, { waitedBehindRun });
     if (waitedBehindRun) info(`[inbound] answering ${batch.length} queued text(s) for ${who(conversationId)}`);
     const runs = answering.get(conversationId) ?? [];
-    const mine = { item, batch, overlapped: runs.length > 0 };
+    const mine = { item, batch, overlapped: runs.length > 0, open: true, newTexts: false };
     for (const other of runs) other.overlapped = true;
     runs.push(mine);
     answering.set(conversationId, runs);
     if (mine.overlapped) info(`[inbound] answering ${who(conversationId)} in parallel (${runs.length} running)`);
     const others = () => (answering.get(conversationId) ?? []).filter((r) => r !== mine);
+    const held: HeldReply[] = [];
     const run: RunContext = {
       batch,
       waitedBehindRun,
       parallel: () => others().map((r) => r.item),
       claimedElsewhere: () => others().flatMap((r) => r.batch),
       overlapped: () => mine.overlapped,
+      beforeSend: () => mergeNewTexts(conversationId, mine, held.length),
+      held,
     };
     try {
-      await process(item, run);
+      for (;;) {
+        const answered = batch.length;
+        const outcome = await process(item, run);
+        if (!outcome?.held) break;
+        // The reply was held back for newer texts: answer again with all of them.
+        held.push({ reply: outcome.held.reply, attachments: outcome.held.attachments ?? [], answered });
+        run.waitedBehindRun = false;
+        mine.open = true;
+        item = combineInbound(batch, { merged: true });
+        mine.item = item;
+      }
       for (const claimed of batch) await finish(claimed, "done");
     } catch (err) {
       log.error(`[inbound] answering ${item._id} failed`, err);
       const message = err instanceof Error ? err.message : String(err);
       for (const claimed of batch) await finish(claimed, "failed", message);
     } finally {
+      mine.open = false;
       const left = (answering.get(conversationId) ?? []).filter((r) => r !== mine);
       if (left.length > 0) answering.set(conversationId, left);
       else answering.delete(conversationId);
@@ -580,6 +754,8 @@ export function createInboundQueue(deps: {
             if (!isActive()) break;
             // The sender is still mid-burst; the quiet-period timer drains later.
             if (timers.has(conversationId)) break;
+            // A reply still being written takes newer texts in before it's sent.
+            if (mergeTarget(conversationId)) break;
             const maxConcurrent = await concurrencyLimit();
             if (running.size >= maxConcurrent) break;
             const batch = await claim(conversationId, maxConcurrent);
@@ -662,11 +838,12 @@ export function createInboundQueue(deps: {
     try {
       if (!isActive()) return;
       const [state, maxConcurrent] = await Promise.all([store.waiting(conversationId), concurrencyLimit()]);
+      const merging = mergeTarget(conversationId);
       // A slot freed in the meantime: the text is (about to be) answered.
-      if (Math.max(answeringCount(conversationId), state.processing) < maxConcurrent) return;
+      if (!merging && Math.max(answeringCount(conversationId), state.processing) < maxConcurrent) return;
       const positions = state.queued.flatMap((row, i) => (pending.handles.has(row.handle) ? [i + 1] : []));
       if (positions.length === 0) return;
-      await sendAck(pending.target, queuedAckText(positions));
+      await sendAck(pending.target, merging ? mergeAckText(positions.length) : queuedAckText(positions));
     } catch (err) {
       log.warn(`[inbound] couldn't check the queue for an ack`, err);
     }
@@ -683,7 +860,8 @@ export function createInboundQueue(deps: {
     try {
       if (!isActive()) return;
       const [state, maxConcurrent] = await Promise.all([store.waiting(conversationId), concurrencyLimit()]);
-      if (Math.max(answeringCount(conversationId), state.processing) < maxConcurrent) return;
+      const merging = mergeTarget(conversationId);
+      if (!merging && Math.max(answeringCount(conversationId), state.processing) < maxConcurrent) return;
       const index = state.queued.findIndex((row) => row.handle === input.handle);
       // Already claimed: it's being answered, not waiting.
       if (index < 0) return;
@@ -729,6 +907,12 @@ export function createInboundQueue(deps: {
     }
   }
 
+  /** A new text was saved: replies still being written check for it before sending. */
+  function noteNewText(conversationId: string): void {
+    if (!mergeInFlight) return;
+    for (const r of answering.get(conversationId) ?? []) if (r.open) r.newTexts = true;
+  }
+
   async function drainAll(): Promise<void> {
     const conversations = await store.pendingConversations();
     await Promise.all(conversations.map((id) => drain(id)));
@@ -742,6 +926,7 @@ export function createInboundQueue(deps: {
       if (debounceMs <= 0) {
         const enqueued = await store.enqueue(input);
         if (enqueued) {
+          noteNewText(conversationId);
           // Let the queue try a free slot first, so a text that starts its
           // own answer isn't mistaken for one waiting behind the others.
           const claimed = isActive() ? afterNextClaim(conversationId) : Promise.resolve();
@@ -762,6 +947,7 @@ export function createInboundQueue(deps: {
       let enqueued = false;
       try {
         enqueued = await store.enqueue(input);
+        if (enqueued) noteNewText(conversationId);
         // A slow save can outlast the hold: its timer already fired and
         // drained before this text existed, so answer it now.
         if (enqueued && !timers.has(conversationId)) flush(conversationId);
@@ -807,6 +993,9 @@ export function createInboundQueue(deps: {
       const waiting = timers.size;
       for (const timer of timers.values()) clearTimeout(timer);
       timers.clear();
+      // Replies waiting on a hold go out as they are.
+      for (const waiters of holdWaiters.values()) for (const resolve of waiters) resolve();
+      holdWaiters.clear();
       holdStartedAt.clear();
       typingNow.clear();
       sawTyping.clear();

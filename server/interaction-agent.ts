@@ -56,7 +56,7 @@ import {
   buildPromptWithImagesOrTextFallback,
   fetchStoredBytes,
 } from "./images/content-blocks.js";
-import { burstNote, historyBeforeTurn, parallelTurnsNote, turnPrompt } from "./parallel-turns.js";
+import { burstNote, heldReplyNote, historyBeforeTurn, parallelTurnsNote, turnPrompt } from "./parallel-turns.js";
 import { redactPhoneNumbers } from "./privacy.js";
 import { OutboundImageCollector, type OutboundImage } from "./images/outbound.js";
 import {
@@ -346,6 +346,11 @@ interface HandleOpts {
    * `content`. 2+ tells the model to answer them as one thread.
    */
   burstSize?: number;
+  /**
+   * Replies already written for this turn's earlier texts but held back
+   * unsent because more texts arrived; the model builds on them.
+   */
+  heldReplies?: Array<{ reply: string; answered: number }>;
 }
 
 function randomId(prefix: string): string {
@@ -574,6 +579,7 @@ export async function handleUserMessageWithAttachments(
           history: historyBlock,
           parallelNote,
           batchNote: burstNote(opts.burstSize ?? 1),
+          heldNote: heldReplyNote(opts.heldReplies ?? []),
           message: userText,
         });
 
