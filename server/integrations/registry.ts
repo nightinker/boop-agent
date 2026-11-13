@@ -1,4 +1,4 @@
-import type { McpSdkServerConfigWithInstance } from "@anthropic-ai/claude-agent-sdk";
+import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 import type { RuntimeTool } from "../runtimes/types.js";
 
 export interface IntegrationModule {
@@ -6,7 +6,8 @@ export interface IntegrationModule {
   description: string;
   requiredEnv?: string[];
   isEnabled?: () => Promise<boolean>;
-  createServer: (ctx: IntegrationContext) => Promise<McpSdkServerConfigWithInstance>;
+  /** An in-process SDK server, or a remote (http) one such as an authenticated MCP server behind Boop's proxy. */
+  createServer: (ctx: IntegrationContext) => Promise<McpServerConfig>;
   createTools?: (ctx: IntegrationContext) => Promise<RuntimeTool[]>;
 }
 
@@ -51,6 +52,9 @@ export async function loadIntegrations(): Promise<void> {
   registerAppleIntegration();
   const { registerComposioAccountIntegration } = await import("./composio-account-loader.js");
   await registerComposioAccountIntegration();
+  // Last, so a remote MCP server never shadows a toolkit of the same name.
+  const { registerMcpRemoteIntegrations } = await import("./mcp-remote-loader.js");
+  await registerMcpRemoteIntegrations();
   const loaded = [...registry.keys()];
   const enabled = (await listEnabledIntegrations()).map((i) => i.name);
   console.log(
@@ -70,9 +74,9 @@ export function makeContext(conversationId?: string): IntegrationContext {
 export async function buildMcpServersForIntegrations(
   names: string[],
   conversationId?: string,
-): Promise<Record<string, McpSdkServerConfigWithInstance>> {
+): Promise<Record<string, McpServerConfig>> {
   const ctx = makeContext(conversationId);
-  const out: Record<string, McpSdkServerConfigWithInstance> = {};
+  const out: Record<string, McpServerConfig> = {};
   for (const name of names) {
     const mod = registry.get(name);
     if (!mod) {

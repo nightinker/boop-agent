@@ -11,6 +11,8 @@ import {
   type SecretsRouterDeps,
 } from "./routes.js";
 import { secretStore, secretsSupported, type SecretStore } from "./store.js";
+import { renderResult, startFromLink } from "../mcp-auth/routes.js";
+import type { McpAuthService } from "../mcp-auth/service.js";
 import {
   parseSecretsPublicConfig,
   PROBE_HEADER,
@@ -228,12 +230,14 @@ export interface SecretsPublicAppDeps extends Pick<SecretsRouterDeps, "onSaved" 
   now?: () => number;
   /** Answers GET /secrets/probe/<token> with 204, so get_config can check the tunnel. */
   probeToken?: string;
+  /** Serves MCP sign-in (/mcp-auth/start/:token behind the passcode, and /mcp-auth/callback). */
+  mcpAuth?: McpAuthService;
 }
 
-function renderLogin(token: string, csrf: string, error?: string): string {
+function renderLogin(action: string, csrf: string, error?: string): string {
   return `<h1>🔐 Boop secrets</h1>
 <p>Enter your secrets passcode to continue.</p>
-<form method="post" action="/secrets/enter/${escapeHtml(token)}/login" autocomplete="off">
+<form method="post" action="${escapeHtml(action)}" autocomplete="off">
 <input type="hidden" name="csrf" value="${escapeHtml(csrf)}">
 <label for="passcode">Passcode</label>
 <input id="passcode" name="passcode" type="password" autocomplete="current-password" autocapitalize="off" autocorrect="off" spellcheck="false" required autofocus>
@@ -361,7 +365,7 @@ export function createSecretsPublicApp(deps: SecretsPublicAppDeps): express.Expr
           `<h1>Remote entry isn't set up</h1><p>Set ${SECRETS_PORTAL_PASSCODE_NAME} on the Mac first (ask Boop to request it and open the local link), then try again.</p>`,
         );
       }
-      return send(res, 200, "Log in", renderLogin(String(req.params.token), session.csrf));
+      return send(res, 200, "Log in", renderLogin(`/secrets/enter/${encodeURIComponent(String(req.params.token))}/login`, session.csrf));
     }
     const replaces = await store().has(request.name).catch(() => false);
     send(res, 200, `Set ${request.name}`, renderEntryForm(request, { replaces, csrfToken: session.csrf }));
@@ -383,7 +387,7 @@ export function createSecretsPublicApp(deps: SecretsPublicAppDeps): express.Expr
     if (!ok) {
       failed(req);
       if (lockedOut(req)) return tooMany(res);
-      return send(res, 401, "Log in", renderLogin(String(req.params.token), session!.csrf, "Wrong passcode."));
+      return send(res, 401, "Log in", renderLogin(`/secrets/enter/${encodeURIComponent(String(req.params.token))}/login`, session!.csrf, "Wrong passcode."));
     }
     // New session id on login, so a cookie planted before it is worthless.
     sessions.destroy(id);
@@ -412,6 +416,69 @@ export function createSecretsPublicApp(deps: SecretsPublicAppDeps): express.Expr
       formOptions: { csrfToken: session.csrf },
     });
   });
+
+  if (deps.mcpAuth) {
+    const mcpAuth = deps.mcpAuth;
+    const startPath = (token: string) => `/mcp-auth/start/${encodeURIComponent(token)}`;
+    const liveMcpLink = (req: express.Request, res: express.Response): boolean => {
+      const found = mcpAuth.links.peek(String(req.params.token));
+      if (found.ok) return true;
+      failed(req);
+      send(res, 410, "Link expired", `<h1>Link no longer works</h1><p>${deadLinkMessage(found.reason)}</p>`);
+      return false;
+    };
+
+    // MCP sign-in: the same passcode as secret entry, then off to the server's own sign-in page.
+    app.get("/mcp-auth/start/:token", async (req, res) => {
+      if (lockedOut(req)) return tooMany(res);
+      if (!liveMcpLink(req, res)) return;
+      let { id, session } = currentSession(req);
+      if (!session) {
+        ({ id, session } = sessions.create(false));
+        res.setHeader("Set-Cookie", sessionCookie(id));
+      }
+      if (!session.authed) {
+        if ((await passcodeMatches(undefined)) === null) {
+          return send(res, 503, "Not set up", `<h1>Remote entry isn't set up</h1><p>Set ${SECRETS_PORTAL_PASSCODE_NAME} on the Mac first, or open the link on the Mac.</p>`);
+        }
+        return send(res, 200, "Log in", renderLogin(`${startPath(String(req.params.token))}/login`, session.csrf));
+      }
+      await startFromLink(mcpAuth, String(req.params.token), "secrets-host", res);
+    });
+
+    app.post("/mcp-auth/start/:token/login", form, async (req, res) => {
+      if (lockedOut(req)) return tooMany(res);
+      if (!liveMcpLink(req, res)) return;
+      const { id, session } = currentSession(req);
+      if (!csrfOk(req, session)) {
+        failed(req);
+        return send(res, 403, "Expired form", "<h1>This form expired</h1><p>Reload the link and try again.</p>");
+      }
+      const ok = await passcodeMatches((req.body as { passcode?: unknown }).passcode);
+      if (ok === null) {
+        return send(res, 503, "Not set up", `<h1>Remote entry isn't set up</h1><p>Set ${SECRETS_PORTAL_PASSCODE_NAME} on the Mac first.</p>`);
+      }
+      if (!ok) {
+        failed(req);
+        if (lockedOut(req)) return tooMany(res);
+        return send(res, 401, "Log in", renderLogin(`${startPath(String(req.params.token))}/login`, session!.csrf, "Wrong passcode."));
+      }
+      sessions.destroy(id);
+      const fresh = sessions.create(true);
+      res.setHeader("Set-Cookie", sessionCookie(fresh.id));
+      res.redirect(303, startPath(String(req.params.token)));
+    });
+
+    // The redirect back from the authorization server. Its SameSite=Strict
+    // cookie isn't sent on this cross-site hop, so the single-use, 256-bit
+    // state (bound to a PKCE verifier only Boop holds) is what authorizes it.
+    app.get("/mcp-auth/callback", async (req, res) => {
+      if (lockedOut(req)) return tooMany(res);
+      const result = await mcpAuth.completeFlow(req.query as Record<string, unknown>);
+      if (!result.ok && !result.name) failed(req);
+      renderResult(res, result);
+    });
+  }
 
   // Everything else on this host — dashboard, API, websockets — doesn't exist.
   app.use((_req, res) => notFound(res));
