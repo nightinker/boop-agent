@@ -65,6 +65,12 @@ Boop does not store third-party passwords or OAuth tokens for this feature. Logi
 
 Browser control HTTP routes are local-only and reject public tunnel requests before launching, closing, installing, or inspecting Chrome. The `browser_fill` tool also redacts typed values before tool-use arguments are persisted to Convex logs.
 
+## Nova impersonation screenshots (`nova-impersonation`)
+
+`server/integrations/impersonation-loader.ts` combines the Nova MCP server with the local browser so a sub-agent can check logged-in certificates.dev pages *as a specific user* without anyone logging in to Nova in the browser. Enabled together with Local browser use (macOS). Full details and the skill text: [docs/NOVA-IMPERSONATION.md](docs/NOVA-IMPERSONATION.md).
+
+One tool, `impersonate_and_screenshot`, runs the whole flow inside Boop's server process: it calls Nova's allowlisted **Impersonate User** action through Boop's authenticated MCP proxy, opens the returned link in a throwaway, read-only Patchright context (never the owner's profile), screenshots each target page, then closes the context. The link is a credential and never reaches the agent, its logs or the chat.
+
 ---
 
 ## Curated toolkit list

@@ -608,6 +608,54 @@ async function emulatedScreenshot(options: ScreenshotOptions): Promise<Screensho
   }
 }
 
+export interface IsolatedContextOptions {
+  viewport?: { width: number; height: number };
+}
+
+/**
+ * Run `fn` in a throwaway, cookie-less Patchright context, launched with the
+ * local browser settings (channel/executable) but never the owner's
+ * persistent profile. The browser is always closed afterwards, so anything
+ * the context signed in to (e.g. an impersonation session) is discarded and
+ * never leaks into the owner's own profile.
+ */
+export async function withIsolatedBrowserContext<T>(
+  fn: (ctx: BrowserContext) => Promise<T>,
+  options: IsolatedContextOptions = {},
+): Promise<T> {
+  const settings = await getBrowserSettings();
+  assertBrowserEnabled(settings);
+  const { chromium } = await loadPatchright();
+  const executablePath = effectiveBrowserExecutablePath(settings);
+  const browser = await withTimeout(
+    chromium.launch({
+      headless: true,
+      args: settings.extraArgs,
+      ...(executablePath ? { executablePath } : { channel: settings.channel || "chrome" }),
+    }),
+    BROWSER_LAUNCH_TIMEOUT_MS,
+    browserLaunchTimeoutMessage(settings),
+  );
+  let isolated: BrowserContext | null = null;
+  try {
+    isolated = await browser.newContext({
+      viewport: options.viewport ?? { width: 1440, height: 900 },
+    });
+    return await fn(isolated);
+  } finally {
+    if (isolated) {
+      await isolated.clearCookies().catch(() => undefined);
+      await closeContextWithTimeout(isolated).catch(() => undefined);
+    }
+    await browser.close().catch(() => undefined);
+  }
+}
+
+/** A fresh path in the rotated screenshot folder (shared with browser_screenshot). */
+export function nextBrowserScreenshotPath(): string {
+  return nextScreenshotPath();
+}
+
 /** Human/agent-readable summary, including a width check the agent can trust. */
 export function formatScreenshotResult(result: ScreenshotResult): string {
   const lines = [`Screenshot saved: ${result.path}`, `Page: ${result.url}`];

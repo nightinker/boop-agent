@@ -19,6 +19,7 @@ import { createDraftDecisionTools } from "./draft-tools.js";
 import { createSelfTools } from "./self-tools.js";
 import { AGENT_RETRY_ALLOWED_TOOLS, createAgentRetryTools } from "./agent-retry-tools.js";
 import { WEBTEST_DISPATCHER_PROMPT, WEBTEST_INTEGRATION } from "./webtest/tools.js";
+import { IMPERSONATION_DISPATCHER_PROMPT } from "./impersonation/tools.js";
 import {
   SECRETS_DISPATCHER_ALLOWED_TOOLS,
   SECRETS_DISPATCHER_PROMPT,
@@ -234,6 +235,7 @@ For screenshots of a site in "mobile/iPhone/tablet/desktop view" or a custom
 size, spawn with ["browser"], name the device or size in the task, and ask the
 sub-agent to attach the screenshot as an image.
 ${WEBTEST_DISPATCHER_PROMPT}
+${IMPERSONATION_DISPATCHER_PROMPT}
 
 Travel, reservations, and receipts:
 Flight, airport, boarding pass, itinerary, hotel, restaurant, ticket, order,
