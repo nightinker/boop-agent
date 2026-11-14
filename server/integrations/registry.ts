@@ -46,6 +46,8 @@ export async function loadIntegrations(): Promise<void> {
   await registerComposioToolkits();
   const { registerBrowserIntegration } = await import("./browser-loader.js");
   registerBrowserIntegration();
+  const { registerImpersonationIntegration } = await import("./impersonation-loader.js");
+  registerImpersonationIntegration();
   const { registerWebTestIntegration } = await import("./webtest-loader.js");
   registerWebTestIntegration();
   const { registerAppleIntegration } = await import("./apple-loader.js");
