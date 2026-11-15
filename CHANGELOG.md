@@ -14,6 +14,7 @@ Format:
 - Added: texts folded this way get a short "Got it, I'll fold that into the reply I'm working on." after `BOOP_QUEUE_ACK_DELAY_MS`.
 - Added: `BOOP_MERGE_INFLIGHT_REPLIES` (default `true`; `false` restores the parallel/queued behaviour) and `BOOP_MESSAGE_MAX_HOLD_MS` (the 15s cap on holding a burst of texts, now configurable).
 - Changed: `inboundMessages.claimQueued` takes an optional `heldIds` (texts the caller is already answering don't count against `maxConcurrent`). Push with `npx convex dev` or `npx convex deploy`; until then merging fails safe and the reply is sent as is.
+
 ## Unreleased — Sign in to OAuth-protected MCP servers from chat
 
 - Added: `start_mcp_auth(name, url?, auth?)` and `list_mcp_servers` (dispatcher, owner only, Mac only). "authenticate bannerstudio" returns a one-time link; opening it runs the MCP OAuth flow (RFC 9728 / 8414 discovery, RFC 7591 dynamic client registration, PKCE S256, RFC 8707 `resource`) with the callback at `/mcp-auth/callback` on the Mac, the secrets host (behind its passcode) or the Access-protected `PUBLIC_URL`. The URL is looked up in the owner's Claude config when not given.
