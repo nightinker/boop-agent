@@ -258,16 +258,23 @@ wait_for_health() {
   return 1
 }
 
+# Plain open fails with procNotFound (-600) when LaunchServices still holds the
+# process it just watched quit, and nothing would relaunch Boop. The -n flag
+# always starts a fresh instance, and a failure is logged instead of swallowed.
+launch_boop() {
+  open -n "$APP" || log "open failed for $APP (exit $?)"
+}
+
 log "restart for build $BUILD"
 sleep 3
 stop_boop || { write_result failed; exit 1; }
 
 mkdir -p "$BACKUP"
 rm -rf "$BACKUP/Boop.app"
-mv "$APP" "$BACKUP/Boop.app" || { log "backup failed"; open -a "$APP"; write_result failed; exit 1; }
+mv "$APP" "$BACKUP/Boop.app" || { log "backup failed"; launch_boop; write_result failed; exit 1; }
 if ! ditto "$NEW" "$APP"; then
   log "copy failed, restoring"
-  rm -rf "$APP"; mv "$BACKUP/Boop.app" "$APP"; open -a "$APP"; write_result rolled_back; exit 1
+  rm -rf "$APP"; mv "$BACKUP/Boop.app" "$APP"; launch_boop; write_result rolled_back; exit 1
 fi
 log "launching new build (health timeout \${HEALTH_TIMEOUT}s, startup log $STARTUP_LOG)"
 # The new build claims this marker at launch and writes its startup output to
@@ -277,7 +284,7 @@ mkdir -p "$(dirname "$STARTUP_LOG")"
 startup_note "launching build $BUILD (health check $HEALTH, timeout \${HEALTH_TIMEOUT}s)"
 printf '%s\\n' "$STARTUP_LOG" > "$STARTUP_MARKER"
 LAUNCHED_AT=$SECONDS
-open -a "$APP"
+launch_boop
 
 if wait_for_health; then
   rm -f "$STARTUP_MARKER"
@@ -290,7 +297,7 @@ else
   stop_boop
   rm -rf "$APP"
   mv "$BACKUP/Boop.app" "$APP"
-  open -a "$APP"
+  launch_boop
   write_result rolled_back
 fi
 `;

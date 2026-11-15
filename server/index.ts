@@ -41,6 +41,8 @@ import {
 } from "./secrets/public-host.js";
 import { remoteEntryRuntime, resolveSecretsRemoteConfig, startSecretsRemoteListener } from "./secrets/remote-config.js";
 import { secretStore, secretsSupported } from "./secrets/store.js";
+import { mcpAuthService } from "./mcp-auth/service.js";
+import { createMcpAuthRouter, createMcpProxyRouter } from "./mcp-auth/routes.js";
 import {
   getRuntimeConfig,
   resolveModelInput,
@@ -137,6 +139,9 @@ async function main() {
     },
   };
 
+  // MCP sign-in texts the owner when a server connects or needs re-auth.
+  mcpAuthService().setNotifier((conversationId, text) => notifyConversation(conversationId, text, "mcp_auth"));
+
   const app = express();
   // The public secrets host (~/.config/boop/secrets-remote.json, or the
   // legacy SECRETS_PUBLIC_BASE_URL): a request addressed to it only ever
@@ -155,7 +160,12 @@ async function main() {
   }
   if (secretsPublic.ok) {
     const { config } = secretsPublic;
-    const secretsApp = createSecretsPublicApp({ config, probeToken: remoteEntryRuntime.probeToken, ...secretsDeps });
+    const secretsApp = createSecretsPublicApp({
+      config,
+      probeToken: remoteEntryRuntime.probeToken,
+      mcpAuth: mcpAuthService(),
+      ...secretsDeps,
+    });
     remoteEntryRuntime.activeBaseUrl = config.baseUrl;
     console.log(
       `[secrets] remote entry served for ${config.baseUrl} (config: ${secretsPublic.source === "file" ? secretsPublic.configPath : "environment"})`,
@@ -212,6 +222,9 @@ async function main() {
   // ordering the JSON parser consumes the stream first and the raw buffer
   // arrives empty.
   app.use("/composio/webhook", express.raw({ type: "application/json", limit: "2mb" }));
+  // The loopback proxy to OAuth/token-protected MCP servers forwards raw
+  // bodies, so it too sits before express.json.
+  app.use("/mcp-proxy", createMcpProxyRouter(mcpAuthService()));
   app.use(express.json({ limit: "2mb" }));
 
   app.get("/health", (_req, res) => {
@@ -386,6 +399,7 @@ async function main() {
     res.json({ selfTest: result, status: sidecar.status() });
   });
   app.use("/secrets", createSecretsRouter(secretsDeps));
+  app.use("/mcp-auth", createMcpAuthRouter(mcpAuthService()));
 
   app.post("/agents/:id/cancel", (req, res) => {
     const ok = cancelAgent(req.params.id);

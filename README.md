@@ -472,6 +472,10 @@ For Codex runtime, local browser tools are exposed internally under the `local_b
 
 Boop can test web apps end to end in a headless Chromium: click through flows, fill forms (test logins come from the secret store or a saved session, never chat), check text and API status codes, and reply with a pass/fail report and screenshots. It works on the Linux server too, defaults to staging URLs, and refuses payments/deletes on production unless you confirm. It can add GitHub CI status and a repo's own test results to the report. Setup is `npm run webtest:install`. See [docs/WEB-TESTING.md](docs/WEB-TESTING.md).
 
+## Signing in to OAuth-protected MCP servers
+
+Text Boop "authenticate bannerstudio" (or any remote MCP server) and it texts back a one-time sign-in link. Open it on the Mac, or remotely behind the secrets passcode or the dashboard login, and sign in with the service. Boop handles the whole MCP OAuth flow (discovery, dynamic client registration where supported, PKCE, the callback) and keeps the tokens in the Mac's Keychain, refreshing them automatically. Servers that take a fixed API token go through the usual `request_secret` link instead. Connected servers show up as integrations for sub-agents, and expired or revoked sign-ins come back as "needs re-auth" with a fresh link. Owner only, Mac only. See [docs/MCP-AUTH.md](docs/MCP-AUTH.md).
+
 ## Reading self-builds from Claude Code (MCP)
 
 `npm run mcp:self-builds` starts a small read-only MCP server over stdio. It lets Claude Code, or any MCP client, see what Boop is building into itself. The repo's `.mcp.json` registers it, so Claude Code opened in this checkout offers it as `boop-self-builds`.

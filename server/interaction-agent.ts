@@ -19,11 +19,18 @@ import { createDraftDecisionTools } from "./draft-tools.js";
 import { createSelfTools } from "./self-tools.js";
 import { AGENT_RETRY_ALLOWED_TOOLS, createAgentRetryTools } from "./agent-retry-tools.js";
 import { WEBTEST_DISPATCHER_PROMPT, WEBTEST_INTEGRATION } from "./webtest/tools.js";
+import { IMPERSONATION_DISPATCHER_PROMPT } from "./impersonation/tools.js";
 import {
   SECRETS_DISPATCHER_ALLOWED_TOOLS,
   SECRETS_DISPATCHER_PROMPT,
   createSecretDispatcherTools,
 } from "./secrets/tools.js";
+import {
+  createMcpAuthDispatcherTools,
+  MCP_AUTH_DISPATCHER_ALLOWED_TOOLS,
+  MCP_AUTH_DISPATCHER_PROMPT,
+} from "./mcp-auth/tools.js";
+import { registerMcpRemoteServer } from "./integrations/mcp-remote-loader.js";
 import {
   PASTED_SECRET_REPLY,
   hadSecretRemoved,
@@ -84,6 +91,7 @@ Your only tools:
 - start_self_build / list_self_builds / ship_self_build / cancel_self_build (changing Boop's own code)
 - learn_skill (teach Boop a skill from a link, file, notes or what you just did)
 - request_secret / list_secrets / delete_secret / import_secrets_from_file (credentials, kept out of chat)
+- list_mcp_servers / start_mcp_auth (sign Boop in to OAuth or token-protected MCP servers, owner only)
 
 You cannot answer factual questions from your own knowledge. Not allowed.
 You have NO browser, NO WebSearch, NO WebFetch, NO file access, NO APIs.
@@ -202,6 +210,7 @@ Never claim something was sent unless send_draft returned success.
 ${SELF_BUILD_PROMPT}
 ${LEARN_INSTRUCTIONS}
 ${SECRETS_DISPATCHER_PROMPT}
+${MCP_AUTH_DISPATCHER_PROMPT}
 
 Integration capabilities — IMPORTANT:
 You only know integration NAMES, not their actual tool surface. Composio's
@@ -226,6 +235,7 @@ For screenshots of a site in "mobile/iPhone/tablet/desktop view" or a custom
 size, spawn with ["browser"], name the device or size in the task, and ask the
 sub-agent to attach the screenshot as an image.
 ${WEBTEST_DISPATCHER_PROMPT}
+${IMPERSONATION_DISPATCHER_PROMPT}
 
 Travel, reservations, and receipts:
 Flight, airport, boarding pass, itinerary, hotel, restaurant, ticket, order,
@@ -708,6 +718,7 @@ export async function handleUserMessageWithAttachments(
     ...createSelfBuildTools(opts.conversationId),
     ...createLearnTools(opts.conversationId),
     ...createSecretDispatcherTools(opts.conversationId),
+    ...createMcpAuthDispatcherTools(opts.conversationId, { onServerAdded: (entry) => registerMcpRemoteServer(entry) }),
     createOrchestratorHealthTool(),
     ...(orchestratorUp
       ? createOrchestratorTools(opts.conversationId, {
@@ -818,6 +829,7 @@ export async function handleUserMessageWithAttachments(
               ...AGENT_RETRY_ALLOWED_TOOLS,
               ...LEARN_ALLOWED_TOOLS,
               ...SECRETS_DISPATCHER_ALLOWED_TOOLS,
+              ...MCP_AUTH_DISPATCHER_ALLOWED_TOOLS,
               ORCHESTRATOR_HEALTH_TOOL,
               ...(orchestratorUp ? ORCHESTRATOR_ALLOWED_TOOLS : []),
               "mcp__boop-draft-decisions__reject_draft",

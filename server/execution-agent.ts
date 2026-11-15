@@ -42,6 +42,11 @@ import {
   SECRETS_NAMESPACE,
   createSecretExecutionTools,
 } from "./secrets/tools.js";
+import { MCP_AUTH_EXECUTION_PROMPT } from "./mcp-auth/tools.js";
+import {
+  IMPERSONATION_EXECUTION_PROMPT,
+  IMPERSONATION_INTEGRATION,
+} from "./impersonation/tools.js";
 
 /**
  * Why a run was stopped:
@@ -324,7 +329,9 @@ export async function spawnExecutionAgent(opts: SpawnExecutionAgentOpts): Promis
             EXECUTION_SYSTEM +
             (attachmentTools.length ? IMAGE_ATTACHMENTS_PROMPT : "") +
             SECRETS_EXECUTION_PROMPT +
+            MCP_AUTH_EXECUTION_PROMPT +
             (opts.integrations.includes(WEBTEST_INTEGRATION) ? WEBTEST_EXECUTION_PROMPT : "") +
+            (opts.integrations.includes(IMPERSONATION_INTEGRATION) ? IMPERSONATION_EXECUTION_PROMPT : "") +
             buildSkillsSection(skillIndex),
           claudeMcpServers: mcpServers,
           tools: runtimeTools,

@@ -16,7 +16,7 @@ import {
   slugify,
   vitestProblem,
 } from "../server/self-build/plan.js";
-import { codingEnv, realNodeEnv } from "../server/self-build/run.js";
+import { appPathFor, codingEnv, realNodeEnv } from "../server/self-build/run.js";
 import { SELF_BUILD_ALLOWED_TOOLS, createSelfBuildTools } from "../server/self-build/tools.js";
 
 describe("who may change Boop's code", () => {
@@ -241,6 +241,36 @@ describe("restart helper process matching", () => {
     });
     const unsetAt = script.indexOf("unset ELECTRON_RUN_AS_NODE");
     expect(unsetAt).toBeGreaterThan(-1);
-    expect(unsetAt).toBeLessThan(script.indexOf('open -a "$APP"'));
+    expect(unsetAt).toBeLessThan(script.indexOf('open -n "$APP"'));
+  });
+
+  it("launches Boop with open -n and never open -a, which fails with procNotFound after a quit", () => {
+    const script = restartScript({
+      buildId: "b",
+      newAppPath: "/n/Boop.app",
+      appPath: "/Applications/Boop.app",
+      backupDir: "/b",
+      resultPath: "/r",
+      healthUrl: "h",
+    });
+    expect(script).not.toContain("open -a");
+    expect(script).toContain('open -n "$APP" || log "open failed');
+    expect(script.match(/launch_boop/g)?.length).toBe(5);
+  });
+});
+
+describe("appPathFor", () => {
+  it("returns the .app bundle the process runs from", () => {
+    expect(appPathFor("/Applications/Boop.app/Contents/MacOS/Boop")).toBe("/Applications/Boop.app");
+  });
+
+  it("falls back to the install when the process runs from the rollback backup", () => {
+    expect(
+      appPathFor("/Users/me/Library/Application Support/Boop/self-build/previous/Boop.app/Contents/MacOS/Boop"),
+    ).toBe("/Applications/Boop.app");
+  });
+
+  it("falls back to the install when not running from a bundle", () => {
+    expect(appPathFor("/usr/local/bin/node")).toBe("/Applications/Boop.app");
   });
 });

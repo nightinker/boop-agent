@@ -9,6 +9,7 @@ import {
 import type { RuntimeRunRequest, RuntimeRunResult, RuntimeTool } from "./types.js";
 import { aggregateUsageFromResult, EMPTY_USAGE } from "../usage.js";
 import { activeClaudeConfigDir, envWithClaudeConfigDir } from "../claude-profiles.js";
+import { noteMcpServerStatuses } from "../mcp-auth/config.js";
 
 type ClaudePrompt = string | AsyncIterable<SDKUserMessage>;
 
@@ -118,7 +119,10 @@ export async function runClaudeAgent(request: RuntimeRunRequest): Promise<Runtim
       sessionId = msg.session_id;
       request.onSessionId?.(sessionId);
     }
-    if (msg.type === "assistant") {
+    if (msg.type === "system" && msg.subtype === "init") {
+      // Which configured MCP servers sit in "needs-auth", for list_mcp_servers.
+      noteMcpServerStatuses(msg.mcp_servers);
+    } else if (msg.type === "assistant") {
       if (msg.error) errorCode = msg.error;
       let assistantText = "";
       for (const block of msg.message.content) {
