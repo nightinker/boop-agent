@@ -231,9 +231,21 @@ function ownerConversation(): string | null {
   return `sms:${first.startsWith("+") ? first : `+${first}`}`;
 }
 
+const DEFAULT_APP_PATH = "/Applications/Boop.app";
+
+/**
+ * Where the running app is installed. A copy running from the self-build state
+ * folder (the rollback backup) is not the install: the restart script would
+ * move that folder away and fail with "backup failed", leaving Boop quit.
+ */
+export function appPathFor(execPath: string): string {
+  const match = execPath.match(/^(.*\.app)\/Contents\/MacOS\//);
+  if (!match || match[1].includes("/self-build/")) return DEFAULT_APP_PATH;
+  return match[1];
+}
+
 function currentAppPath(): string {
-  const match = process.execPath.match(/^(.*\.app)\/Contents\/MacOS\//);
-  return match?.[1] ?? "/Applications/Boop.app";
+  return appPathFor(process.execPath);
 }
 
 /** Secrets stay out of the coding agent's reach: it gets PATH/HOME, not Boop's keys. */
