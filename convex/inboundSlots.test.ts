@@ -39,6 +39,23 @@ describe("inbound answer slots", () => {
     expect((await t.mutation(api.inboundMessages.claimNext, { conversationId, maxConcurrent: 2 }))?.content).toBe("three");
   });
 
+  it("lets a held-back answer take in newer texts without another slot", async () => {
+    const t = convexTest(schema, modules);
+    const conversationId = "sms:user@example.com";
+    await t.mutation(api.inboundMessages.enqueue, text("one"));
+    const [first] = await t.mutation(api.inboundMessages.claimQueued, { conversationId, maxConcurrent: 1 });
+    await t.mutation(api.inboundMessages.enqueue, text("two"));
+    // Every slot is taken by "one"...
+    expect(await t.mutation(api.inboundMessages.claimQueued, { conversationId, maxConcurrent: 1 })).toEqual([]);
+    // ...but the answer holding it can merge "two" into itself.
+    const merged = await t.mutation(api.inboundMessages.claimQueued, {
+      conversationId,
+      maxConcurrent: 1,
+      heldIds: [first._id],
+    });
+    expect(merged.map((m) => m.content)).toEqual(["two"]);
+  });
+
   it("defaults to one at a time when no limit is passed", async () => {
     const t = convexTest(schema, modules);
     await t.mutation(api.inboundMessages.enqueue, text("one"));

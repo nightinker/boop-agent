@@ -4,7 +4,7 @@ import { convex } from "./convex-client.js";
 import { handleUserMessageWithAttachments } from "./interaction-agent.js";
 import { broadcast } from "./broadcast.js";
 import { validateImageHeader, MAX_IMAGE_BYTES, type ImageMediaType } from "./images/mime.js";
-import type { OutboundImage } from "./images/outbound.js";
+import { OutboundImageCollector, type OutboundImage } from "./images/outbound.js";
 import { redactContactHandle, redactPhoneNumbers } from "./privacy.js";
 import { maybeHandleScriptedDemoReply } from "./scripted-demo-replies.js";
 import { verifySendblueWebhookSecret } from "./sendblue-webhook-auth.js";
@@ -13,10 +13,13 @@ import {
   createInboundQueue,
   debounceMsFromEnv,
   inboundFromSendblue,
+  maxHoldMsFromEnv,
   maxTypingHoldMsFromEnv,
+  mergeInFlightFromEnv,
   serviceFromSendblue,
   typingFromSendblue,
   type InboundItem,
+  type ProcessOutcome,
   type RunContext,
 } from "./inbound-queue.js";
 import { convexInboundStore } from "./inbound-store.js";
@@ -398,7 +401,7 @@ export async function ingestSendblueImage(
 }
 
 /** Answers one queued text: the same work the webhook used to do inline. */
-export async function processInboundText(item: InboundItem, run?: RunContext): Promise<void> {
+export async function processInboundText(item: InboundItem, run?: RunContext): Promise<void | ProcessOutcome> {
   const { conversationId, fromNumber: from_number, handle } = item;
   const ingestResults = await Promise.all(item.mediaUrls.map(ingestSendblueImage));
   const ingested: IngestedImage[] = [];
@@ -447,9 +450,26 @@ export async function processInboundText(item: InboundItem, run?: RunContext): P
       mediaError: ingestErrors.length > 0 ? ingestErrors.join("; ") : undefined,
       // The texts other answers already claimed, as sent, so this one leaves them alone.
       parallelMessages: run ? () => run.claimedElsewhere().map(messageLabel) : undefined,
-      burstSize: run && !run.waitedBehindRun ? run.batch.length : undefined,
+      // A redo after a held-back reply is already numbered; no burst note on top.
+      burstSize: run && !run.waitedBehindRun && run.held.length === 0 ? run.batch.length : undefined,
+      heldReplies: run?.held.map((h) => ({ reply: h.reply, answered: h.answered })),
       onThinking: (t) => broadcast("thinking", { conversationId, t }),
     });
+    // More texts arrived while this was being written: hold it back and let
+    // the queue answer everything together in one reply.
+    if (answer && run && (await run.beforeSend())) {
+      console.log(`[turn ${turnTag}] → reply held back; newer texts arrived, answering them together`);
+      return { held: { reply: answer, attachments } };
+    }
+    // Images a held-back draft would have sent still go out with the final reply.
+    // Same per-reply cap and de-duplication as one turn's own images.
+    const heldImages = (run?.held ?? []).flatMap((h) => h.attachments as OutboundImage[]);
+    let outgoing = attachments;
+    if (heldImages.length > 0) {
+      const collector = new OutboundImageCollector();
+      collector.addAll([...heldImages, ...attachments]);
+      outgoing = collector.list;
+    }
     // Another answer ran alongside this one: say which message this replies to.
     const reply = answer && run?.overlapped() ? withReplyHeading(answer, replyHeading(run.batch)) : answer;
     if (reply) {
@@ -461,7 +481,7 @@ export async function processInboundText(item: InboundItem, run?: RunContext): P
       );
       let sent: SendImessageResult;
       try {
-        sent = await sendImessage(from_number, reply, attachments);
+        sent = await sendImessage(from_number, reply, outgoing);
       } catch (err) {
         if (!isNetworkError(err)) throw err;
         // The reply is written; only sending it failed. Save it to the history
@@ -476,7 +496,7 @@ export async function processInboundText(item: InboundItem, run?: RunContext): P
         await convex.mutation(api.messages.send, {
           conversationId,
           role: "assistant",
-          content: attachments.length > 0 ? `${reply}\n[images not sent: the network dropped]` : reply,
+          content: outgoing.length > 0 ? `${reply}\n[images not sent: the network dropped]` : reply,
         });
         console.warn(`[turn ${turnTag}] → reply saved to the outbox; sending failed (${String(err)})`);
         return;
@@ -504,6 +524,12 @@ export const inboundQueue = createInboundQueue({
   isActive: isActiveInstance,
   // Wait for a quiet period so a burst of texts gets one answer.
   debounceMs: debounceMsFromEnv(process.env.BOOP_MESSAGE_DEBOUNCE_MS),
+  // Hard cap on a wait with texts alone, counted from the first waiting text.
+  maxHoldMs: maxHoldMsFromEnv(process.env.BOOP_MESSAGE_MAX_HOLD_MS),
+  // Texts sent while a reply is still being written (a long turn, a running
+  // sub-agent) are folded into it: the reply is held back and redone so one
+  // answer covers everything.
+  mergeInFlight: mergeInFlightFromEnv(process.env.BOOP_MERGE_INFLIGHT_REPLIES),
   // Hard cap on a wait while the sender is typing (texts alone stop at 15s),
   // counted from the first waiting text.
   maxTypingWaitMs: maxTypingHoldMsFromEnv(process.env.BOOP_MAX_TYPING_HOLD_MS),

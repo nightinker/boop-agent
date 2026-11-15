@@ -43,8 +43,17 @@ async function liveProcessing(ctx: QueryCtx, conversationId: string) {
  * it stops holding a slot. Counted inside the claiming transaction, so two
  * copies (or two workers) can never start more than maxConcurrent between them.
  */
-async function freeSlots(ctx: MutationCtx, conversationId: string, maxConcurrent: number | undefined): Promise<number> {
-  const { live, stale } = await liveProcessing(ctx, conversationId);
+async function freeSlots(
+  ctx: MutationCtx,
+  conversationId: string,
+  maxConcurrent: number | undefined,
+  heldIds: string[] = [],
+): Promise<number> {
+  const { live: allLive, stale } = await liveProcessing(ctx, conversationId);
+  // Texts the caller is already answering don't count against it: it's
+  // folding new texts into the slot it holds, not starting another answer.
+  const held = new Set(heldIds);
+  const live = allLive.filter((row) => !held.has(row._id));
   for (const row of stale) {
     await ctx.db.patch("inboundMessages", row._id, {
       status: "failed",
@@ -133,9 +142,13 @@ export const claimQueued = mutation({
     // it, so texts that piled up far apart are answered as separate turns.
     maxGapMs: v.optional(v.number()),
     maxConcurrent: v.optional(v.number()),
+    // Texts the caller is answering right now and is merging these into
+    // (a reply held back because more texts arrived). They don't take a
+    // slot from the merge.
+    heldIds: v.optional(v.array(v.id("inboundMessages"))),
   },
   handler: async (ctx, args) => {
-    if ((await freeSlots(ctx, args.conversationId, args.maxConcurrent)) === 0) return [];
+    if ((await freeSlots(ctx, args.conversationId, args.maxConcurrent, args.heldIds)) === 0) return [];
 
     const queued = await ctx.db
       .query("inboundMessages")

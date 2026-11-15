@@ -64,14 +64,42 @@ export function burstNote(count: number): string {
 }
 
 /**
- * The user prompt for one turn: prior turns, the messages another turn is
- * answering, how the current message was put together, then the message.
- * Just the message when there's nothing else to say.
+ * Prompt note for a turn redone because more texts arrived while its reply
+ * was being written: the held-back drafts (never sent) and what they were
+ * answering, so the new reply builds on work already done (sub-agent results,
+ * sent acks, actions taken) instead of repeating it. Empty on a first try.
  */
-export function turnPrompt(parts: { history: string; parallelNote: string; batchNote: string; message: string }): string {
+export function heldReplyNote(held: Array<{ reply: string; answered: number }>): string {
+  if (held.length === 0) return "";
+  const drafts = held.map((h) => {
+    const which = h.answered === 1 ? "message 1" : `messages 1-${h.answered}`;
+    return `Draft that answered ${which} (NOT sent):\n${snippet(h.reply, 1500) || "(empty)"}`;
+  });
+  return [
+    "You already started answering the earlier messages, but newer ones arrived before that reply went out, so it was held back and the user never saw it. " +
+      "Anything that turn already did is done: tools and sub-agents it ran, drafts it made, and any short acks it sent (those show in the prior turns). " +
+      "Don't redo that work or spawn the same task again; reuse its results below. Don't repeat an ack. " +
+      "Write the single reply the user will actually see, covering every current message, with later messages winning where they change or cancel earlier ones.",
+    ...drafts,
+  ].join("\n\n");
+}
+
+/**
+ * The user prompt for one turn: prior turns, the messages another turn is
+ * answering, how the current message was put together, any held-back draft,
+ * then the message. Just the message when there's nothing else to say.
+ */
+export function turnPrompt(parts: {
+  history: string;
+  parallelNote: string;
+  batchNote: string;
+  message: string;
+  heldNote?: string;
+}): string {
   const { history, parallelNote, batchNote, message } = parts;
-  if (!history && !parallelNote && !batchNote) return message;
-  return [history ? `Prior turns:\n${history}` : "", parallelNote, batchNote, `Current message:\n${message}`]
+  const heldNote = parts.heldNote ?? "";
+  if (!history && !parallelNote && !batchNote && !heldNote) return message;
+  return [history ? `Prior turns:\n${history}` : "", parallelNote, batchNote, heldNote, `Current message:\n${message}`]
     .filter(Boolean)
     .join("\n\n");
 }
