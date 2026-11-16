@@ -8,6 +8,14 @@ Format:
 
 ---
 
+## Unreleased — Claude desktop Cowork sessions in list / continue
+
+- Added: `list_claude_sessions` also lists the Claude desktop app's Cowork tasks (local agent mode, `~/Library/Application Support/Claude/local-agent-mode-sessions/<account>/<org>/local_<id>.json` plus the transcript in that task's own `.claude/projects`). Each result now has a `source` (`code` or `cowork`), and a `title` when the desktop app has one. A Cowork task's folder is the one picked for it, otherwise its outputs folder. New `source` filter.
+- Changed: keyword search ignores punctuation and matches every word, in any order, across title, folder and prompts ("acme studio" finds `~/Sites/acme-studio`). Code sessions started in the desktop Code tab take their title and *current* folder from the app's index (`claude-code-sessions`), so a session moved out of a scratch folder shows, and resumes, in its real project. The last prompt comes from Claude Code's own `last-prompt` record when the tail is all tool output, and "[Request interrupted by user]" is no longer shown as a prompt.
+- Added: `continue_claude_session` resumes Cowork tasks. Boop copies the transcript into its own Claude config dir under the task's folder (the original is only read), resumes it with `forkSession` (Cowork tasks always fork, since the desktop app owns the original) and deletes the copy when the run ends. The fork is a normal Claude Code session afterwards. It runs under Boop's Claude login and settings, so the task's Cowork connectors and plugins aren't loaded.
+- Fixed: a session that can't be resumed (missing folder, unknown id, SDK error or API error) now returns a clear message instead of throwing; the original is left as it was. The session is looked up by id across all sessions, not just the 30 most recent.
+- Added: `BOOP_CLAUDE_COWORK_DIR` and `BOOP_CLAUDE_DESKTOP_SESSIONS_DIR` overrides.
+
 ## Unreleased — Texts sent mid-reply are folded into one answer
 
 - Changed: a text that arrives while Boop is still writing a reply in the same conversation (a long turn or a running sub-agent) no longer gets its own separate answer. Just before the reply would be sent, Boop waits out the new texts' quiet period, holds the reply back unsent, and answers again with every text numbered oldest first; later texts that correct, change or cancel earlier ones win, and overlapping asks are merged. The redo sees the held draft and is told not to redo work or acks already done; images the draft would have sent go out with the final reply. A reply with nothing new behind it is sent exactly as before, with no added wait. At most 3 redos per answer, then it's sent and later texts get their own turn.

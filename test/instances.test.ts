@@ -1,3 +1,6 @@
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { pickActive, type InstanceRow } from "../convex/instanceRules.js";
 import {
@@ -22,7 +25,10 @@ const row = (id: string, priority: number, seenAgo: number, startedAt = 0): Inst
   lastSeenAt: now - seenAgo,
 });
 
-afterEach(() => resetInstanceState());
+afterEach(() => {
+  resetInstanceState();
+  vi.unstubAllEnvs();
+});
 
 describe("choosing the active copy", () => {
   it("prefers the Mac while it's online", () => {
@@ -189,7 +195,9 @@ describe("knowing where it runs", () => {
     expect(instanceIdentity({ BOOP_INSTANCE_PRIORITY: "200", BOOP_INSTANCE_LABEL: "Studio" }, "linux", "x").priority).toBe(200);
   });
 
-  it("tells Boop which copy it is, whether it's active, and what needs the Mac", async () => {
+  // The note's self-build line depends on BOOP_SOURCE_DIR, which is set when
+  // the suite runs inside Boop's own self-build checkout — so pin it per test.
+  async function serverNote(): Promise<string> {
     const identity = instanceIdentity({}, "linux", "vps1");
     const c = startInstanceCoordinator({
       identity,
@@ -208,11 +216,32 @@ describe("knowing where it runs", () => {
     });
     await c.tick();
     const note = instancePromptNote();
+    await c.stop();
+    return note;
+  }
+
+  it("tells Boop which copy it is, whether it's active, and what needs the Mac", async () => {
+    vi.stubEnv("BOOP_SOURCE_DIR", "");
+    const note = await serverNote();
     expect(note).toContain("you are Boop's copy on the linux server (vps1)");
     expect(note).toContain("the owner's Mac (mbp): offline");
     expect(note).toContain("You are the active copy right now.");
     expect(note).toContain("Self-builds code and ship on the Mac");
-    await c.stop();
+    expect(note).not.toContain("Self-builds run here too");
+  });
+
+  it("says self-builds run on the server when it has its own source checkout", async () => {
+    const checkout = mkdtempSync(join(tmpdir(), "boop-source-"));
+    try {
+      mkdirSync(join(checkout, ".git"));
+      vi.stubEnv("BOOP_SOURCE_DIR", checkout);
+      const note = await serverNote();
+      expect(note).toContain("you are Boop's copy on the linux server (vps1)");
+      expect(note).toContain("Self-builds run here too");
+      expect(note).not.toContain("Self-builds code and ship on the Mac");
+    } finally {
+      rmSync(checkout, { recursive: true, force: true });
+    }
   });
 
   it("adds nothing before coordination starts", () => {
