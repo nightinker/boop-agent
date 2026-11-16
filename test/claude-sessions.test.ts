@@ -33,10 +33,12 @@ describe("listClaudeSessions", () => {
     await writeFile(join(root, "-Users-me-app", "33333333-3333-4333-8333-333333333333.jsonl"), '{"type":"queue-operation"}\n');
     await utimes(join(root, "-Users-me-app", `${A}.jsonl`), new Date(1_000_000), new Date(1_000_000));
 
-    const all = await listClaudeSessions({ root });
+    // Point the Cowork and desktop-index scans at nothing so only this fixture is read.
+    const isolated = { coworkRoot: join(root, "no-cowork"), desktopRoot: join(root, "no-desktop") };
+    const all = await listClaudeSessions({ root, ...isolated });
     expect(all.map((s) => s.sessionId)).toEqual([B, A]);
     expect(all[1].lastPrompt).toBe("older end");
-    expect((await listClaudeSessions({ root, project: "older" })).map((s) => s.sessionId)).toEqual([A]);
-    expect(await listClaudeSessions({ root: join(root, "missing") })).toEqual([]);
+    expect((await listClaudeSessions({ root, ...isolated, project: "older" })).map((s) => s.sessionId)).toEqual([A]);
+    expect(await listClaudeSessions({ root: join(root, "missing"), ...isolated })).toEqual([]);
   });
 });
