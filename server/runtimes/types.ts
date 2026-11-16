@@ -49,6 +49,8 @@ export interface RuntimeRunRequest {
    * runtime). Used to carry on after a dropped connection.
    */
   resumeSessionId?: string;
+  /** With resumeSessionId: branch into a new session instead of appending to the original. */
+  forkSession?: boolean;
   /** Called with the session id as soon as the runtime reports it. */
   onSessionId?: (sessionId: string) => void;
 }

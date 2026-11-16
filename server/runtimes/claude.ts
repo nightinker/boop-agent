@@ -96,7 +96,7 @@ export async function runClaudeAgent(request: RuntimeRunRequest): Promise<Runtim
   for await (const msg of query({
     prompt: toClaudePrompt(request.prompt),
     options: {
-      systemPrompt: request.systemPrompt,
+      ...(request.systemPrompt ? { systemPrompt: request.systemPrompt } : {}),
       model: request.model,
       mcpServers,
       allowedTools: request.allowedTools,
@@ -104,6 +104,7 @@ export async function runClaudeAgent(request: RuntimeRunRequest): Promise<Runtim
       ...(request.mode === "execution" ? { settingSources: ["project"] as const } : {}),
       permissionMode: "bypassPermissions",
       ...(request.resumeSessionId ? { resume: request.resumeSessionId } : {}),
+      ...(request.resumeSessionId && request.forkSession ? { forkSession: true } : {}),
       abortController: request.abortController,
       ...(request.cwd ? { cwd: request.cwd } : {}),
       ...(env ? { env } : {}),
