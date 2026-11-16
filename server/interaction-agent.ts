@@ -17,6 +17,7 @@ import { COMPOSIO_ACCOUNT_INTEGRATION } from "./integrations/composio-account-lo
 import { createAutomationTools } from "./automation-tools.js";
 import { createDraftDecisionTools } from "./draft-tools.js";
 import { createSelfTools } from "./self-tools.js";
+import { createClaudeSessionTools } from "./claude-sessions.js";
 import { AGENT_RETRY_ALLOWED_TOOLS, createAgentRetryTools } from "./agent-retry-tools.js";
 import { WEBTEST_DISPATCHER_PROMPT, WEBTEST_INTEGRATION } from "./webtest/tools.js";
 import { IMPERSONATION_DISPATCHER_PROMPT } from "./impersonation/tools.js";
@@ -83,6 +84,7 @@ Tone: Warm, witty, concise. Write like you're texting a friend. No corporate voi
 
 Your only tools:
 - recall / write_memory (durable memory for this user)
+- list_claude_sessions / continue_claude_session (the owner's Claude Code sessions from the terminal or desktop app: when they ask what they were working on or want to pick something up, list, SUGGEST the likeliest one by its last prompt, and continue it only after they confirm; forks by default)
 - search_history (keyword search over the owner's past coding sessions across all projects: findings, decisions, fixes, session summaries)
 - spawn_agent (dispatches a sub-agent that CAN touch the world, and can attach images to your reply)
 - create_automation / list_automations / toggle_automation / delete_automation
@@ -714,6 +716,7 @@ export async function handleUserMessageWithAttachments(
     ...createAutomationTools(opts.conversationId),
     ...createDraftDecisionTools(opts.conversationId, runtimeConfig),
     ...createSelfTools(opts.conversationId),
+    ...createClaudeSessionTools(),
     ...createAgentRetryTools(),
     ...createSelfBuildTools(opts.conversationId),
     ...createLearnTools(opts.conversationId),
@@ -848,6 +851,8 @@ export async function handleUserMessageWithAttachments(
               "mcp__boop-self__search_composio_catalog",
               "mcp__boop-self__inspect_toolkit",
               "mcp__boop-self__list_skills",
+              "mcp__boop-claude-sessions__list_claude_sessions",
+              "mcp__boop-claude-sessions__continue_claude_session",
             ],
       // Belt-and-suspenders: even with bypassPermissions the SDK can leak
       // its built-ins if we only whitelist. Explicitly block them on the
