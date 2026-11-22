@@ -10,6 +10,7 @@ import { normalizeServerName, observedMcpServers, secretNames, type McpAuthKind,
 import { findConfiguredMcpServerUrl } from "./discover.js";
 import { assertSecureUrl, discoverProtectedResource, OAuthError, type FetchLike } from "./oauth.js";
 import { mcpAuthService, type McpAuthService } from "./service.js";
+import { describeLocalClaudeMcpServers, type LocalClaudeMcpServer } from "../claude-mcp/local.js";
 
 export const MCP_AUTH_NAMESPACE = "boop-mcp-auth";
 
@@ -20,7 +21,7 @@ export const MCP_AUTH_DISPATCHER_ALLOWED_TOOLS = [
 
 export const MCP_AUTH_DISPATCHER_PROMPT = `
 Remote MCP servers that need sign-in (OAuth or a static token), e.g. "authenticate bannerstudio":
-- list_mcp_servers shows each server Boop manages and its status (connected / needs auth / needs re-auth), plus servers Claude sessions reported as "needs-auth".
+- list_mcp_servers shows each server Boop manages and its status (connected / needs auth / needs re-auth), plus the MCP servers of the owner's Claude on this Mac (~/.claude.json, .mcp.json, claude.ai connectors) with status (connected / needs auth / failed) and the spawn_agent integration name for each. Pass refresh: true to re-check them now.
 - start_mcp_auth(name) returns a one-time sign-in link: send it to the user. They open it on the Mac (or remotely behind the secrets passcode or dashboard login) and sign in with the service; tokens go straight into the Mac's Keychain and refresh automatically. Pass url when Boop doesn't know the server yet (ask the user for it if needed). For servers that use a fixed API token instead of OAuth, pass auth: "bearer" (optionally secretName); that returns a secret-entry link instead.
 - Once connected, the server appears in spawn_agent's integrations under its name. If a sub-agent reports a server "needs re-authentication", call start_mcp_auth again for a fresh link.
 - Never ask the user to paste a token in chat.`;
@@ -40,13 +41,20 @@ interface ToolDeps {
   fetch?: FetchLike;
   /** Makes a newly added server available to spawn_agent right away. */
   onServerAdded?: (entry: McpServerEntry) => void;
+  /** The Mac's Claude MCP servers with status (default: claude-local-loader). */
+  localServers?: (opts: { refresh?: boolean }) => Promise<LocalClaudeMcpServer[]>;
+}
+
+async function defaultLocalServers(opts: { refresh?: boolean }): Promise<LocalClaudeMcpServer[]> {
+  const { localClaudeMcpServers } = await import("../integrations/claude-local-loader.js");
+  return localClaudeMcpServers(opts);
 }
 
 function isOwner(conversationId: string, deps: ToolDeps): boolean {
   return isOwnerConversation(conversationId, (deps.ownerNumbers ?? (() => process.env.BOOP_OWNER_NUMBERS))());
 }
 
-export async function describeMcpServers(service: McpAuthService): Promise<string> {
+export async function describeMcpServers(service: McpAuthService, opts: { includeObserved?: boolean } = {}): Promise<string> {
   const entries = await service.config.list();
   const lines: string[] = [];
   for (const entry of entries) {
@@ -59,7 +67,7 @@ export async function describeMcpServers(service: McpAuthService): Promise<strin
     lines.push(`- ${entry.name} (${host}, ${entry.auth === "oauth" ? "OAuth" : entry.auth === "bearer" ? "static token" : "no auth"}): ${await service.describe(entry)}`);
   }
   const managed = new Set(entries.map((e) => e.name));
-  const others = observedMcpServers().filter((o) => {
+  const others = (opts.includeObserved === false ? [] : observedMcpServers()).filter((o) => {
     const n = normalizeServerName(o.name);
     return !(n && managed.has(n)) && o.source !== "dynamic";
   });
@@ -87,13 +95,23 @@ export function createMcpAuthDispatcherTools(conversationId: string, deps: ToolD
     defineRuntimeTool(
       MCP_AUTH_NAMESPACE,
       "list_mcp_servers",
-      "List remote MCP servers that need authentication and their status: connected, needs auth, needs re-auth (expired/revoked), plus servers Claude sessions reported as needing auth. Never shows tokens.",
-      {},
-      async () => {
+      "List MCP servers and their status: the remote servers Boop authenticates (connected, needs auth, needs re-auth), and the MCP servers of the owner's Claude on this Mac (~/.claude.json, .mcp.json, claude.ai connectors: connected, needs auth, failed with the reason) with the spawn_agent integration name for each. Never shows tokens or configs.",
+      {
+        refresh: z.boolean().optional().describe("Re-check the Mac's Claude MCP servers now instead of using the last check (takes a few seconds)."),
+      },
+      async (args) => {
         if (!isOwner(conversationId, deps)) return runtimeText(NOT_OWNER_MESSAGE, false);
         const svc = service();
-        if (!svc.supported) return runtimeText(SECRETS_UNSUPPORTED_MESSAGE, false);
-        return runtimeText(await describeMcpServers(svc));
+        let local: LocalClaudeMcpServer[] | null = null;
+        try {
+          local = await (deps.localServers ?? defaultLocalServers)({ refresh: args.refresh === true });
+        } catch (err) {
+          console.warn("[mcp-auth] couldn't list the Mac's Claude MCP servers", err instanceof Error ? err.message : err);
+        }
+        const localText = local && local.length ? describeLocalClaudeMcpServers(local) : null;
+        if (!svc.supported) return runtimeText([localText, SECRETS_UNSUPPORTED_MESSAGE].filter(Boolean).join("\n\n"), Boolean(localText));
+        const managed = await describeMcpServers(svc, { includeObserved: !localText });
+        return runtimeText(localText ? `${localText}\n\n${managed}` : managed);
       },
     ),
     defineRuntimeTool(

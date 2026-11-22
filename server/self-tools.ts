@@ -7,6 +7,8 @@ import {
 } from "./composio.js";
 import { activeProvider as activeEmbeddingProvider } from "./embeddings.js";
 import { listEnabledIntegrations } from "./integrations/registry.js";
+import { localClaudeMcpServers } from "./integrations/claude-local-loader.js";
+import type { LocalClaudeMcpServer } from "./claude-mcp/local.js";
 import {
   COMPOSIO_ACCOUNT_INTEGRATION,
   currentComposioAccountToolkits,
@@ -101,6 +103,27 @@ const NOT_OWNER_ACCOUNT_MESSAGE = "Only Boop's owner can see or switch the Claud
  * Owner-only, like self-build. With no conversation (e.g. a bare MCP
  * server) there is no owner to check, so the account tools refuse.
  */
+/** list_integrations row for one of the Mac's Claude MCP servers. Names and statuses only. */
+export function localMcpIntegrationRow(server: LocalClaudeMcpServer): Record<string, string> {
+  const status =
+    server.problem
+      ? `FAILED: ${server.problem}`
+      : server.status === "failed"
+        ? `FAILED${server.error ? `: ${server.error}` : ""}`
+        : server.status === "needs-auth"
+          ? "NEEDS AUTH (start_mcp_auth)"
+          : server.status === "unknown"
+            ? "NOT CHECKED YET"
+            : server.status.toUpperCase();
+  return {
+    slug: server.integration ?? server.name,
+    status,
+    account: `Mac's Claude MCP server "${server.name}" (${server.kind === "connector" ? "claude.ai connector" : server.from ?? server.source ?? "Claude"})${
+      server.integration ? ` — spawn with integration "${server.integration}"` : " — not offered to sub-agents"
+    }`,
+  };
+}
+
 function isOwner(conversationId: string | undefined): boolean {
   return conversationId !== undefined && isOwnerConversation(conversationId, process.env.BOOP_OWNER_NUMBERS);
 }
@@ -429,7 +452,7 @@ Use when the user says "use opus", "switch to sonnet", "use Codex mini", "make i
     defineRuntimeTool(
       NAMESPACE,
       "list_integrations",
-      "List the user's currently connected integrations (Gmail, Slack, etc.) with the actual account behind each connection. Use when the user asks 'what tools do I have connected?' or 'which Gmail account?' or 'what integrations are set up?'.",
+      "List the user's currently connected integrations (Gmail, Slack, etc.) with the actual account behind each connection, plus (owner only) the MCP servers of the owner's Claude on this Mac with their status and spawn_agent integration name. Use when the user asks 'what tools do I have connected?' or 'which Gmail account?' or 'what integrations are set up?'.",
       {},
       async () => {
         const connected = await listConnectedToolkits();
@@ -446,6 +469,13 @@ Use when the user says "use opus", "switch to sonnet", "use Codex mini", "make i
             status: "ACTIVE",
             account: `personal Composio account — spawn with integration "${COMPOSIO_ACCOUNT_INTEGRATION}"`,
           });
+        }
+        // The MCP servers of the owner's Claude on this Mac (owner only).
+        if (isOwner(conversationId)) {
+          const local = await localClaudeMcpServers().catch(() => []);
+          for (const server of local) {
+            summary.push(localMcpIntegrationRow(server));
+          }
         }
         return runtimeText(
           summary.length === 0
