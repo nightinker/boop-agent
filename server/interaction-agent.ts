@@ -33,6 +33,12 @@ import {
 } from "./mcp-auth/tools.js";
 import { registerMcpRemoteServer } from "./integrations/mcp-remote-loader.js";
 import {
+  describeLocalIntegrationsForPrompt,
+  LOCAL_CLAUDE_MCP_DISPATCHER_PROMPT,
+} from "./integrations/claude-local-loader.js";
+import { isLocalMcpIntegrationDescription } from "./claude-mcp/local.js";
+import { isOwnerConversation } from "./self-build/plan.js";
+import {
   PASTED_SECRET_REPLY,
   hadSecretRemoved,
   redactSecrets,
@@ -93,7 +99,7 @@ Your only tools:
 - start_self_build / list_self_builds / ship_self_build / cancel_self_build (changing Boop's own code)
 - learn_skill (teach Boop a skill from a link, file, notes or what you just did)
 - request_secret / list_secrets / delete_secret / import_secrets_from_file (credentials, kept out of chat)
-- list_mcp_servers / start_mcp_auth (sign Boop in to OAuth or token-protected MCP servers, owner only)
+- list_mcp_servers / start_mcp_auth (MCP servers with their status, including the Mac's Claude MCP servers and claude.ai connectors; sign Boop in to OAuth or token-protected ones; owner only)
 
 You cannot answer factual questions from your own knowledge. Not allowed.
 You have NO browser, NO WebSearch, NO WebFetch, NO file access, NO APIs.
@@ -213,6 +219,7 @@ ${SELF_BUILD_PROMPT}
 ${LEARN_INSTRUCTIONS}
 ${SECRETS_DISPATCHER_PROMPT}
 ${MCP_AUTH_DISPATCHER_PROMPT}
+${LOCAL_CLAUDE_MCP_DISPATCHER_PROMPT}
 
 Integration capabilities — IMPORTANT:
 You only know integration NAMES, not their actual tool surface. Composio's
@@ -452,9 +459,14 @@ export function resolveSpawnIntegrations(
 export function describeIntegrationsForPrompt(
   integrations: Array<{ name: string; description: string }>,
 ): string {
-  return integrations
+  const local = integrations.filter((i) => isLocalMcpIntegrationDescription(i.description));
+  const main = integrations
+    .filter((i) => !isLocalMcpIntegrationDescription(i.description))
     .map((i) => (i.name === COMPOSIO_ACCOUNT_INTEGRATION ? `${i.name} (${i.description})` : i.name))
     .join(", ");
+  if (local.length === 0) return main;
+  const localSummary = describeLocalIntegrationsForPrompt(local.map((i) => i.name)) || local.map((i) => i.name).join(", ");
+  return `${main || "(none)"}\nMac Claude MCP servers: ${localSummary}`;
 }
 
 /**
@@ -515,7 +527,11 @@ export async function handleUserMessageWithAttachments(
       opts = { ...opts, content: scan.redacted };
     }
   }
-  const enabledIntegrations = await listEnabledIntegrations();
+  // MCP servers from the owner's Claude on this Mac are offered to the owner only.
+  const ownerTurn = isOwnerConversation(opts.conversationId, process.env.BOOP_OWNER_NUMBERS);
+  const enabledIntegrations = (await listEnabledIntegrations()).filter(
+    (i) => ownerTurn || !i.ownerOnly,
+  );
   const integrations = enabledIntegrations.map((i) => i.name);
   const integrationSummary = describeIntegrationsForPrompt(enabledIntegrations);
 

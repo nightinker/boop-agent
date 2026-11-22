@@ -71,6 +71,17 @@ Browser control HTTP routes are local-only and reject public tunnel requests bef
 
 One tool, `impersonate_and_screenshot`, runs the whole flow inside Boop's server process: it calls Nova's allowlisted **Impersonate User** action through Boop's authenticated MCP proxy, opens the returned link in a throwaway, read-only Patchright context (never the owner's profile), screenshots each target page, then closes the context. The link is a credential and never reaches the agent, its logs or the chat.
 
+## MCP servers from the Mac's Claude
+
+`server/integrations/claude-local-loader.ts` (with `server/claude-mcp/local.ts`) offers the owner's own Claude MCP servers to sub-agents, by server name:
+
+- **`~/.claude.json` servers** (user scope, plus local scope for Boop's folder), e.g. `postmark-staging`. Sub-agents run Claude Code with project settings only, so Boop passes the server's config (`${VAR}` expanded from Boop's environment) to the sub-agent's Claude process for the integrations a spawn asks for.
+- **claude.ai connectors** the Mac's Claude is signed in to, as `claude-ai-<name>` (e.g. `claude-ai-slack`), and the project's **`.mcp.json`** servers. The sub-agent's Claude process loads these itself; selecting one allows its tools, and connectors that weren't selected are denied.
+
+A name already taken (say a Composio `slack`) gets `-claude` appended. A server Boop authenticates itself with `start_mcp_auth` wins over Claude's copy. All of them are owner-only, and Codex sub-agents don't get them yet.
+
+`list_mcp_servers` and `list_integrations` show each server with status (connected / needs auth / failed with a short reason). The statuses come from a Claude Code process started with the owner's full config (no model call), checked at startup and cached for 5 minutes; `list_mcp_servers(refresh: true)` checks again. Servers that need auth are offered once signed in (`start_mcp_auth`); failed ones stay selectable and the sub-agent reports the failure. Write and send tools still go through `save_draft` / `send_draft`. `BOOP_LOCAL_CLAUDE_MCP=false` turns this off.
+
 ---
 
 ## Curated toolkit list

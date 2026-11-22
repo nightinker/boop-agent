@@ -8,6 +8,15 @@ Format:
 
 ---
 
+## Unreleased — Sub-agents use the Mac's Claude MCP servers
+
+- Added: the MCP servers of the owner's Claude on the Mac are spawn_agent integrations, by server name: `~/.claude.json` servers (user scope, and local scope for Boop's folder), the project's `.mcp.json`, and claude.ai connectors (as `claude-ai-<name>`, e.g. `claude-ai-slack`). A name already taken by another integration gets `-claude` appended; a server Boop authenticates itself (`start_mcp_auth`) keeps precedence. Owner only.
+- Added: `~/.claude.json` servers are passed to the sub-agent's Claude process as they're configured there (`${VAR}` / `${VAR:-default}` expanded from Boop's environment); claude.ai connectors and `.mcp.json` servers are already loaded by that process, and selecting one allows its tools. Configs, commands, env and headers never reach chat, prompts or logs.
+- Changed: sub-agents only get the claude.ai connectors they were given; the others are denied (`disallowedTools`). Before, every sub-agent could reach every connector.
+- Added: `list_mcp_servers` (now with `refresh`) and `list_integrations` show these servers with status (connected / needs auth / failed with a short, scrubbed reason) and the integration name. Statuses come from a Claude Code process with the owner's full config (`mcpServerStatus()`, no model call), checked at startup and cached for 5 minutes. Servers that need auth aren't offered until signed in (`start_mcp_auth`); failed ones (e.g. ECONNREFUSED) stay selectable and are reported plainly.
+- Added: sub-agents are told which servers they have, which of their tools write or send (draft first, payload names the integration for `send_draft`), and to report connection failures instead of claiming no access.
+- Added: `BOOP_LOCAL_CLAUDE_MCP=false` turns the feature off. Codex sub-agents don't get these servers yet.
+
 ## Unreleased — Claude desktop Cowork sessions in list / continue
 
 - Added: `list_claude_sessions` also lists the Claude desktop app's Cowork tasks (local agent mode, `~/Library/Application Support/Claude/local-agent-mode-sessions/<account>/<org>/local_<id>.json` plus the transcript in that task's own `.claude/projects`). Each result now has a `source` (`code` or `cowork`), and a `title` when the desktop app has one. A Cowork task's folder is the one picked for it, otherwise its outputs folder. New `source` filter.

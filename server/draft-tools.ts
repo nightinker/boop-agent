@@ -78,7 +78,12 @@ export function createDraftDecisionTools(
       "boop-draft-decisions",
       "send_draft",
       "Approve and execute a draft. Spawns an execution agent to actually perform the action based on the stored payload.",
-      { draftId: z.string(), integrations: z.array(z.string()) },
+      {
+        draftId: z.string(),
+        integrations: z
+          .array(z.string())
+          .describe('Integrations the sending agent needs: the one the draft was made with (its payload names it, e.g. "postmark-staging").'),
+      },
       async (args) => {
         // Claims the draft atomically, so a parallel turn can't send it twice.
         const draft = await convex.mutation(api.drafts.decide, { draftId: args.draftId, status: "sent" });

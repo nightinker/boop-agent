@@ -4,8 +4,15 @@ import { broadcast } from "./broadcast.js";
 import {
   buildMcpServersForIntegrations,
   buildRuntimeToolsForIntegrations,
+  claudeToolPatternsForIntegrations,
+  filterIntegrationsForOwner,
   listIntegrations,
 } from "./integrations/registry.js";
+import {
+  localClaudeMcpExecutionPrompt,
+  unselectedConnectorDenyRules,
+} from "./integrations/claude-local-loader.js";
+import { isOwnerConversation } from "./self-build/plan.js";
 import { createDraftStagingTools } from "./draft-tools.js";
 import { EMPTY_USAGE, type UsageTotals } from "./usage.js";
 import { getRuntimeConfig, type RuntimeConfig } from "./runtime-config.js";
@@ -277,14 +284,24 @@ export async function spawnExecutionAgent(opts: SpawnExecutionAgentOpts): Promis
     ? createImageAttachmentTools(attachmentCollector)
     : [];
   const toolCalls: ToolCallRecord[] = [];
+  // MCP servers from the owner's Claude on this Mac are owner-only.
+  const owner = !opts.conversationId || isOwnerConversation(opts.conversationId, process.env.BOOP_OWNER_NUMBERS);
+  const integrations = filterIntegrationsForOwner(opts.integrations, owner);
   const integrationServers =
     runtimeConfig.runtime === "claude"
-      ? await buildMcpServersForIntegrations(opts.integrations, opts.conversationId)
+      ? await buildMcpServersForIntegrations(integrations, opts.conversationId)
       : {};
   const integrationTools =
     runtimeConfig.runtime === "codex"
-      ? await buildRuntimeToolsForIntegrations(opts.integrations, opts.conversationId)
+      ? await buildRuntimeToolsForIntegrations(integrations, opts.conversationId)
       : [];
+  // Tools the sub-agent's Claude process loads itself (claude.ai connectors, .mcp.json):
+  // allow the selected ones, deny connectors it wasn't given.
+  const claudeProvidedPatterns =
+    runtimeConfig.runtime === "claude" ? claudeToolPatternsForIntegrations(integrations) : [];
+  const disallowedTools =
+    runtimeConfig.runtime === "claude" ? unselectedConnectorDenyRules(integrations) : [];
+  const localMcpPrompt = runtimeConfig.runtime === "claude" ? localClaudeMcpExecutionPrompt(integrations) : "";
   const mcpServers = integrationServers;
   const secretTools = createSecretExecutionTools();
   const runtimeTools = [...draftTools, ...attachmentTools, ...skillTools, ...secretTools, ...integrationTools];
@@ -294,6 +311,7 @@ export async function spawnExecutionAgent(opts: SpawnExecutionAgentOpts): Promis
     "WebFetch",
     "Skill",
     ...Object.keys(mcpServers).flatMap((n) => [`mcp__${n}__*`]),
+    ...claudeProvidedPatterns,
     ...(draftTools.length ? ["mcp__boop-drafts__*"] : []),
     ...(attachmentTools.length ? [`mcp__${ATTACHMENTS_NAMESPACE}__*`] : []),
     `mcp__${SKILLS_NAMESPACE}__*`,
@@ -332,10 +350,12 @@ export async function spawnExecutionAgent(opts: SpawnExecutionAgentOpts): Promis
             MCP_AUTH_EXECUTION_PROMPT +
             (opts.integrations.includes(WEBTEST_INTEGRATION) ? WEBTEST_EXECUTION_PROMPT : "") +
             (opts.integrations.includes(IMPERSONATION_INTEGRATION) ? IMPERSONATION_EXECUTION_PROMPT : "") +
+            localMcpPrompt +
             buildSkillsSection(skillIndex),
           claudeMcpServers: mcpServers,
           tools: runtimeTools,
           allowedTools,
+          ...(disallowedTools.length ? { disallowedTools } : {}),
           abortController: entry.abort,
           mode: "execution",
           onText: async (text) => {

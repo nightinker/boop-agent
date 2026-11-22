@@ -6,9 +6,23 @@ export interface IntegrationModule {
   description: string;
   requiredEnv?: string[];
   isEnabled?: () => Promise<boolean>;
-  /** An in-process SDK server, or a remote (http) one such as an authenticated MCP server behind Boop's proxy. */
-  createServer: (ctx: IntegrationContext) => Promise<McpServerConfig>;
+  /**
+   * An in-process SDK server, a remote (http) one such as an authenticated MCP
+   * server behind Boop's proxy, or a server from the Mac's Claude config.
+   * Absent when the Claude process provides the tools itself (claudeToolPatterns).
+   */
+  createServer?: (ctx: IntegrationContext) => Promise<McpServerConfig>;
   createTools?: (ctx: IntegrationContext) => Promise<RuntimeTool[]>;
+  /**
+   * Claude runtime: tool-name patterns (e.g. "mcp__claude_ai_Slack__*") the
+   * sub-agent's Claude process already loads by itself, such as claude.ai
+   * connectors. They're allowed when the integration is selected.
+   */
+  claudeToolPatterns?: string[];
+  /** Extra instructions for the sub-agent when this integration is loaded. */
+  executionNote?: () => string;
+  /** Only for the owner's conversations (local machine access). */
+  ownerOnly?: boolean;
 }
 
 export interface IntegrationContext {
@@ -57,6 +71,10 @@ export async function loadIntegrations(): Promise<void> {
   // Last, so a remote MCP server never shadows a toolkit of the same name.
   const { registerMcpRemoteIntegrations } = await import("./mcp-remote-loader.js");
   await registerMcpRemoteIntegrations();
+  // After Boop's own remote MCP servers: one Boop authenticates wins over the
+  // same server in the Mac's Claude config.
+  const { registerLocalClaudeMcpIntegrations } = await import("./claude-local-loader.js");
+  await registerLocalClaudeMcpIntegrations();
   const loaded = [...registry.keys()];
   const enabled = (await listEnabledIntegrations()).map((i) => i.name);
   console.log(
@@ -85,6 +103,7 @@ export async function buildMcpServersForIntegrations(
       console.warn(`[integrations] unknown integration: ${name}`);
       continue;
     }
+    if (!mod.createServer) continue; // provided by the Claude process itself (claudeToolPatterns)
     if (mod.isEnabled && !(await mod.isEnabled())) {
       console.warn(`[integrations] skipped disabled integration: ${name}`);
       continue;
@@ -125,4 +144,22 @@ export async function buildRuntimeToolsForIntegrations(
     }
   }
   return out;
+}
+
+/** Claude runtime: allowedTools patterns for selected integrations the Claude process provides itself. */
+export function claudeToolPatternsForIntegrations(names: string[]): string[] {
+  return names.flatMap((name) => registry.get(name)?.claudeToolPatterns ?? []);
+}
+
+/** Drops owner-only integrations (local machine access) unless the conversation is the owner's. */
+export function filterIntegrationsForOwner(names: string[], owner: boolean): string[] {
+  if (owner) return names;
+  return names.filter((name) => {
+    const mod = registry.get(name);
+    if (mod?.ownerOnly) {
+      console.warn(`[integrations] ${name} is owner-only; not given to this conversation's agent`);
+      return false;
+    }
+    return true;
+  });
 }
