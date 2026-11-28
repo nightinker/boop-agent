@@ -8,6 +8,11 @@ Format:
 
 ---
 
+## Unreleased — Replies read like mobile texts
+
+- Changed: the dispatcher's replies on iMessage lead with the answer in 1-3 short sentences: no recap, no restating the question, no summary of what Boop or a sub-agent did, no headers, no long lists unless asked. Files and links are just given; when Boop needs input it asks one short question. It goes longer only when the owner asks ("explain", "more detail", "walk me through it").
+- Changed: each spawn_agent result the dispatcher relays carries a short reminder of these rules (a "fuller answer is fine" variant when the owner's message asks for detail). Sources/URLs from sub-agents still pass through verbatim.
+
 ## Unreleased — Sub-agents use the Mac's Claude MCP servers
 
 - Added: the MCP servers of the owner's Claude on the Mac are spawn_agent integrations, by server name: `~/.claude.json` servers (user scope, and local scope for Boop's folder), the project's `.mcp.json`, and claude.ai connectors (as `claude-ai-<name>`, e.g. `claude-ai-slack`). A name already taken by another integration gets `-claude` appended; a server Boop authenticates itself (`start_mcp_auth`) keeps precedence. Owner only.

@@ -73,6 +73,7 @@ import {
 import { burstNote, heldReplyNote, historyBeforeTurn, parallelTurnsNote, turnPrompt } from "./parallel-turns.js";
 import { redactPhoneNumbers } from "./privacy.js";
 import { OutboundImageCollector, type OutboundImage } from "./images/outbound.js";
+import { REPLY_STYLE_PROMPT, relayReminder, wantsDetailedReply } from "./reply-style.js";
 import {
   isUsageLimitError,
   logSuppressedUsageLimit,
@@ -84,10 +85,10 @@ You are a DISPATCHER, not a doer. Your job:
 1. Understand what the user wants.
 2. Decide: answer directly (quick facts, chit-chat, anything you already know) OR spawn_agent (real work that needs tools like email, calendar, web, etc.).
 3. When you spawn, give the agent a crisp, specific task — not the raw user message.
-4. When the agent returns, relay the result in YOUR voice, tightened for iMessage.
+4. When the agent returns, relay the result in YOUR voice, as a short mobile text (see Reply style).
 
 Tone: Warm, witty, concise. Write like you're texting a friend. No corporate voice. No bullet dumps unless the user asked for a list.
-
+${REPLY_STYLE_PROMPT}
 Your only tools:
 - recall / write_memory (durable memory for this user)
 - list_claude_sessions / continue_claude_session (the owner's Claude sessions on the Mac: Claude Code from the terminal or desktop Code tab, and Claude desktop Cowork tasks, each labelled by source: when they ask what they were working on or want to pick something up, list, say which are Code and which are Cowork, SUGGEST the likeliest one by its title / last prompt, and continue it only after they confirm; forks by default, Cowork tasks always fork; if it can't be resumed, pass the reason on plainly)
@@ -175,8 +176,9 @@ When relaying a sub-agent's answer:
   add, remove, paraphrase, or summarize URLs.
 - If the sub-agent did NOT include a Sources section, YOU DO NOT ADD ONE.
   Do not write "Sources: Lonely Planet, etc." No exceptions.
-- You may tighten the body for iMessage (shorter bullets, fewer emojis),
-  but the URLs are ground truth — don't touch them.
+- Cut the body down to the answer (Reply style: 1-3 short sentences, no
+  recap of the task or of the agent's steps), but the URLs are ground
+  truth — don't touch them.
 
 Phone-number privacy:
 - Never include phone numbers in user-facing replies, even if a tool or
@@ -338,7 +340,10 @@ photo), say so in the spawn_agent task ("attach the chart as an image"). The
 spawn_agent result tells you which images will be delivered with your reply;
 mention them briefly and never invent attachments it didn't report.
 
-Format: Plain iMessage-friendly text. Markdown sparingly. Keep replies under ~400 chars when you can.`;
+Format: Plain iMessage-friendly text, no headers, Markdown sparingly. Default to 1-3 short sentences (well under ~400 chars, Sources aside); go longer only when the owner asks for detail.`;
+
+/** The dispatcher system prompt before per-turn placeholders are filled. Exported for tests. */
+export const INTERACTION_SYSTEM_PROMPT = INTERACTION_SYSTEM;
 
 interface HandleOpts {
   conversationId: string;
@@ -815,7 +820,8 @@ export async function handleUserMessageWithAttachments(
         }
         return runtimeText(
           `[agent ${res.agentId} ${res.status}]\n\n${redactSecrets(redactPhoneNumbers(res.result))}` +
-            describeSpawnAttachments(attached, dropped),
+            describeSpawnAttachments(attached, dropped) +
+            relayReminder(wantsDetailedReply(opts.content)),
         );
       },
     ),
